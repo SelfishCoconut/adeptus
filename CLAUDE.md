@@ -6,7 +6,8 @@ Locally-deployable AI-assisted pentest platform. See `docs/requirements.md` for 
 - Backend: Python 3.12, FastAPI (async), SQLAlchemy 2.x async, Alembic, Pydantic v2, pytest
 - Frontend: Vite + React 18 + TypeScript (strict), TanStack Query, Zustand, Tailwind, shadcn/ui, Vitest + RTL, Playwright
 - DB: PostgreSQL 16 + pgvector
-- LLM (local): Ollama, default `qwen2.5:7b-instruct-q4_K_M`. Cloud: Anthropic Claude API (optional, per-engagement).
+- LLM (local): Ollama, default `qwen3.5:9b
+`. Cloud: Anthropic Claude API (optional, per-engagement).
 - MCP: stdio subprocesses per tool category. See `docs/architecture.md`.
 
 ## Commands (run from repo root)

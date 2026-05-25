@@ -11,6 +11,7 @@ repos:
         args: [--maxkb=500]
       - id: check-merge-conflict
       - id: detect-private-key
+        exclude: ^docs/requirements\.md$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.0

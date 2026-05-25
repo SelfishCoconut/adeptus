@@ -995,7 +995,8 @@ None blocking. A few worth answering before slice 00 if convenient:
 1. **Admin bootstrapping.** First-time setup: env-var seeded admin, or interactive CLI on first boot? (Affects slice 00.)
 2. **Session storage.** Server-side sessions in Postgres, or signed cookies? (FastAPI default is the latter but you said "long-lived sessions for days" which leans server-side for revocability.)
 3. **Frontend testing depth.** Vitest unit + Playwright E2E is the plan. Want React Testing Library on top for component tests, or skip and lean on E2E for UI behavior?
-4. **Ollama default model.** Pin a specific one in `docker-compose.yml`? (e.g., `llama3.2:3b-instruct-q4_K_M` for speed, `qwen2.5:7b-instruct-q4_K_M` for quality.)
+4. **Ollama default model.** Pin a specific one in `docker-compose.yml`? (e.g., `llama3.2:3b-instruct-q4_K_M` for speed, `qwen3.5:9b
+` for quality.)
 5. **License header.** Apache-2.0? MIT? None? (Trivial but easier to set on day 0 than retrofit across 200 files.)
 
 These can be ADRs after slice 00 or answered now — your call.

@@ -37,7 +37,10 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": ".claude/hooks/session-start.sh" }
+          {
+            "type": "command",
+            "command": ".claude/hooks/session-start.sh"
+          }
         ]
       }
     ],
@@ -45,7 +48,10 @@
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": ".claude/hooks/pre-bash-guard-with-logging.sh" }
+          {
+            "type": "command",
+            "command": ".claude/hooks/pre-bash-guard-with-logging.sh"
+          }
         ]
       }
     ],
@@ -53,24 +59,45 @@
       {
         "matcher": "Write|Edit|str_replace_based_edit",
         "hooks": [
-          { "type": "command", "command": ".claude/hooks/post-edit-format.sh" },
-          { "type": "command", "command": ".claude/hooks/post-tool-problem-logger.sh" }
+          {
+            "type": "command",
+            "command": ".claude/hooks/post-edit-format.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/post-tool-problem-logger.sh"
+          }
         ]
       },
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": ".claude/hooks/post-edit-format.sh" },
-          { "type": "command", "command": ".claude/hooks/post-tool-problem-logger.sh" }
+          {
+            "type": "command",
+            "command": ".claude/hooks/post-edit-format.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/post-tool-problem-logger.sh"
+          }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": ".claude/hooks/stop-checkpoint.sh" }
+          {
+            "type": "command",
+            "command": ".claude/hooks/stop-checkpoint.sh"
+          }
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "feature-dev@claude-plugins-official": true,
+    "code-review@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": true
   }
 }

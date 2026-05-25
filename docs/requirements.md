@@ -511,4 +511,3 @@ These should guide every implementation decision:
 
    * v1 scope is web app testing,
    * but no architectural choice should make internal network mapping or lateral movement harder later.
-

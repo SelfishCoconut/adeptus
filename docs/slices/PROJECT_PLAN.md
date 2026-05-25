@@ -344,6 +344,7 @@ Things the requirements doc leaves open. Resolve via ADR before the relevant sli
 
 1. **Admin bootstrap mechanism** — env-var vs. interactive first-boot. (Default decision: env-var seeded; ADR-0002.)
 2. **Session storage** — server-side table vs. signed cookie. (Default decision: server-side; ADR-0003.)
-3. **Default Ollama model pin** — specific model + quantization. (Default: `qwen2.5:7b-instruct-q4_K_M`; ADR-0004.)
+3. **Default Ollama model pin** — specific model + quantization. (Default: `qwen3.5:9b
+`; ADR-0004.)
 4. **License** — Apache-2.0 chosen; ADR-0005 documents.
 5. **Frontend test depth** — RTL + Playwright split. (Default: RTL for components, Playwright for critical journeys only; ADR-0006.)

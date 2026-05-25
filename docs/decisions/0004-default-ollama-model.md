@@ -1,4 +1,5 @@
-# 0004. Default local LLM is qwen2.5:7b-instruct-q4_K_M
+# 0004. Default local LLM is qwen3.5:9b
+
 
 Date: 2026-05-24
 Status: Accepted
@@ -9,7 +10,8 @@ Requirements §5.1 specifies "Ollama with a small quantized model" as the defaul
 
 ## Decision
 
-The default model pinned in `docker-compose.yml` is `qwen2.5:7b-instruct-q4_K_M`. The model is configurable via the `ADEPTUS_LLM_MODEL` environment variable; the default is documented in the deployment runbook.
+The default model pinned in `docker-compose.yml` is `qwen3.5:9b
+`. The model is configurable via the `ADEPTUS_LLM_MODEL` environment variable; the default is documented in the deployment runbook.
 
 ## Consequences
 
