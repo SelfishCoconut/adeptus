@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.egg-info/
+dist/
+build/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
+.pnpm-store/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+!sandbox/*.pem
+
+# Local data
+data/
+uploads/
+backups/
+
+# Logs
+*.log
+logs/
+
+# Alembic local cache
+backend/alembic/__pycache__/
+
+# Claude Code local artifacts
+.claude/cache/
+.claude/local-settings.json
+
+# Problem log detail files (full stderr dumps — dev artifact, not source)
+docs/logs/details/
+!docs/logs/details/.gitkeep

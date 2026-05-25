@@ -1,0 +1,14 @@
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    container_name: adeptus-juice-shop
+    ports:
+      - "127.0.0.1:3000:3000"   # Bind to localhost only — never expose
+    restart: "no"
+    environment:
+      NODE_ENV: unsafe
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
