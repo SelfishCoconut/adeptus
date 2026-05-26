@@ -22,7 +22,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §2, §3 (auth minimal), §11.1, §11.2
 - **Depends on**: —
 - **Risky**: yes (auth)
-- **Status**: todo
+- **Status**: in-progress
 
 ### Slice 01: Engagement CRUD + membership
 - **Goal**: Create engagement, invite a user, list mine
