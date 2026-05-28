@@ -324,3 +324,19 @@ Yes — this slice touches authentication, session cookies, password hashing, an
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-05-26T20:55:43Z — cdb0e40 chore: post-bootstrap fixes
 - 2026-05-26T21:06:34Z — cdb0e40 chore: post-bootstrap fixes
+- 2026-05-26T21:11:00Z — 628dc21 chore(slice-00): start slice — spec + PROJECT_PLAN status
+- 2026-05-26T21:26:52Z — 36e2df1 chore(backend): scaffold pyproject.toml + ruff/mypy/pytest config
+- 2026-05-26T21:29:37Z — 36e2df1 chore(backend): scaffold pyproject.toml + ruff/mypy/pytest config
+- 2026-05-26T21:31:19Z — 36e2df1 chore(backend): scaffold pyproject.toml + ruff/mypy/pytest config
+- 2026-05-26T21:33:19Z — 2e6f3f4 feat(slice-00): add Settings pydantic-settings config from env
+- 2026-05-26T21:35:50Z — a256ced feat(slice-00): add async db engine + session factory
+- 2026-05-26T21:43:42Z — e406894 feat(slice-00): add core error handlers + domain exceptions
+- 2026-05-26T21:47:37Z — 3c2c463 chore(slice-00): scaffold auth feature folder (backend)
+- 2026-05-26T21:49:53Z — 896adb5 feat(slice-00): add User and Session ORM models
+- 2026-05-26T21:52:34Z — e6af7fd feat(slice-00): add auth Pydantic schemas (LoginRequest, UserMe)
+- 2026-05-26T22:41:33Z — f4f8291 feat(slice-00): add auth async repository
+- 2026-05-26T23:25:46Z — f34448b feat(slice-00): add auth service layer (argon2, admin bootstrap, accept-terms)
+- 2026-05-28T10:26:34Z — e387d8e feat(slice-00): add Alembic migration for users and sessions
+- 2026-05-28T12:12:45Z — e387d8e feat(slice-00): add Alembic migration for users and sessions
+- 2026-05-28T12:24:42Z — e387d8e feat(slice-00): add Alembic migration for users and sessions
+- 2026-05-28T16:57:37Z — 773360a fix(slice-00): harden auth security step gate
