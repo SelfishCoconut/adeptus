@@ -85,17 +85,15 @@ def _make_settings(*, pw_hash: str = "$argon2id$v=19$m=65536,t=3,p=4$abc$def") -
 
 
 async def test_bootstrap_admin_creates_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No existing admin user → create_user called once with role='admin'."""
+    """No existing admin user → create_admin_if_absent called once, returns the new User."""
     ph = PasswordHasher()
     valid_hash = ph.hash("irrelevant-at-bootstrap")
     settings = _make_settings(pw_hash=valid_hash)
 
     monkeypatch.setattr(service, "get_settings", lambda: settings)
-    mock_get = AsyncMock(return_value=None)
     created_user = _make_user(password_hash=valid_hash)
     mock_create = AsyncMock(return_value=created_user)
-    monkeypatch.setattr(service.repo, "get_user_by_username", mock_get)
-    monkeypatch.setattr(service.repo, "create_user", mock_create)
+    monkeypatch.setattr(service.repo, "create_admin_if_absent", mock_create)
 
     db = AsyncMock()
     result = await service.bootstrap_admin(db)
@@ -105,36 +103,31 @@ async def test_bootstrap_admin_creates_once(monkeypatch: pytest.MonkeyPatch) -> 
         db,
         username="admin",
         password_hash=valid_hash,
-        role="admin",
     )
 
 
 async def test_bootstrap_admin_noop_when_users_exist(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Admin username already present → return None, create_user never called."""
-    existing = _make_user()
+    """Admin username already present → create_admin_if_absent returns None (no-op)."""
     settings = _make_settings()
 
     monkeypatch.setattr(service, "get_settings", lambda: settings)
-    mock_get = AsyncMock(return_value=existing)
-    mock_create = AsyncMock()
-    monkeypatch.setattr(service.repo, "get_user_by_username", mock_get)
-    monkeypatch.setattr(service.repo, "create_user", mock_create)
+    mock_create = AsyncMock(return_value=None)
+    monkeypatch.setattr(service.repo, "create_admin_if_absent", mock_create)
 
     db = AsyncMock()
     result = await service.bootstrap_admin(db)
 
     assert result is None
-    mock_create.assert_not_awaited()
+    mock_create.assert_awaited_once()
 
 
 async def test_bootstrap_admin_rejects_plaintext_hash(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Settings hash is plaintext → ValidationError raised, no user created."""
+    """Settings hash is plaintext → ValidationError raised before any insert is attempted."""
     settings = _make_settings(pw_hash="plaintext-not-argon2")
 
     monkeypatch.setattr(service, "get_settings", lambda: settings)
-    monkeypatch.setattr(service.repo, "get_user_by_username", AsyncMock(return_value=None))
     mock_create = AsyncMock()
-    monkeypatch.setattr(service.repo, "create_user", mock_create)
+    monkeypatch.setattr(service.repo, "create_admin_if_absent", mock_create)
 
     db = AsyncMock()
     with pytest.raises(ValidationError):

@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
@@ -35,6 +36,30 @@ async def create_user(
     db.add(user)
     await db.flush()
     return user
+
+
+async def create_admin_if_absent(
+    db: AsyncSession,
+    *,
+    username: str,
+    password_hash: str,
+) -> User | None:
+    """Atomically create the admin user, or no-op if the username already exists.
+
+    Uses INSERT ... ON CONFLICT DO NOTHING so two backend processes starting
+    concurrently cannot race into a duplicate-insert error (slice-00 security
+    gate / ADR-0003). Returns the newly-created User, or None if it already
+    existed. The conflict target is the unique ix_users_username index.
+    """
+    stmt = (
+        pg_insert(User)
+        .values(username=username, password_hash=password_hash, role="admin")
+        .on_conflict_do_nothing(index_elements=["username"])
+    )
+    result = await db.execute(stmt)
+    if not result.rowcount:  # type: ignore[attr-defined]
+        return None
+    return await get_user_by_username(db, username)
 
 
 async def update_terms_accepted(db: AsyncSession, user_id: UUID) -> User:

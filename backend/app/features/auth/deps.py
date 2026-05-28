@@ -17,24 +17,25 @@ async def get_current_session(
     db: Annotated[AsyncSession, Depends(get_db)],
     session_id: Annotated[str | None, Cookie(alias="session_id")] = None,
 ) -> Session:
-    """Resolve the request's session cookie to a Session. Raises AuthenticationError if:
-    - No session_id cookie is present.
-    - The session row doesn't exist in the database.
-    - The session has expired.
+    """Resolve the request's session cookie to a Session. Raises AuthenticationError if the
+    cookie is missing, the session row doesn't exist, or the session has expired.
+
+    All failure paths return the same generic message: distinguishing "no cookie" from
+    "unknown session" from "expired" would hand an attacker a session-state oracle.
     """
     if session_id is None:
         raise AuthenticationError("Not authenticated")
 
     session = await repo.get_session(db, session_id)
     if session is None:
-        raise AuthenticationError("Session not found")
+        raise AuthenticationError("Not authenticated")
 
     now = datetime.now(UTC)
     exp = session.expires_at
     if exp.tzinfo is None:
         exp = exp.replace(tzinfo=UTC)
     if exp <= now:
-        raise AuthenticationError("Session expired")
+        raise AuthenticationError("Not authenticated")
 
     return session
 
@@ -46,5 +47,5 @@ async def get_current_user(
     """Resolve the current session to a User. Raises AuthenticationError if user not found."""
     user = await repo.get_user_by_id(db, cast(UUID, session.user_id))
     if user is None:
-        raise AuthenticationError("User not found")
+        raise AuthenticationError("Not authenticated")
     return user

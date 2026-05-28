@@ -45,18 +45,18 @@ async def authenticate_user(db: AsyncSession, *, username: str, password: str) -
 async def bootstrap_admin(db: AsyncSession) -> User | None:
     """Idempotently create the admin user from settings.
 
-    - If the configured admin username already exists, return None (already bootstrapped).
-    - Otherwise, validate the configured ADEPTUS_ADMIN_PASSWORD_HASH and insert the admin row.
+    - Validate ADEPTUS_ADMIN_PASSWORD_HASH first (fail loudly on a non-argon2 value,
+      even on a restart where the admin already exists — catches a misconfigured env
+      var before it produces a silently unloginable account).
+    - Atomically insert the admin via INSERT ... ON CONFLICT DO NOTHING, so concurrent
+      startups cannot race (slice-00 security gate). Returns the new User, or None if
+      the admin already existed.
     - Caller is responsible for committing (this is service-layer, not router-layer).
 
-    Validation: the hash must start with "$argon2" — fail loudly otherwise (ValidationError).
+    Validation: the hash must start with "$argon2" — raises ValidationError otherwise.
     This catches the common mistake of placing a plaintext password in the env var.
     """
     settings = get_settings()
-    existing = await repo.get_user_by_username(db, settings.ADEPTUS_ADMIN_USER)
-    if existing is not None:
-        return None
-
     pw_hash = settings.ADEPTUS_ADMIN_PASSWORD_HASH
     if not pw_hash.startswith("$argon2"):
         raise ValidationError(
@@ -64,11 +64,10 @@ async def bootstrap_admin(db: AsyncSession) -> User | None:
             "(should start with $argon2). Refusing to create an unloginable admin."
         )
 
-    return await repo.create_user(
+    return await repo.create_admin_if_absent(
         db,
         username=settings.ADEPTUS_ADMIN_USER,
         password_hash=pw_hash,
-        role="admin",
     )
 
 

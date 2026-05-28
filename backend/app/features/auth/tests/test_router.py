@@ -150,10 +150,13 @@ async def test_login_sets_cookie(
         )
 
     assert resp.status_code == 200
-    # Cookie is in the Set-Cookie header.
+    # Cookie is in the Set-Cookie header with the required security attributes.
     set_cookie = resp.headers.get("set-cookie", "")
+    lowered = set_cookie.lower()
     assert "session_id=" in set_cookie
-    assert "HttpOnly" in set_cookie or "httponly" in set_cookie.lower()
+    assert "httponly" in lowered
+    assert "secure" in lowered
+    assert "samesite=lax" in lowered
 
     body = resp.json()
     assert "id" in body
