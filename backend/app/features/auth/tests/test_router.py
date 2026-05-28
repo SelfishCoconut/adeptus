@@ -207,7 +207,7 @@ async def test_logout_clears_cookie_and_deletes_session(
             or "session_id=;" in set_cookie_after
         )
         assert cookie_cleared, (
-            f"Cookie not cleared: cookies={dict(client.cookies)!r}, " f"header={set_cookie_after!r}"
+            f"Cookie not cleared: cookies={dict(client.cookies)!r}, header={set_cookie_after!r}"
         )
 
         # After logout the cookie is gone from the jar; GET /me should return 401.
