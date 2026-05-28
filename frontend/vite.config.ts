@@ -11,6 +11,15 @@ export default defineConfig({
       '@': path.resolve(import.meta.dirname, 'src'),
     },
   },
+  server: {
+    proxy: {
+      // Keep the browser same-origin in dev; backend serves under /api/v1.
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
+  },
   test: {
     globals: true,
     environment: 'jsdom',
