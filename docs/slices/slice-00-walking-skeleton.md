@@ -340,3 +340,6 @@ Yes — this slice touches authentication, session cookies, password hashing, an
 - 2026-05-28T12:12:45Z — e387d8e feat(slice-00): add Alembic migration for users and sessions
 - 2026-05-28T12:24:42Z — e387d8e feat(slice-00): add Alembic migration for users and sessions
 - 2026-05-28T16:57:37Z — 773360a fix(slice-00): harden auth security step gate
+- 2026-05-28T17:02:14Z — 4c8b182 docs(slice-00): append progress checkpoint log
+- 2026-05-28T17:14:22Z — 4c8b182 docs(slice-00): append progress checkpoint log
+- 2026-05-28T18:43:04Z — 34072ed fix(slice-00): address frontend auth security review (FE8 step gate)
