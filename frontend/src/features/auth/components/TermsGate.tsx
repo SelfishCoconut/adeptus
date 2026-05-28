@@ -6,6 +6,10 @@ import { useAcceptTerms, useMe } from '../api'
 const TERMS_TEXT =
   'By using Adeptus you agree to use it only on systems you have explicit written permission to test.'
 
+// UX gate only — NOT a security boundary. A JS attacker can render the
+// children regardless. Real enforcement is server-side: terms_accepted_at is
+// recorded by POST /accept-terms and returned on every /me, and any future
+// data endpoint must enforce it on the backend.
 export function TermsGate({ children }: { children: ReactNode }) {
   const me = useMe()
   const acceptTerms = useAcceptTerms()

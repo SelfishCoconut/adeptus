@@ -51,7 +51,10 @@ export function useLogout() {
       }
     },
     onSuccess: () => {
-      queryClient.setQueryData(meQueryKey, null)
+      // Drop ALL cached server data on logout, not just `me`, so nothing
+      // (including engagement-scoped queries added by later slices) survives
+      // in memory for the next user on a shared machine.
+      queryClient.clear()
     },
   })
 }

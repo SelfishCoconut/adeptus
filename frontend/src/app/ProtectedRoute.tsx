@@ -10,6 +10,9 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
   if (me.isPending) {
     return null
   }
+  // Fail closed: no data means 401, expiry, OR a network error. All three
+  // redirect to /login. Do not add an error-specific branch that renders the
+  // workspace — losing the session for any reason must not show protected UI.
   if (!me.data) {
     return <Navigate to="/login" replace />
   }
