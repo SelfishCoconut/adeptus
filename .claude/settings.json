@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/session-start.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh\""
           }
         ]
       }
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pre-bash-guard-with-logging.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-bash-guard-with-logging.sh\""
           }
         ]
       }
@@ -61,11 +61,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/post-edit-format.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit-format.sh\""
           },
           {
             "type": "command",
-            "command": ".claude/hooks/post-tool-problem-logger.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/post-tool-problem-logger.sh\""
           }
         ]
       },
@@ -74,11 +74,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/post-edit-format.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit-format.sh\""
           },
           {
             "type": "command",
-            "command": ".claude/hooks/post-tool-problem-logger.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/post-tool-problem-logger.sh\""
           }
         ]
       }
@@ -88,7 +88,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/stop-checkpoint.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/stop-checkpoint.sh\""
           }
         ]
       }
