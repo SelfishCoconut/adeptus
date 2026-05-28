@@ -18,6 +18,7 @@ Locally-deployable AI-assisted pentest platform. See `docs/requirements.md` for 
 - `make lint`           — ruff + mypy + eslint + tsc --noEmit
 - `make format`         — ruff format + prettier
 - `make migrate`        — alembic upgrade head
+- `make generate-api`   — regenerate the typed OpenAPI client (frontend) from the backend
 - `make sandbox`        — bring up Juice Shop on http://localhost:3000
 
 ## Conventions — Backend
@@ -31,7 +32,7 @@ Locally-deployable AI-assisted pentest platform. See `docs/requirements.md` for 
 ## Conventions — Frontend
 - TypeScript strict. No `any`. Use `unknown` + narrowing.
 - TanStack Query for server state. Zustand for ephemeral client state. No Redux.
-- API client auto-generated from OpenAPI into `frontend/src/shared/api/`. Don't hand-write.
+- API client auto-generated from OpenAPI into `frontend/src/shared/api/`. Don't hand-write `schema.ts`. Run `make generate-api` after backend contract changes (dumps the spec to `frontend/openapi.json` and regenerates types); the snapshot is committed so CI needs no live backend. The typed `openapi-fetch` client lives in `shared/api/client.ts` (`baseUrl` = origin only; the `/api/v1` prefix is in the generated paths).
 - Tailwind classes only — no inline styles, no styled-components.
 - Component tests: Vitest + React Testing Library colocated as `*.test.tsx`. E2E in `frontend/playwright/` for critical journeys only.
 
