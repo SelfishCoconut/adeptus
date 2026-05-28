@@ -7,6 +7,10 @@ vi.mock('./HealthIndicator', () => ({
   HealthIndicator: () => <div data-testid="health-indicator" />,
 }))
 
+vi.mock('@/components/theme/ModeToggle', () => ({
+  ModeToggle: () => <button type="button">Toggle theme</button>,
+}))
+
 describe('WorkspaceShell', () => {
   it('renders the top bar (username, role, logout, health) and three panes', () => {
     render(<WorkspaceShell username="alice" role="admin" onLogout={vi.fn()} />)

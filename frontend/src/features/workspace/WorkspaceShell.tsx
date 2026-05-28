@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button'
+import { ModeToggle } from '@/components/theme/ModeToggle'
 import { HealthIndicator } from './HealthIndicator'
 
 interface WorkspaceShellProps {
@@ -26,6 +27,7 @@ export function WorkspaceShell({
           <span className="rounded bg-secondary px-2 py-0.5 text-xs uppercase text-secondary-foreground">
             {role}
           </span>
+          <ModeToggle />
           <Button variant="outline" size="sm" onClick={onLogout} disabled={isLoggingOut}>
             {isLoggingOut ? 'Logging out…' : 'Logout'}
           </Button>
