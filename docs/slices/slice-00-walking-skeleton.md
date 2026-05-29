@@ -381,3 +381,29 @@ default), and no login rate-limiting (belongs to a later hardening slice).
 **Open — manual acceptance:** the live `https://localhost` login → workspace round-trip
 must be exercised with the Docker daemon running (`make dev`); it was not run in the
 authoring session because no daemon was available there.
+
+### Second review round (2026-05-30)
+
+Re-ran code-reviewer + security-reviewer on the integration + fixes. All blocking
+findings resolved:
+
+- **T5 (security, HIGH)** — backend published `0.0.0.0:8000`, exposing the plaintext API
+  to the LAN past the TLS edge. Now bound to `127.0.0.1:8000`.
+- **W2 (code review)** — `web` depended on `backend` with no healthcheck → 502 race on
+  cold start. Added a backend healthcheck; `web` now waits on `condition: service_healthy`.
+- **W1 completion** — router tests hardcoded `"session_id"`; now derive the name from
+  `get_settings().SESSION_COOKIE_NAME`.
+- **A6 (MEDIUM)** — dropped the user UUID from the accept-terms 404 message.
+- **T9 / N1 / N2 / headers** — `.env` excluded from build context; cookie attributes
+  single-sourced; `openssl` removed from the final image; `nosniff`/`X-Frame-Options`/
+  `ssl_ciphers` added. HSTS consciously deferred to Slice 39 (would pin browsers to a
+  distrusted self-signed cert).
+- **Compose env interpolation bug (found during validation)** — docker compose expands
+  `$` in env_file values, which mangled the argon2 admin hash and would break login.
+  Fixed by `$$`-escaping the hash in `.env`/`.env.example`; verified via
+  `docker compose config` that the container receives the correct single-`$` hash.
+
+Deferred (non-blocking, tracked as follow-ups): explicit HSTS + CSP (Slice 39 TLS
+hardening), login rate-limiting, `POSTGRES_PASSWORD` in compose, ProtectedRoute loading
+state. Line 55 of `auth/deps.py` (user-row-gone guard) is left uncovered — the FK makes
+the state near-unreachable.
