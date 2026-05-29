@@ -31,6 +31,9 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      # Anonymous volume masks the in-image .venv so the container never writes its
+      # (root-owned, container-specific) virtualenv back onto the host bind mount.
+      - /app/.venv
     # Bind to loopback only: all external traffic must go through the TLS edge
     # (web) on 443. Exposing 8000 on 0.0.0.0 would let the LAN reach the plaintext
     # API directly, bypassing TLS. 127.0.0.1 keeps host-side tooling working.

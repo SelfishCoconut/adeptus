@@ -42,7 +42,7 @@ format:
 	cd frontend && pnpm prettier --write .
 
 migrate:
-	cd backend && uv run alembic upgrade head
+	docker compose run --rm backend uv run alembic upgrade head
 
 generate-api:
 	cd backend && uv run python -c "import json; from app.main import app; print(json.dumps(app.openapi(), indent=2))" > ../frontend/openapi.json
