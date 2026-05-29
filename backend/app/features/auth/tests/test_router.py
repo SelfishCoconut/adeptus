@@ -11,6 +11,7 @@ SQLite patches (UUID server default, INET type) mirror conftest.py.
 from __future__ import annotations
 
 import datetime
+import re
 from collections.abc import AsyncGenerator
 from typing import cast
 from uuid import UUID, uuid4
@@ -159,6 +160,12 @@ async def test_login_sets_cookie(
     assert "httponly" in lowered
     assert "secure" in lowered
     assert "samesite=lax" in lowered
+    # Cookie lifetime tracks the session TTL via Max-Age (not an absolute epoch fed to
+    # `expires`, which Starlette would treat as seconds-from-now -> decades-long cookie).
+    match = re.search(r"max-age=(\d+)", lowered)
+    assert match is not None, f"no Max-Age in Set-Cookie: {set_cookie!r}"
+    expected = get_settings().SESSION_TTL_DAYS * 86400
+    assert abs(int(match.group(1)) - expected) <= 60
 
     body = resp.json()
     assert "id" in body

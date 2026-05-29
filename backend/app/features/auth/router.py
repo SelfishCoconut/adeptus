@@ -27,14 +27,20 @@ _COOKIE_PATH = "/"
 
 
 def _set_session_cookie(response: Response, session_id: str, expires_at: datetime) -> None:
-    """Set the session cookie with security attributes."""
+    """Set the session cookie with security attributes.
+
+    Use max_age (seconds until expiry) rather than passing an absolute epoch to the
+    `expires` int param: Starlette interprets an int `expires` as seconds-from-now, so
+    an absolute timestamp would yield a decades-long cookie lifetime.
+    """
+    max_age = int((expires_at - datetime.now(UTC)).total_seconds())
     response.set_cookie(
         key=get_settings().SESSION_COOKIE_NAME,
         value=session_id,
         httponly=_COOKIE_HTTPONLY,
         secure=_COOKIE_SECURE,
         samesite=_COOKIE_SAMESITE,
-        expires=int(expires_at.timestamp()),
+        max_age=max_age,
         path=_COOKIE_PATH,
     )
 
