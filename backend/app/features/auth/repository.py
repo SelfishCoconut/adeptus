@@ -70,7 +70,9 @@ async def update_terms_accepted(db: AsyncSession, user_id: UUID) -> User:
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
     if user is None:
-        raise NotFoundError(f"User {user_id} not found")
+        # Don't interpolate the UUID: the handler echoes the message to the client,
+        # and internal identifiers shouldn't leak into response bodies.
+        raise NotFoundError("User not found")
     return user
 
 

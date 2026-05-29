@@ -2,7 +2,7 @@
 
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,30 +17,36 @@ from app.features.auth.schemas import LoginRequest, UserMe
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
+# Single source of truth for the session cookie's security attributes so that the
+# set and clear paths can never drift apart (a mismatch can leave a cookie the
+# browser won't delete). HttpOnly + Secure + SameSite=Lax per ADR-0003/ADR-0007.
+_COOKIE_HTTPONLY = True
+_COOKIE_SECURE = True
+_COOKIE_SAMESITE: Literal["lax"] = "lax"
+_COOKIE_PATH = "/"
+
 
 def _set_session_cookie(response: Response, session_id: str, expires_at: datetime) -> None:
     """Set the session cookie with security attributes."""
-    settings = get_settings()
     response.set_cookie(
-        key=settings.SESSION_COOKIE_NAME,
+        key=get_settings().SESSION_COOKIE_NAME,
         value=session_id,
-        httponly=True,
-        secure=True,
-        samesite="lax",
+        httponly=_COOKIE_HTTPONLY,
+        secure=_COOKIE_SECURE,
+        samesite=_COOKIE_SAMESITE,
         expires=int(expires_at.timestamp()),
-        path="/",
+        path=_COOKIE_PATH,
     )
 
 
 def _clear_session_cookie(response: Response) -> None:
-    """Clear the session cookie."""
-    settings = get_settings()
+    """Clear the session cookie using the same attributes it was set with."""
     response.delete_cookie(
-        key=settings.SESSION_COOKIE_NAME,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        path="/",
+        key=get_settings().SESSION_COOKIE_NAME,
+        httponly=_COOKIE_HTTPONLY,
+        secure=_COOKIE_SECURE,
+        samesite=_COOKIE_SAMESITE,
+        path=_COOKIE_PATH,
     )
 
 
