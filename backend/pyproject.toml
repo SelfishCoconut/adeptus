@@ -62,3 +62,9 @@ asyncio_mode = "auto"
 markers = [
     "integration: mark test as requiring real external services (postgres, ollama)",
 ]
+
+[tool.coverage.run]
+# SQLAlchemy 2.x async bridges sync/async via greenlets; without tracking greenlet
+# context, coverage misses lines that execute after an awaited DB call (e.g. the
+# happy-path returns in auth/deps.py), under-reporting code that tests do exercise.
+concurrency = ["greenlet", "thread"]
