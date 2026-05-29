@@ -23,6 +23,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import Column, ColumnDefault, Text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.config import get_settings
 from app.core.db import Base, get_db
 from app.core.errors import register_error_handlers
 from app.features.auth import models  # noqa: F401 — registers ORM metadata
@@ -151,9 +152,10 @@ async def test_login_sets_cookie(
 
     assert resp.status_code == 200
     # Cookie is in the Set-Cookie header with the required security attributes.
+    cookie_name = get_settings().SESSION_COOKIE_NAME
     set_cookie = resp.headers.get("set-cookie", "")
     lowered = set_cookie.lower()
-    assert "session_id=" in set_cookie
+    assert f"{cookie_name}=" in set_cookie
     assert "httponly" in lowered
     assert "secure" in lowered
     assert "samesite=lax" in lowered
@@ -192,7 +194,8 @@ async def test_logout_clears_cookie_and_deletes_session(
             json={"username": "admin", "password": "correcthorse"},
         )
         assert login_resp.status_code == 200
-        assert "session_id" in client.cookies
+        cookie_name = get_settings().SESSION_COOKIE_NAME
+        assert cookie_name in client.cookies
 
         # Logout.
         logout_resp = await client.post("/api/v1/auth/logout")
@@ -201,10 +204,10 @@ async def test_logout_clears_cookie_and_deletes_session(
         # Cookie should be cleared: either removed from jar or have max-age=0.
         set_cookie_after = logout_resp.headers.get("set-cookie", "")
         cookie_cleared = (
-            "session_id" not in client.cookies
+            cookie_name not in client.cookies
             or "max-age=0" in set_cookie_after.lower()
-            or 'session_id=""' in set_cookie_after
-            or "session_id=;" in set_cookie_after
+            or f'{cookie_name}=""' in set_cookie_after
+            or f"{cookie_name}=;" in set_cookie_after
         )
         assert cookie_cleared, (
             f"Cookie not cleared: cookies={dict(client.cookies)!r}, header={set_cookie_after!r}"
@@ -255,7 +258,7 @@ async def test_me_401_expired_session(
         await session.commit()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
-        client.cookies.set("session_id", session_id)
+        client.cookies.set(get_settings().SESSION_COOKIE_NAME, session_id)
         resp = await client.get("/api/v1/auth/me")
 
     assert resp.status_code == 401
@@ -268,7 +271,10 @@ async def test_me_401_unknown_session(
     """A cookie carrying a session id with no matching row (forged or stale) is rejected."""
     app, _ = app_and_db
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
-        client.cookies.set("session_id", "no_such_session_id_000000000000000000000000000000")
+        client.cookies.set(
+            get_settings().SESSION_COOKIE_NAME,
+            "no_such_session_id_000000000000000000000000000000",
+        )
         resp = await client.get("/api/v1/auth/me")
 
     assert resp.status_code == 401
