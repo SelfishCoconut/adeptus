@@ -407,3 +407,31 @@ Deferred (non-blocking, tracked as follow-ups): explicit HSTS + CSP (Slice 39 TL
 hardening), login rate-limiting, `POSTGRES_PASSWORD` in compose, ProtectedRoute loading
 state. Line 55 of `auth/deps.py` (user-row-gone guard) is left uncovered — the FK makes
 the state near-unreachable.
+
+### Live verification (2026-05-30, Docker daemon available)
+
+Brought the full stack up (`docker compose up -d --build`) and exercised the round-trip
+over the TLS edge. **All acceptance paths pass:**
+
+- `https://localhost/api/v1/health` → `{"status":"ok","version":"0.1.0"}` (frontend edge →
+  backend round-trip live over HTTPS); SPA served at `/`; `http://` → `301` to `https://`.
+- Admin bootstrap created `admin` with the correct (un-mangled) argon2 hash — confirms the
+  `$$`-escaping fix end-to-end.
+- Wrong password → `401`; correct login → `200` + `Set-Cookie: HttpOnly; SameSite=lax;
+  Secure`; `GET /me` → `200`; `accept-terms` → `200`; `logout` → `204`; `/me` after logout
+  → `401`.
+
+Two bugs found and fixed during live verification:
+
+1. **Session cookie lifetime** — emitted with `Expires=2082` (decades) because an absolute
+   epoch was passed to Starlette's int `expires` (treated as seconds-from-now). Switched to
+   `max_age`; re-verified `Max-Age=1209599` (~14d). Server-side TTL was always correct, so
+   this was a cookie-lifetime correctness bug, not an auth bypass.
+2. **`make migrate`** failed from a clean checkout (alembic ran in `backend/` where the
+   repo-root `.env` isn't visible). Now runs inside the backend container via
+   `docker compose run`. Added an anonymous `/app/.venv` volume so the container's
+   root-owned virtualenv can't clobber the host bind mount.
+
+Note: local `.env` `ADEPTUS_ADMIN_PASSWORD_HASH` was set to a known test value during
+verification (admin / `adeptus-admin`); rotate it for real use.
+- 2026-05-29T22:14:02Z — 493da0a chore(slice-00): mark slice 00 done in PROJECT_PLAN
