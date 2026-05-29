@@ -1,6 +1,5 @@
 import { useNavigate } from 'react-router-dom'
 import { useLogout, useMe } from '@/features/auth/api'
-import { useAuthStore } from '@/features/auth/store'
 import { TermsGate } from '@/features/auth/components/TermsGate'
 import { WorkspaceShell } from '@/features/workspace/WorkspaceShell'
 
@@ -8,7 +7,6 @@ export function WorkspacePage() {
   const navigate = useNavigate()
   const me = useMe()
   const logout = useLogout()
-  const setUser = useAuthStore((state) => state.setUser)
 
   // ProtectedRoute already ensures a user is present; this narrows the type.
   if (!me.data) {
@@ -17,10 +15,8 @@ export function WorkspacePage() {
 
   function handleLogout() {
     logout.mutate(undefined, {
-      onSuccess: () => {
-        setUser(null)
-        navigate('/login')
-      },
+      // useLogout clears the entire query cache on success.
+      onSuccess: () => navigate('/login'),
     })
   }
 

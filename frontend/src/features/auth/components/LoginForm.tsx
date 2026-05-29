@@ -5,12 +5,10 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useLogin } from '../api'
-import { useAuthStore } from '../store'
 
 export function LoginForm() {
   const navigate = useNavigate()
   const login = useLogin()
-  const setUser = useAuthStore((state) => state.setUser)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
 
@@ -19,8 +17,9 @@ export function LoginForm() {
     login.mutate(
       { username, password },
       {
-        onSuccess: (user) => {
-          setUser(user)
+        onSuccess: () => {
+          // useLogin already seeds the `me` query cache (the session source of
+          // truth); just route into the workspace.
           navigate('/workspace')
         },
       },
