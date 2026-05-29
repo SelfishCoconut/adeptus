@@ -262,6 +262,19 @@ async def test_me_401_expired_session(
 
 
 @pytest.mark.asyncio
+async def test_me_401_unknown_session(
+    app_and_db: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    """A cookie carrying a session id with no matching row (forged or stale) is rejected."""
+    app, _ = app_and_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
+        client.cookies.set("session_id", "no_such_session_id_000000000000000000000000000000")
+        resp = await client.get("/api/v1/auth/me")
+
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_accept_terms_sets_timestamp(
     app_and_db: tuple[FastAPI, async_sessionmaker[AsyncSession]],
     admin_user: models.User,
