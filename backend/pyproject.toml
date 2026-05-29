@@ -5,9 +5,9 @@ description = "Adeptus — locally-deployable AI-assisted pentest platform (back
 requires-python = ">=3.12"
 dependencies = [
     "alembic",
+    "argon2-cffi",
     "asyncpg",
     "fastapi>=0.111",
-    "passlib[argon2]",
     "pydantic-settings>=2.0",
     "python-multipart",
     "sqlalchemy[asyncio]>=2.0",
