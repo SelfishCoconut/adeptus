@@ -20,6 +20,9 @@ services:
     build:
       context: backend
       dockerfile: Dockerfile
+    restart: unless-stopped
+    # NOTE: the argon2 hash in .env must escape each '$' as '$$' or Compose expands
+    # the segments as variables and mangles the admin password hash. See .env.example.
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://adeptus:adeptus@postgres:5432/adeptus
@@ -28,8 +31,19 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+    # Bind to loopback only: all external traffic must go through the TLS edge
+    # (web) on 443. Exposing 8000 on 0.0.0.0 would let the LAN reach the plaintext
+    # API directly, bypassing TLS. 127.0.0.1 keeps host-side tooling working.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/health').status==200 else 1)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
 
   web:
     build:
@@ -37,7 +51,8 @@ services:
       dockerfile: docker/nginx/Dockerfile
     restart: unless-stopped
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
