@@ -343,3 +343,41 @@ Yes — this slice touches authentication, session cookies, password hashing, an
 - 2026-05-28T17:02:14Z — 4c8b182 docs(slice-00): append progress checkpoint log
 - 2026-05-28T17:14:22Z — 4c8b182 docs(slice-00): append progress checkpoint log
 - 2026-05-28T18:43:04Z — 34072ed fix(slice-00): address frontend auth security review (FE8 step gate)
+- 2026-05-28T19:32:13Z — b714b3b test(slice-00): enforce 60% frontend coverage gate in vitest config
+
+## Post-review resolution (2026-05-29)
+
+Code review found 0 Critical, 5 Warnings. Security review: OK to merge with two Low
+deferrals. All Warnings now resolved:
+
+- **W1 (auth)** — `deps.py` read the cookie via a hardcoded `Cookie(alias="session_id")`
+  while `router.py` writes it from `settings.SESSION_COOKIE_NAME`. Fixed: the dependency
+  now reads the cookie off the request using the same settings value, so reader and writer
+  cannot drift.
+- **W2** — Declared `passlib[argon2]` but imported `argon2` directly. Fixed: depend on
+  `argon2-cffi` directly; `passlib` dropped.
+- **W3 (auth)** — `secure=True` was unconditional, so the cookie is unusable over plain
+  HTTP. Resolved **by design** rather than by weakening the flag: the new Nginx edge
+  terminates TLS, so the Secure cookie is always delivered over HTTPS. No code change.
+- **W4** — Frontend 60% coverage gate (already fixed in b714b3b).
+- **W5** — Removed the redundant Zustand auth store; the TanStack Query `me` cache is the
+  single source of truth (login seeds it, logout clears all caches).
+
+**Integration completed (Resolved Decision #1):** Added a `web` service to
+`docker-compose.yml` — a multi-stage image that builds the SPA and serves it over HTTPS via
+Nginx, terminating TLS and proxying `/api` to the backend same-origin. This makes
+`https://localhost` reachable, satisfying the acceptance criteria.
+
+> **Deviation from Resolved Decision #1:** the decision said to bundle a *pre-generated*
+> self-signed cert in `docker/certs/`. Committing a private key would trip the
+> `detect-private-key`/gitleaks pre-commit hooks and is poor hygiene, so the cert is instead
+> generated **at image build time** (baked into the image, no key in the repo). Same outcome
+> — HTTPS works out of the box by default — without a committed secret. The TLS cert-swap
+> procedure remains Slice 39.
+
+**Security Lows deferred (not blocking):** `POSTGRES_PASSWORD` hardcoded in compose (dev
+default), and no login rate-limiting (belongs to a later hardening slice).
+
+**Open — manual acceptance:** the live `https://localhost` login → workspace round-trip
+must be exercised with the Docker daemon running (`make dev`); it was not run in the
+authoring session because no daemon was available there.
