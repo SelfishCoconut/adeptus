@@ -31,5 +31,16 @@ services:
     ports:
       - "8000:8000"
 
+  web:
+    build:
+      context: .
+      dockerfile: docker/nginx/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+
 volumes:
   postgres_data:

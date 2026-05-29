@@ -1,0 +1,12 @@
+# Keep the build context (repo root) lean for the edge image build.
+**/node_modules
+**/dist
+**/coverage
+**/test-results
+**/.pytest_cache
+**/__pycache__
+**/.mypy_cache
+**/.ruff_cache
+**/.venv
+.git
+frontend/playwright
