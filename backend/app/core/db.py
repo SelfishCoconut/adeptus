@@ -22,7 +22,11 @@ def get_engine() -> AsyncEngine:
     return create_async_engine(
         settings.DATABASE_URL,
         pool_pre_ping=True,
-        echo=settings.ENVIRONMENT != "production",
+        # echo stays off in every environment: it logs each statement's bound
+        # parameters, which for the session lookup is the opaque bearer token —
+        # and slice-00's security gate requires that no session id is ever logged.
+        # Enable the `sqlalchemy.engine` logger deliberately when SQL tracing is needed.
+        echo=False,
     )
 
 
