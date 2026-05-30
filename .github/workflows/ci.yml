@@ -60,6 +60,9 @@ jobs:
         working-directory: backend
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost/adeptus_test
+          # Required by the Settings model at import time; unused by migrations.
+          ADEPTUS_ADMIN_USER: admin
+          ADEPTUS_ADMIN_PASSWORD_HASH: "$argon2id$v=19$m=65536,t=3,p=4$hash"
 
       - name: Pytest with coverage gate
         run: uv run pytest --cov=app/features --cov-fail-under=80 --cov-report=xml
