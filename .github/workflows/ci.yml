@@ -9,6 +9,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   backend:
     name: Backend (lint + typecheck + test)
@@ -36,7 +40,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --extra dev
         working-directory: backend
 
       - name: Ruff format check
@@ -99,7 +103,7 @@ jobs:
         working-directory: frontend
 
       - name: Vitest with coverage gate
-        run: pnpm test --run --coverage
+        run: pnpm test -- --run --coverage
         working-directory: frontend
 
       - name: Install Playwright browsers

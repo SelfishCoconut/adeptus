@@ -1,4 +1,4 @@
-.PHONY: dev test test-backend test-frontend test-integration lint format migrate sandbox sandbox-down clean help
+.PHONY: dev test test-backend test-frontend test-integration lint format migrate generate-api sandbox sandbox-down clean help
 
 help:
 	@echo "Adeptus — make targets"
@@ -10,6 +10,7 @@ help:
 	@echo "  lint              — ruff + mypy + eslint + tsc --noEmit"
 	@echo "  format            — ruff format + prettier"
 	@echo "  migrate           — alembic upgrade head"
+	@echo "  generate-api      — regenerate the typed OpenAPI client from the backend"
 	@echo "  sandbox           — bring up Juice Shop on http://localhost:3000"
 	@echo "  sandbox-down      — tear down Juice Shop and its volumes"
 	@echo "  clean             — remove caches, .venv, node_modules, dist"
@@ -41,7 +42,11 @@ format:
 	cd frontend && pnpm prettier --write .
 
 migrate:
-	cd backend && uv run alembic upgrade head
+	docker compose run --rm backend uv run alembic upgrade head
+
+generate-api:
+	cd backend && uv run python -c "import json; from app.main import app; print(json.dumps(app.openapi(), indent=2))" > ../frontend/openapi.json
+	cd frontend && pnpm generate-api
 
 sandbox:
 	docker compose -f sandbox/docker-compose.juice-shop.yml up -d
