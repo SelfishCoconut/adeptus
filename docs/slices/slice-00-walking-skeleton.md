@@ -2,7 +2,7 @@
 
 **Branch**: `slice-00-walking-skeleton`
 **GitHub Issue**: #1
-**Status**: planned
+**Status**: done
 **Risky**: yes
 
 ---
@@ -435,3 +435,9 @@ Two bugs found and fixed during live verification:
 Note: local `.env` `ADEPTUS_ADMIN_PASSWORD_HASH` was set to a known test value during
 verification (admin / `adeptus-admin`); rotate it for real use.
 - 2026-05-29T22:14:02Z — 493da0a chore(slice-00): mark slice 00 done in PROJECT_PLAN
+- 2026-05-29T22:55:33Z — dd91c9c docs(slice-00): record live verification results and two fixes
+- 2026-05-30T13:09:45Z — 7c9a73f fix(ci): supply admin env vars to the alembic upgrade step
+- 2026-05-30T15:32:54Z — 7c9a73f fix(ci): supply admin env vars to the alembic upgrade step
+- 2026-05-30T15:35:51Z — 7c9a73f fix(ci): supply admin env vars to the alembic upgrade step
+- 2026-05-30T15:43:01Z — 7c9a73f fix(ci): supply admin env vars to the alembic upgrade step
+- 2026-05-30T16:09:21Z — 7c9a73f fix(ci): supply admin env vars to the alembic upgrade step

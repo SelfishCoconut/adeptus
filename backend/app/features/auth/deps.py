@@ -1,16 +1,17 @@
 """Feature-local FastAPI dependencies: current-user resolution."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import Depends, Request
+from fastapi import Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.db import get_db
 from app.core.errors import AuthenticationError
 from app.features.auth import repository as repo
+from app.features.auth.cookies import set_session_cookie
 from app.features.auth.models import Session, User
 
 
@@ -46,11 +47,28 @@ async def get_current_session(
 
 
 async def get_current_user(
+    response: Response,
     db: Annotated[AsyncSession, Depends(get_db)],
     session: Annotated[Session, Depends(get_current_session)],
 ) -> User:
-    """Resolve the current session to a User. Raises AuthenticationError if user not found."""
+    """Resolve the current session to a User. Raises AuthenticationError if user not found.
+
+    Sliding expiry (ADR-0003): each authenticated request refreshes ``last_used_at`` and
+    extends ``expires_at`` by the configured TTL, and re-issues the cookie so the browser's
+    own lifetime slides in step with the server-side window. Active users stay logged in;
+    idle sessions still lapse after SESSION_TTL_DAYS.
+
+    The slide lives here rather than in ``get_current_session`` so that logout — which
+    depends only on the resolver — does not refresh a session it is about to delete, nor
+    emit a competing Set-Cookie alongside the clear.
+    """
     user = await repo.get_user_by_id(db, cast(UUID, session.user_id))
     if user is None:
         raise AuthenticationError("Not authenticated")
+
+    new_expires_at = datetime.now(UTC) + timedelta(days=get_settings().SESSION_TTL_DAYS)
+    await repo.refresh_session(db, cast(str, session.id), new_expires_at=new_expires_at)
+    await db.commit()
+    set_session_cookie(response, cast(str, session.id), new_expires_at)
+
     return user

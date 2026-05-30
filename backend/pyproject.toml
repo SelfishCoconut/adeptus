@@ -59,6 +59,9 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 testpaths = ["app"]
 asyncio_mode = "auto"
+# Default run is unit-only; `make test-integration` passes `-m integration`, which
+# overrides this marker expression to select exactly the integration suite.
+addopts = "-m 'not integration'"
 markers = [
     "integration: mark test as requiring real external services (postgres, ollama)",
 ]
@@ -68,3 +71,6 @@ markers = [
 # context, coverage misses lines that execute after an awaited DB call (e.g. the
 # happy-path returns in auth/deps.py), under-reporting code that tests do exercise.
 concurrency = ["greenlet", "thread"]
+# Integration test modules are deselected from the default (coverage-gated) run, so
+# measuring them as "uncovered" is noise — they run under `make test-integration`.
+omit = ["*/tests/test_integration.py"]
