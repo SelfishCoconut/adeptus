@@ -10,6 +10,7 @@ from app.core.db import get_sessionmaker
 from app.core.errors import register_error_handlers
 from app.features.auth import service as auth_service
 from app.features.auth.router import router as auth_router
+from app.features.engagements.router import router as engagements_router
 from app.features.health.router import router as health_router
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ def create_app() -> FastAPI:
     # feature routers
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(engagements_router)
     return app
 
 
