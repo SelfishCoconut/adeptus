@@ -288,6 +288,47 @@ async def test_me_401_unknown_session(
 
 
 @pytest.mark.asyncio
+async def test_me_slides_session_expiry(
+    app_and_db: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+    admin_user: models.User,
+) -> None:
+    """Each authenticated request extends expires_at to now+TTL and re-issues the cookie
+    (sliding expiry, ADR-0003), so an active user is never logged out mid-use."""
+    app, factory = app_and_db
+    # A still-valid session that is close to expiring (1 hour left).
+    near_expiry = _utcnow() + datetime.timedelta(hours=1)
+    session_id = "sliding_session_id_for_test_00000000000000000000000000000000"
+    async with factory() as session:
+        await repo.create_session(
+            session,
+            session_id=session_id,
+            user_id=_uid(admin_user),
+            expires_at=near_expiry,
+        )
+        await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
+        client.cookies.set(get_settings().SESSION_COOKIE_NAME, session_id)
+        resp = await client.get("/api/v1/auth/me")
+    assert resp.status_code == 200
+
+    # The cookie is re-issued with a fresh, full-TTL Max-Age.
+    match = re.search(r"max-age=(\d+)", resp.headers.get("set-cookie", "").lower())
+    assert match is not None, "sliding request should re-issue the session cookie"
+    expected = get_settings().SESSION_TTL_DAYS * 86400
+    assert abs(int(match.group(1)) - expected) <= 60
+
+    # The server-side row slid forward well past its original 1-hour window.
+    async with factory() as session:
+        row = await repo.get_session(session, session_id)
+    assert row is not None
+    slid = row.expires_at
+    if slid.tzinfo is None:
+        slid = slid.replace(tzinfo=datetime.UTC)
+    assert slid > near_expiry + datetime.timedelta(days=1)
+
+
+@pytest.mark.asyncio
 async def test_accept_terms_sets_timestamp(
     app_and_db: tuple[FastAPI, async_sessionmaker[AsyncSession]],
     admin_user: models.User,

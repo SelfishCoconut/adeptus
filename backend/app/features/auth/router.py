@@ -2,7 +2,7 @@
 
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,49 +11,12 @@ from app.core.config import get_settings
 from app.core.db import get_db
 from app.features.auth import repository as repo
 from app.features.auth import service
+from app.features.auth.cookies import clear_session_cookie, set_session_cookie
 from app.features.auth.deps import get_current_session, get_current_user
 from app.features.auth.models import Session, User
 from app.features.auth.schemas import LoginRequest, UserMe
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
-
-# Single source of truth for the session cookie's security attributes so that the
-# set and clear paths can never drift apart (a mismatch can leave a cookie the
-# browser won't delete). HttpOnly + Secure + SameSite=Lax per ADR-0003/ADR-0007.
-_COOKIE_HTTPONLY = True
-_COOKIE_SECURE = True
-_COOKIE_SAMESITE: Literal["lax"] = "lax"
-_COOKIE_PATH = "/"
-
-
-def _set_session_cookie(response: Response, session_id: str, expires_at: datetime) -> None:
-    """Set the session cookie with security attributes.
-
-    Use max_age (seconds until expiry) rather than passing an absolute epoch to the
-    `expires` int param: Starlette interprets an int `expires` as seconds-from-now, so
-    an absolute timestamp would yield a decades-long cookie lifetime.
-    """
-    max_age = int((expires_at - datetime.now(UTC)).total_seconds())
-    response.set_cookie(
-        key=get_settings().SESSION_COOKIE_NAME,
-        value=session_id,
-        httponly=_COOKIE_HTTPONLY,
-        secure=_COOKIE_SECURE,
-        samesite=_COOKIE_SAMESITE,
-        max_age=max_age,
-        path=_COOKIE_PATH,
-    )
-
-
-def _clear_session_cookie(response: Response) -> None:
-    """Clear the session cookie using the same attributes it was set with."""
-    response.delete_cookie(
-        key=get_settings().SESSION_COOKIE_NAME,
-        httponly=_COOKIE_HTTPONLY,
-        secure=_COOKIE_SECURE,
-        samesite=_COOKIE_SAMESITE,
-        path=_COOKIE_PATH,
-    )
 
 
 @router.post("/login", response_model=UserMe)
@@ -80,7 +43,7 @@ async def login(
     )
     await db.commit()
 
-    _set_session_cookie(response, session_id, expires_at)
+    set_session_cookie(response, session_id, expires_at)
     return UserMe.model_validate(user)
 
 
@@ -93,7 +56,7 @@ async def logout(
     """Delete the server-side session and clear the cookie."""
     await repo.delete_session(db, session.id)
     await db.commit()
-    _clear_session_cookie(response)
+    clear_session_cookie(response)
 
 
 @router.get("/me", response_model=UserMe)
