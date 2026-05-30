@@ -29,7 +29,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §4 (creation, lifecycle bare), §3 (membership)
 - **Depends on**: 00
 - **Risky**: no
-- **Status**: todo
+- **Status**: in-progress
 
 ### Slice 02: Privacy mode + persistent banner
 - **Goal**: Engagement carries privacy mode; banner always visible in workspace
