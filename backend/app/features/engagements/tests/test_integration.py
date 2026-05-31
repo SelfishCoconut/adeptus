@@ -267,6 +267,32 @@ def _make_eng_app(factory: async_sessionmaker[AsyncSession]) -> FastAPI:
     return app
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _settings_env(monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[None, None]:
+    """Set the env vars required by get_settings() for tests that hit the auth router.
+
+    The migration test sets DATABASE_URL via os.environ directly, but it restores
+    the original value in its finally block — so the API round-trip test may run
+    with DATABASE_URL unset.  This autouse fixture ensures Settings() always has
+    the minimum required vars for both tests in this module.
+    """
+    monkeypatch.setenv("DATABASE_URL", _api_dsn())
+    monkeypatch.setenv(
+        "ADEPTUS_ADMIN_USER",
+        os.environ.get("ADEPTUS_ADMIN_USER", "admin"),
+    )
+    monkeypatch.setenv(
+        "ADEPTUS_ADMIN_PASSWORD_HASH",
+        os.environ.get(
+            "ADEPTUS_ADMIN_PASSWORD_HASH",
+            "$argon2id$v=19$m=65536,t=3,p=4$dGVzdHNhbHQ$hashhashhashhashhashhashhashhashhashhashhas",
+        ),
+    )
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.mark.asyncio
 async def test_privacy_mode_create_get_patch_round_trip(
     pg_schema_factory: async_sessionmaker[AsyncSession],
@@ -307,7 +333,11 @@ async def test_privacy_mode_create_get_patch_round_trip(
         # GET: retrieve and assert privacy_mode round-trips.
         get_resp = await client.get(f"/api/v1/engagements/{engagement_id}")
         assert get_resp.status_code == 200, get_resp.text
-        assert get_resp.json()["privacy_mode"] == "cloud_enabled"
+        get_body = get_resp.json()
+        assert get_body["privacy_mode"] == "cloud_enabled"
+
+        # Capture updated_at before the PATCH to verify it advances (W-05).
+        updated_at_before = get_body["updated_at"]
 
         # PATCH: flip back to local_only and assert the updated response.
         patch_resp = await client.patch(
@@ -315,4 +345,14 @@ async def test_privacy_mode_create_get_patch_round_trip(
             json={"privacy_mode": "local_only"},
         )
         assert patch_resp.status_code == 200, patch_resp.text
-        assert patch_resp.json()["privacy_mode"] == "local_only"
+        patch_body = patch_resp.json()
+        assert patch_body["privacy_mode"] == "local_only"
+
+        # W-05 verification: updated_at must strictly increase after the PATCH.
+        # SQLAlchemy's onupdate=func.now() on the raw update() statement renders
+        # the updated_at into the SET clause — this assertion confirms it works.
+        updated_at_after = patch_body["updated_at"]
+        assert updated_at_after > updated_at_before, (
+            f"updated_at did not advance after PATCH: before={updated_at_before!r}, "
+            f"after={updated_at_after!r}"
+        )
