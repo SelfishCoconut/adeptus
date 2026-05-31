@@ -28,6 +28,7 @@ from app.features.engagements.schemas import (
     EngagementCreate,
     EngagementDetail,
     EngagementSummary,
+    EngagementUpdate,
     MemberEntry,
 )
 
@@ -56,6 +57,23 @@ async def create_engagement(
 ) -> EngagementDetail:
     """Create a new engagement; caller becomes owner."""
     detail = await service.create_engagement(db, current_user, body)
+    await db.commit()
+    return detail
+
+
+@router.patch(
+    "/{engagement_id}",
+    response_model=EngagementDetail,
+    operation_id="update_engagement",
+)
+async def update_engagement(
+    engagement_id: UUID,
+    body: EngagementUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> EngagementDetail:
+    """Update engagement settings (owner only)."""
+    detail = await service.update_engagement(db, current_user, engagement_id, body)
     await db.commit()
     return detail
 

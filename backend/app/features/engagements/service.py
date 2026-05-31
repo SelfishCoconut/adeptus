@@ -28,6 +28,7 @@ from app.features.engagements.schemas import (
     EngagementCreate,
     EngagementDetail,
     EngagementSummary,
+    EngagementUpdate,
     MemberEntry,
 )
 
@@ -48,6 +49,7 @@ async def create_engagement(
         scope=data.scope,
         client_info=data.client_info,
         owner_id=cast(UUID, caller.id),
+        privacy_mode=data.privacy_mode,
     )
     return EngagementDetail(
         id=cast(UUID, engagement.id),
@@ -58,6 +60,7 @@ async def create_engagement(
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         member_role="owner",
+        privacy_mode=engagement.privacy_mode,
     )
 
 
@@ -90,6 +93,50 @@ async def get_engagement(
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         member_role=member_role,
+        privacy_mode=engagement.privacy_mode,
+    )
+
+
+async def update_engagement(
+    db: AsyncSession,
+    caller: User,
+    engagement_id: UUID,
+    data: EngagementUpdate,
+) -> EngagementDetail:
+    """Update engagement settings (owner only).
+
+    Access rules follow §17.1 isolation posture:
+    - Non-member → NotFoundError (do not reveal that the engagement exists).
+    - Member but not owner → ForbiddenError.
+
+    If ``data.privacy_mode`` is None the engagement is returned unchanged.
+    """
+    row = await repo.get_engagement_for_member(db, engagement_id, cast(UUID, caller.id))
+    if row is None:
+        raise NotFoundError("Engagement not found")
+
+    engagement, caller_member = row
+    member_role = cast(Literal["owner", "member"], caller_member.role)
+
+    if member_role != "owner":
+        raise ForbiddenError("Only the engagement owner may update engagement settings")
+
+    if data.privacy_mode is not None:
+        updated = await repo.update_engagement(db, engagement_id, privacy_mode=data.privacy_mode)
+        if updated is None:  # extremely unlikely race; handle defensively
+            raise NotFoundError("Engagement not found")
+        engagement = updated
+
+    return EngagementDetail(
+        id=cast(UUID, engagement.id),
+        name=engagement.name,
+        status=cast(Literal["active", "archived"], engagement.status),
+        scope=engagement.scope,
+        client_info=engagement.client_info,
+        created_at=engagement.created_at,
+        updated_at=engagement.updated_at,
+        member_role=member_role,
+        privacy_mode=engagement.privacy_mode,
     )
 
 
@@ -106,6 +153,7 @@ async def list_engagements(
             status=cast(Literal["active", "archived"], eng.status),
             created_at=eng.created_at,
             member_role=cast(Literal["owner", "member"], role),
+            privacy_mode=eng.privacy_mode,
         )
         for eng, role in rows
     ]

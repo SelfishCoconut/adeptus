@@ -1,6 +1,7 @@
 """SQLAlchemy ORM models for the engagements feature: Engagement, EngagementMember."""
 
 from datetime import datetime
+from typing import Literal
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text
 from sqlalchemy.dialects.postgresql import UUID
@@ -14,6 +15,10 @@ class Engagement(Base):
     __tablename__ = "engagements"
     __table_args__ = (
         CheckConstraint("status IN ('active', 'archived')", name="ck_engagements_status"),
+        CheckConstraint(
+            "privacy_mode IN ('local_only', 'cloud_enabled')",
+            name="ck_engagements_privacy_mode",
+        ),
         Index("ix_engagements_status", "status"),
     )
 
@@ -26,6 +31,9 @@ class Engagement(Base):
     scope: Mapped[str] = mapped_column(Text, nullable=False)
     client_info: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
+    privacy_mode: Mapped[Literal["local_only", "cloud_enabled"]] = mapped_column(
+        String(16), nullable=False, server_default=text("'local_only'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

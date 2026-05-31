@@ -142,7 +142,11 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Update Engagement
+         * @description Update engagement settings (owner only).
+         */
+        patch: operations["update_engagement"];
         trace?: never;
     };
     "/api/v1/engagements/{engagement_id}/members": {
@@ -206,6 +210,12 @@ export interface components {
             scope: string;
             /** Client Info */
             client_info?: string | null;
+            /**
+             * Privacy Mode
+             * @default local_only
+             * @enum {string}
+             */
+            privacy_mode: "local_only" | "cloud_enabled";
         };
         /** EngagementDetail */
         EngagementDetail: {
@@ -240,6 +250,11 @@ export interface components {
              * @enum {string}
              */
             member_role: "owner" | "member";
+            /**
+             * Privacy Mode
+             * @enum {string}
+             */
+            privacy_mode: "local_only" | "cloud_enabled";
         };
         /** EngagementSummary */
         EngagementSummary: {
@@ -265,6 +280,16 @@ export interface components {
              * @enum {string}
              */
             member_role: "owner" | "member";
+            /**
+             * Privacy Mode
+             * @enum {string}
+             */
+            privacy_mode: "local_only" | "cloud_enabled";
+        };
+        /** EngagementUpdate */
+        EngagementUpdate: {
+            /** Privacy Mode */
+            privacy_mode?: ("local_only" | "cloud_enabled") | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -534,6 +559,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EngagementDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_engagement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EngagementUpdate"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

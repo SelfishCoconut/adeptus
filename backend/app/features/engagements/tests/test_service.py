@@ -13,7 +13,7 @@ import pytest
 
 from app.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from app.features.engagements import service
-from app.features.engagements.schemas import AddMemberRequest, EngagementCreate
+from app.features.engagements.schemas import AddMemberRequest, EngagementCreate, EngagementUpdate
 
 # ---------------------------------------------------------------------------
 # Helpers — build lightweight mock objects that carry the attributes the
@@ -30,6 +30,7 @@ def _make_engagement(
     scope: str = "*.example.com",
     client_info: str | None = "ACME Corp",
     status: str = "active",
+    privacy_mode: str = "local_only",
 ) -> MagicMock:
     eng = MagicMock()
     eng.id = engagement_id or uuid4()
@@ -37,6 +38,7 @@ def _make_engagement(
     eng.scope = scope
     eng.client_info = client_info
     eng.status = status
+    eng.privacy_mode = privacy_mode
     eng.created_at = NOW
     eng.updated_at = NOW
     return eng
@@ -135,6 +137,7 @@ async def test_create_engagement_auto_adds_owner_member(db: AsyncMock, caller: M
         scope="10.0.0.0/8",
         client_info=None,
         owner_id=caller.id,
+        privacy_mode="local_only",
     )
 
 
@@ -459,3 +462,155 @@ async def test_remove_member_unknown_target_returns_404(db: AsyncMock, caller: M
     ):
         with pytest.raises(NotFoundError):
             await service.remove_member(db, caller, eng_id, target_id)
+
+
+# ---------------------------------------------------------------------------
+# create_engagement — privacy_mode threading
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_engagement_default_privacy_mode(db: AsyncMock, caller: MagicMock) -> None:
+    """create_engagement passes 'local_only' to the repository when no mode is specified."""
+    mock_eng = _make_engagement(privacy_mode="local_only")
+    data = EngagementCreate(name="Delta", scope="10.1.0.0/16")
+
+    with patch(
+        "app.features.engagements.service.repo.create_engagement",
+        new=AsyncMock(return_value=mock_eng),
+    ) as mock_create:
+        result = await service.create_engagement(db, caller, data)
+
+    mock_create.assert_awaited_once_with(
+        db,
+        name="Delta",
+        scope="10.1.0.0/16",
+        client_info=None,
+        owner_id=caller.id,
+        privacy_mode="local_only",
+    )
+    assert result.privacy_mode == "local_only"
+
+
+@pytest.mark.asyncio
+async def test_create_engagement_cloud_enabled(db: AsyncMock, caller: MagicMock) -> None:
+    """create_engagement passes 'cloud_enabled' to the repository when explicitly set."""
+    mock_eng = _make_engagement(privacy_mode="cloud_enabled")
+    data = EngagementCreate(name="Cloud Eng", scope="10.2.0.0/16", privacy_mode="cloud_enabled")
+
+    with patch(
+        "app.features.engagements.service.repo.create_engagement",
+        new=AsyncMock(return_value=mock_eng),
+    ) as mock_create:
+        result = await service.create_engagement(db, caller, data)
+
+    mock_create.assert_awaited_once_with(
+        db,
+        name="Cloud Eng",
+        scope="10.2.0.0/16",
+        client_info=None,
+        owner_id=caller.id,
+        privacy_mode="cloud_enabled",
+    )
+    assert result.privacy_mode == "cloud_enabled"
+
+
+# ---------------------------------------------------------------------------
+# update_engagement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_engagement_owner_changes_mode(db: AsyncMock, caller: MagicMock) -> None:
+    """Owner can flip privacy_mode from local_only to cloud_enabled."""
+    eng_id = uuid4()
+    mock_eng = _make_engagement(engagement_id=eng_id, privacy_mode="local_only")
+    updated_eng = _make_engagement(engagement_id=eng_id, privacy_mode="cloud_enabled")
+    caller_member = _make_member(engagement_id=eng_id, user_id=caller.id, role="owner")
+    data = EngagementUpdate(privacy_mode="cloud_enabled")
+
+    with (
+        patch(
+            "app.features.engagements.service.repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(mock_eng, caller_member)),
+        ),
+        patch(
+            "app.features.engagements.service.repo.update_engagement",
+            new=AsyncMock(return_value=updated_eng),
+        ) as mock_update,
+    ):
+        result = await service.update_engagement(db, caller, eng_id, data)
+
+    mock_update.assert_awaited_once_with(db, eng_id, privacy_mode="cloud_enabled")
+    assert result.privacy_mode == "cloud_enabled"
+    assert result.member_role == "owner"
+
+
+@pytest.mark.asyncio
+async def test_update_engagement_non_owner_forbidden(db: AsyncMock, caller: MagicMock) -> None:
+    """Non-owner member raises ForbiddenError when calling update_engagement."""
+    eng_id = uuid4()
+    mock_eng = _make_engagement(engagement_id=eng_id)
+    caller_member = _make_member(engagement_id=eng_id, user_id=caller.id, role="member")
+    data = EngagementUpdate(privacy_mode="cloud_enabled")
+
+    with patch(
+        "app.features.engagements.service.repo.get_engagement_for_member",
+        new=AsyncMock(return_value=(mock_eng, caller_member)),
+    ):
+        with pytest.raises(ForbiddenError):
+            await service.update_engagement(db, caller, eng_id, data)
+
+
+@pytest.mark.asyncio
+async def test_update_engagement_non_member_not_found(db: AsyncMock, caller: MagicMock) -> None:
+    """Non-member raises NotFoundError per §17.1 isolation posture."""
+    eng_id = uuid4()
+    data = EngagementUpdate(privacy_mode="cloud_enabled")
+
+    with patch(
+        "app.features.engagements.service.repo.get_engagement_for_member",
+        new=AsyncMock(return_value=None),
+    ):
+        with pytest.raises(NotFoundError):
+            await service.update_engagement(db, caller, eng_id, data)
+
+
+# ---------------------------------------------------------------------------
+# get_engagement — privacy_mode threading
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_engagement_returns_privacy_mode(db: AsyncMock, caller: MagicMock) -> None:
+    """get_engagement returns EngagementDetail with privacy_mode present and correct."""
+    eng_id = uuid4()
+    mock_eng = _make_engagement(engagement_id=eng_id, privacy_mode="cloud_enabled")
+    mock_membership = _make_member(engagement_id=eng_id, user_id=caller.id, role="member")
+
+    with patch(
+        "app.features.engagements.service.repo.get_engagement_for_member",
+        new=AsyncMock(return_value=(mock_eng, mock_membership)),
+    ):
+        result = await service.get_engagement(db, caller, eng_id)
+
+    assert result.privacy_mode == "cloud_enabled"
+    assert result.id == eng_id
+
+
+@pytest.mark.asyncio
+async def test_list_engagements_returns_privacy_mode(db: AsyncMock, caller: MagicMock) -> None:
+    """list_engagements returns EngagementSummary rows each carrying privacy_mode."""
+    eng_a = _make_engagement(name="Local Eng", privacy_mode="local_only")
+    eng_b = _make_engagement(name="Cloud Eng", privacy_mode="cloud_enabled")
+    rows = [(eng_a, "owner"), (eng_b, "member")]
+
+    with patch(
+        "app.features.engagements.service.repo.list_engagements_for_user",
+        new=AsyncMock(return_value=rows),
+    ):
+        result = await service.list_engagements(db, caller)
+
+    assert len(result) == 2
+    assert result[0].privacy_mode == "local_only"
+    assert result[1].privacy_mode == "cloud_enabled"

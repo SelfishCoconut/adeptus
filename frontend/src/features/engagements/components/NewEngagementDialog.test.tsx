@@ -60,7 +60,17 @@ describe('NewEngagementDialog', () => {
     expect(screen.getByLabelText(/client info/i)).toBeInTheDocument()
   })
 
-  it('submits and calls mutation with the expected body', async () => {
+  it('renders the cloud LLM toggle and it defaults to unchecked', () => {
+    mockedUseCreateEngagement.mockReturnValue(mutationResult({}))
+
+    renderDialog()
+
+    const toggle = screen.getByRole('switch', { name: /cloud llm enabled/i })
+    expect(toggle).toBeInTheDocument()
+    expect(toggle).toHaveAttribute('data-state', 'unchecked')
+  })
+
+  it('submits and calls mutation with the expected body (privacy_mode defaults to local_only)', async () => {
     const user = userEvent.setup()
     const mutate = vi.fn()
     mockedUseCreateEngagement.mockReturnValue(mutationResult({ mutate }))
@@ -75,7 +85,31 @@ describe('NewEngagementDialog', () => {
 
     expect(mutate).toHaveBeenCalledOnce()
     expect(mutate).toHaveBeenCalledWith(
-      { name: 'ACME Pentest', scope: '192.168.1.0/24', client_info: 'Jane Doe, ACME Corp' },
+      {
+        name: 'ACME Pentest',
+        scope: '192.168.1.0/24',
+        client_info: 'Jane Doe, ACME Corp',
+        privacy_mode: 'local_only',
+      },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    )
+  })
+
+  it('sends privacy_mode: cloud_enabled when toggle is checked', async () => {
+    const user = userEvent.setup()
+    const mutate = vi.fn()
+    mockedUseCreateEngagement.mockReturnValue(mutationResult({ mutate }))
+
+    renderDialog()
+
+    await user.type(screen.getByLabelText(/name/i), 'Cloud Pentest')
+    await user.type(screen.getByLabelText(/scope/i), '10.0.0.0/8')
+    await user.click(screen.getByRole('switch', { name: /cloud llm enabled/i }))
+    await user.click(screen.getByRole('button', { name: /create/i }))
+
+    expect(mutate).toHaveBeenCalledOnce()
+    expect(mutate).toHaveBeenCalledWith(
+      expect.objectContaining({ privacy_mode: 'cloud_enabled' }),
       expect.objectContaining({ onSuccess: expect.any(Function) }),
     )
   })

@@ -413,3 +413,40 @@ async def test_list_engagements_count(db_session: AsyncSession, engagements_coun
     results = await repo.list_engagements_for_user(db_session, _uid(owner))
 
     assert len(results) == engagements_count
+
+
+# ---------------------------------------------------------------------------
+# privacy_mode — create and update
+# ---------------------------------------------------------------------------
+
+
+async def test_repo_create_with_privacy_mode(db_session: AsyncSession) -> None:
+    """create_engagement persists the supplied privacy_mode value."""
+    owner = await _make_user(db_session)
+    engagement = await repo.create_engagement(
+        db_session,
+        name="Cloud Engagement",
+        scope="10.0.0.0/8",
+        client_info=None,
+        owner_id=_uid(owner),
+        privacy_mode="cloud_enabled",
+    )
+
+    assert engagement.privacy_mode == "cloud_enabled"
+
+
+async def test_repo_update_privacy_mode(db_session: AsyncSession) -> None:
+    """update_engagement changes the privacy_mode column and returns the refreshed row."""
+    owner = await _make_user(db_session)
+    engagement = await _make_engagement(db_session, _uid(owner))
+
+    # Default is local_only.
+    assert engagement.privacy_mode == "local_only"
+
+    updated = await repo.update_engagement(
+        db_session, _uid(engagement), privacy_mode="cloud_enabled"
+    )
+
+    assert updated is not None
+    assert updated.privacy_mode == "cloud_enabled"
+    assert updated.id == engagement.id

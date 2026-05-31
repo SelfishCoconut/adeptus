@@ -1,21 +1,25 @@
-"""Integration tests for the slice-01 engagements migration.
+"""Integration tests for the slice-01 engagements migration and slice-02 privacy_mode.
 
-Drives the real Alembic migration ``1eb283db46ca`` up and down against a
-*throwaway* Postgres database (created and dropped per test), asserting the
-new tables exist, the ``status`` server default and CHECK constraint behave,
-and the downgrade fully removes them.
+The first test drives the real Alembic migration ``1eb283db46ca`` up and down
+against a *throwaway* Postgres database, asserting the new tables exist, the
+``status`` server default and CHECK constraint behave, and the downgrade fully
+removes them.
+
+The second test (added in slice-02) exercises the ``privacy_mode`` field via the
+real FastAPI app + a throwaway Postgres schema — matching the pattern used by
+``app/features/auth/tests/test_integration.py``: async ORM engine scoped to an
+isolated schema, httpx AsyncClient over the ASGI transport, no Alembic involved.
 
 A dedicated database — rather than the throwaway-schema trick used by the auth
-integration suite — is used because Alembic's ``env.py`` builds its own engine
-from ``DATABASE_URL`` and offers no hook to scope it to a search_path. Each
-Alembic ``command`` call runs ``asyncio.run`` internally (env.py online runner),
-so this test is deliberately *synchronous*: it sequences its own
-``asyncio.run`` helpers for the asyncpg admin work around the sync command API.
+integration suite — is used by the migration test because Alembic's ``env.py``
+builds its own engine from ``DATABASE_URL`` and offers no hook to scope it to a
+search_path. Each Alembic ``command`` call runs ``asyncio.run`` internally (env.py
+online runner), so that test is deliberately *synchronous*.
 
-Marked ``integration`` (deselected by the default ``make test-backend`` run) and
-executed by ``make test-integration``. Skips cleanly when no Postgres is
-reachable. Point it at a server with ``ADEPTUS_TEST_DATABASE_URL``; it defaults
-to the compose Postgres on localhost.
+Both tests are marked ``integration`` (deselected by the default
+``make test-backend`` run) and executed by ``make test-integration``. Both skip
+cleanly when no Postgres is reachable. Point them at a server with
+``ADEPTUS_TEST_DATABASE_URL``; both default to the compose Postgres on localhost.
 """
 
 from __future__ import annotations
@@ -23,14 +27,28 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import asyncpg  # type: ignore[import-untyped]
 import pytest
+import pytest_asyncio
 from alembic.command import downgrade, upgrade
 from alembic.config import Config
+from argon2 import PasswordHasher
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
+from app.core.db import Base, get_db
+from app.core.errors import register_error_handlers
+from app.features.auth import models as auth_models  # noqa: F401 — registers ORM metadata
+from app.features.auth import repository as auth_repo
+from app.features.auth.router import router as auth_router
+from app.features.engagements import models as eng_models  # noqa: F401 — registers ORM metadata
+from app.features.engagements.router import router as engagements_router
 
 pytestmark = pytest.mark.integration
 
@@ -184,3 +202,157 @@ async def _assert_engagements_tables_absent(dsn: str) -> None:
         assert "users" in tables
     finally:
         await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Slice-02: privacy_mode API round-trip integration test
+#
+# Pattern: throwaway Postgres schema + httpx AsyncClient over ASGI transport.
+# Matches app/features/auth/tests/test_integration.py exactly.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_API_DSN = "postgresql+asyncpg://adeptus:adeptus@localhost:5432/adeptus"
+_OWNER_PW = "correcthorse"
+_OWNER_HASH = PasswordHasher().hash(_OWNER_PW)
+
+
+def _api_dsn() -> str:
+    return os.environ.get("ADEPTUS_TEST_DATABASE_URL") or _DEFAULT_API_DSN
+
+
+@pytest_asyncio.fixture
+async def pg_schema_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
+    """Session factory scoped to a throwaway Postgres schema.
+
+    Skips the test if Postgres is unreachable so the suite stays green on
+    machines without the compose stack up.
+    """
+    schema = f"eng_it_{uuid.uuid4().hex[:12]}"
+    admin_engine = create_async_engine(_api_dsn(), isolation_level="AUTOCOMMIT")
+    try:
+        async with admin_engine.connect() as conn:
+            await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+    except Exception as exc:  # noqa: BLE001 — any connect/setup failure means "no PG here"
+        await admin_engine.dispose()
+        pytest.skip(f"Postgres not available for integration tests: {exc}")
+
+    engine = create_async_engine(
+        _api_dsn(),
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    try:
+        yield factory
+    finally:
+        await engine.dispose()
+        async with admin_engine.connect() as conn:
+            await conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+def _make_eng_app(factory: async_sessionmaker[AsyncSession]) -> FastAPI:
+    app = FastAPI()
+    app.include_router(auth_router)
+    app.include_router(engagements_router)
+    register_error_handlers(app)
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        async with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    return app
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _settings_env(monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[None, None]:
+    """Set the env vars required by get_settings() for tests that hit the auth router.
+
+    The migration test sets DATABASE_URL via os.environ directly, but it restores
+    the original value in its finally block — so the API round-trip test may run
+    with DATABASE_URL unset.  This autouse fixture ensures Settings() always has
+    the minimum required vars for both tests in this module.
+    """
+    monkeypatch.setenv("DATABASE_URL", _api_dsn())
+    monkeypatch.setenv(
+        "ADEPTUS_ADMIN_USER",
+        os.environ.get("ADEPTUS_ADMIN_USER", "admin"),
+    )
+    monkeypatch.setenv(
+        "ADEPTUS_ADMIN_PASSWORD_HASH",
+        os.environ.get(
+            "ADEPTUS_ADMIN_PASSWORD_HASH",
+            "$argon2id$v=19$m=65536,t=3,p=4$dGVzdHNhbHQ$hashhashhashhashhashhashhashhashhashhashhas",
+        ),
+    )
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_privacy_mode_create_get_patch_round_trip(
+    pg_schema_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Create engagement with privacy_mode=cloud_enabled, GET it, PATCH back to local_only.
+
+    Exercises the full stack: router -> service -> repository -> real Postgres.
+    """
+    # Seed an owner user directly via the repository.
+    async with pg_schema_factory() as session:
+        await auth_repo.create_user(
+            session, username="owner", password_hash=_OWNER_HASH, role="admin"
+        )
+        await session.commit()
+
+    app = _make_eng_app(pg_schema_factory)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
+        # Log in to obtain a session cookie.
+        login = await client.post(
+            "/api/v1/auth/login", json={"username": "owner", "password": _OWNER_PW}
+        )
+        assert login.status_code == 200, login.text
+
+        # POST: create engagement with privacy_mode=cloud_enabled.
+        create_resp = await client.post(
+            "/api/v1/engagements",
+            json={
+                "name": "Privacy Round-Trip Test",
+                "scope": "192.168.1.0/24",
+                "privacy_mode": "cloud_enabled",
+            },
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        created = create_resp.json()
+        assert created["privacy_mode"] == "cloud_enabled"
+        engagement_id = created["id"]
+
+        # GET: retrieve and assert privacy_mode round-trips.
+        get_resp = await client.get(f"/api/v1/engagements/{engagement_id}")
+        assert get_resp.status_code == 200, get_resp.text
+        get_body = get_resp.json()
+        assert get_body["privacy_mode"] == "cloud_enabled"
+
+        # Capture updated_at before the PATCH to verify it advances (W-05).
+        updated_at_before = get_body["updated_at"]
+
+        # PATCH: flip back to local_only and assert the updated response.
+        patch_resp = await client.patch(
+            f"/api/v1/engagements/{engagement_id}",
+            json={"privacy_mode": "local_only"},
+        )
+        assert patch_resp.status_code == 200, patch_resp.text
+        patch_body = patch_resp.json()
+        assert patch_body["privacy_mode"] == "local_only"
+
+        # W-05 verification: updated_at must strictly increase after the PATCH.
+        # SQLAlchemy's onupdate=func.now() on the raw update() statement renders
+        # the updated_at into the SET clause — this assertion confirms it works.
+        updated_at_after = patch_body["updated_at"]
+        assert updated_at_after > updated_at_before, (
+            f"updated_at did not advance after PATCH: before={updated_at_before!r}, "
+            f"after={updated_at_after!r}"
+        )

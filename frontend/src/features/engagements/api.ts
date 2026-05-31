@@ -5,6 +5,7 @@ import {
   type EngagementCreate,
   type EngagementDetail,
   type EngagementSummary,
+  type EngagementUpdate,
   type MemberEntry,
 } from '@/shared/api'
 
@@ -71,6 +72,23 @@ export function useCreateEngagement() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: engagementsKey })
+    },
+  })
+}
+
+export function useUpdateEngagement(engagementId: string) {
+  const queryClient = useQueryClient()
+  return useMutation<EngagementDetail, Error, EngagementUpdate>({
+    mutationFn: async (body) => {
+      const { data, error } = await api.PATCH('/api/v1/engagements/{engagement_id}', {
+        params: { path: { engagement_id: engagementId } },
+        body,
+      })
+      if (error || !data) throw new Error('Failed to update engagement')
+      return data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: engagementKey(engagementId) })
     },
   })
 }

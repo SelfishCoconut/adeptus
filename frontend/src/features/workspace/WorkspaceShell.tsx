@@ -1,5 +1,7 @@
 import { Button } from '@/components/ui/button'
 import { ModeToggle } from '@/components/theme/ModeToggle'
+import type { PrivacyMode } from '@/shared/api'
+import { PrivacyModeBanner } from './components/PrivacyModeBanner'
 import { HealthIndicator } from './HealthIndicator'
 
 interface WorkspaceShellProps {
@@ -7,6 +9,7 @@ interface WorkspaceShellProps {
   role: string
   onLogout: () => void
   isLoggingOut?: boolean
+  privacyMode: PrivacyMode
 }
 
 export function WorkspaceShell({
@@ -14,6 +17,7 @@ export function WorkspaceShell({
   role,
   onLogout,
   isLoggingOut = false,
+  privacyMode,
 }: WorkspaceShellProps) {
   return (
     <div className="flex h-svh flex-col bg-background text-foreground">
@@ -33,6 +37,7 @@ export function WorkspaceShell({
           </Button>
         </div>
       </header>
+      <PrivacyModeBanner privacyMode={privacyMode} />
       <div className="grid flex-1 grid-cols-2 grid-rows-[1fr_12rem] gap-px overflow-hidden bg-border">
         <section aria-label="AI chat" className="bg-background p-4">
           <h2 className="text-sm font-medium text-muted-foreground">AI chat</h2>

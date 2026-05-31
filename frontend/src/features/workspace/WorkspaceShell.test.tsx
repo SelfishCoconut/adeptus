@@ -11,9 +11,22 @@ vi.mock('@/components/theme/ModeToggle', () => ({
   ModeToggle: () => <button type="button">Toggle theme</button>,
 }))
 
+vi.mock('./components/PrivacyModeBanner', () => ({
+  PrivacyModeBanner: ({ privacyMode }: { privacyMode: string }) => (
+    <div data-testid="privacy-mode-banner" data-privacy-mode={privacyMode} />
+  ),
+}))
+
 describe('WorkspaceShell', () => {
   it('renders the top bar (username, role, logout, health) and three panes', () => {
-    render(<WorkspaceShell username="alice" role="admin" onLogout={vi.fn()} />)
+    render(
+      <WorkspaceShell
+        username="alice"
+        role="admin"
+        onLogout={vi.fn()}
+        privacyMode="local_only"
+      />,
+    )
 
     expect(screen.getByText('alice')).toBeInTheDocument()
     expect(screen.getByText('admin')).toBeInTheDocument()
@@ -28,9 +41,46 @@ describe('WorkspaceShell', () => {
   it('calls onLogout when the logout button is clicked', async () => {
     const user = userEvent.setup()
     const onLogout = vi.fn()
-    render(<WorkspaceShell username="alice" role="admin" onLogout={onLogout} />)
+    render(
+      <WorkspaceShell
+        username="alice"
+        role="admin"
+        onLogout={onLogout}
+        privacyMode="local_only"
+      />,
+    )
 
     await user.click(screen.getByRole('button', { name: /logout/i }))
     expect(onLogout).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders banner with local_only privacyMode', () => {
+    render(
+      <WorkspaceShell
+        username="alice"
+        role="admin"
+        onLogout={vi.fn()}
+        privacyMode="local_only"
+      />,
+    )
+
+    const banner = screen.getByTestId('privacy-mode-banner')
+    expect(banner).toBeInTheDocument()
+    expect(banner).toHaveAttribute('data-privacy-mode', 'local_only')
+  })
+
+  it('renders banner with cloud_enabled privacyMode', () => {
+    render(
+      <WorkspaceShell
+        username="alice"
+        role="admin"
+        onLogout={vi.fn()}
+        privacyMode="cloud_enabled"
+      />,
+    )
+
+    const banner = screen.getByTestId('privacy-mode-banner')
+    expect(banner).toBeInTheDocument()
+    expect(banner).toHaveAttribute('data-privacy-mode', 'cloud_enabled')
   })
 })
