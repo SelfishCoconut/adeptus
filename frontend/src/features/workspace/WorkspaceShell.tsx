@@ -1,7 +1,7 @@
 import { Button } from '@/components/ui/button'
 import { ModeToggle } from '@/components/theme/ModeToggle'
 import type { PrivacyMode } from '@/shared/api'
-import { PrivacyModeBanner } from '@/features/engagements/components/PrivacyModeBanner'
+import { PrivacyModeBanner } from './components/PrivacyModeBanner'
 import { HealthIndicator } from './HealthIndicator'
 
 interface WorkspaceShellProps {

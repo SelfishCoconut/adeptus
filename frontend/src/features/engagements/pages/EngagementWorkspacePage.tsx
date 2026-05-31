@@ -1,5 +1,5 @@
-import { useParams } from 'react-router-dom'
-import { useNavigate } from 'react-router-dom'
+import { useCallback } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
 import { useLogout, useMe } from '@/features/auth/api'
 import { TermsGate } from '@/features/auth/components/TermsGate'
 import { WorkspaceShell } from '@/features/workspace/WorkspaceShell'
@@ -16,6 +16,14 @@ export function EngagementWorkspacePage() {
   const logout = useLogout()
   const engagement = useEngagement(engagementId)
   const updateEngagement = useUpdateEngagement(engagementId)
+
+  // All hooks must be called before any conditional return (Rules of Hooks).
+  const handlePrivacyToggle = useCallback(
+    (checked: boolean) => {
+      updateEngagement.mutate({ privacy_mode: checked ? 'cloud_enabled' : 'local_only' })
+    },
+    [updateEngagement],
+  )
 
   // ProtectedRoute already ensures a user is present; this narrows the type.
   if (!me.data) {
@@ -34,10 +42,6 @@ export function EngagementWorkspacePage() {
   // Safe default per §17.5: show local_only while loading.
   const privacyMode = engagement.data?.privacy_mode ?? 'local_only'
   const isCloudEnabled = privacyMode === 'cloud_enabled'
-
-  function handlePrivacyToggle(checked: boolean) {
-    updateEngagement.mutate({ privacy_mode: checked ? 'cloud_enabled' : 'local_only' })
-  }
 
   return (
     <TermsGate>

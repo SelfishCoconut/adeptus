@@ -11,7 +11,7 @@ vi.mock('@/components/theme/ModeToggle', () => ({
   ModeToggle: () => <button type="button">Toggle theme</button>,
 }))
 
-vi.mock('@/features/engagements/components/PrivacyModeBanner', () => ({
+vi.mock('./components/PrivacyModeBanner', () => ({
   PrivacyModeBanner: ({ privacyMode }: { privacyMode: string }) => (
     <div data-testid="privacy-mode-banner" data-privacy-mode={privacyMode} />
   ),
