@@ -27,6 +27,7 @@ export function WorkspacePage() {
         role={me.data.role}
         onLogout={handleLogout}
         isLoggingOut={logout.isPending}
+        privacyMode="local_only"
       />
     </TermsGate>
   )

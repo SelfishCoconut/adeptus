@@ -43,6 +43,7 @@ describe('EngagementList', () => {
             status: 'active',
             created_at: '2026-01-01T00:00:00Z',
             member_role: 'owner',
+            privacy_mode: 'local_only',
           },
           {
             id: '00000000-0000-0000-0000-000000000002',
@@ -50,6 +51,7 @@ describe('EngagementList', () => {
             status: 'archived',
             created_at: '2026-02-01T00:00:00Z',
             member_role: 'member',
+            privacy_mode: 'cloud_enabled',
           },
         ],
       }),

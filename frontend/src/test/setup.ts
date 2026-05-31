@@ -22,6 +22,15 @@ if (!globalThis.localStorage) {
   Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, writable: true })
 }
 
+// jsdom has no ResizeObserver; radix-ui components use it internally.
+if (!globalThis.ResizeObserver) {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+}
+
 // jsdom has no matchMedia; the theme provider/toggle read it for system mode.
 if (!window.matchMedia) {
   Object.defineProperty(window, 'matchMedia', {

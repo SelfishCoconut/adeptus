@@ -4,7 +4,8 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { EngagementWorkspacePage } from './EngagementWorkspacePage'
 import { useMe, useLogout } from '@/features/auth/api'
-import { useEngagement, useMembers, useRemoveMember, useAddMember } from '../api'
+import { useEngagement, useMembers, useRemoveMember, useAddMember, useUpdateEngagement } from '../api'
+import type { PrivacyMode } from '@/shared/api'
 
 // Mock the hooks the page uses
 vi.mock('@/features/auth/api', () => ({
@@ -17,6 +18,7 @@ vi.mock('../api', () => ({
   useMembers: vi.fn(),
   useRemoveMember: vi.fn(),
   useAddMember: vi.fn(),
+  useUpdateEngagement: vi.fn(),
 }))
 
 // Mock the child components that rely on further network calls
@@ -30,13 +32,15 @@ vi.mock('@/features/workspace/WorkspaceShell', () => ({
     role,
     onLogout,
     isLoggingOut,
+    privacyMode,
   }: {
     username: string
     role: string
     onLogout: () => void
     isLoggingOut: boolean
+    privacyMode: PrivacyMode
   }) => (
-    <div data-testid="workspace-shell" data-logging-out={String(isLoggingOut)}>
+    <div data-testid="workspace-shell" data-logging-out={String(isLoggingOut)} data-privacy-mode={privacyMode}>
       <span data-testid="username">{username}</span>
       <span data-testid="role">{role}</span>
       <button type="button" onClick={onLogout}>
@@ -52,6 +56,7 @@ const mockedUseEngagement = vi.mocked(useEngagement)
 const mockedUseMembers = vi.mocked(useMembers)
 const mockedUseRemoveMember = vi.mocked(useRemoveMember)
 const mockedUseAddMember = vi.mocked(useAddMember)
+const mockedUseUpdateEngagement = vi.mocked(useUpdateEngagement)
 
 const ADMIN_USER = {
   id: '00000000-0000-0000-0000-000000000001',
@@ -86,6 +91,30 @@ function logoutMutation(overrides: {
   } as unknown as ReturnType<typeof useLogout>
 }
 
+function updateMutation(overrides: {
+  mutate?: ReturnType<typeof useUpdateEngagement>['mutate']
+  isPending?: boolean
+} = {}) {
+  return {
+    mutate: overrides.mutate ?? vi.fn(),
+    isPending: overrides.isPending ?? false,
+    isError: false,
+    error: null,
+    isIdle: true,
+    isSuccess: false,
+    data: undefined,
+    reset: vi.fn(),
+    mutateAsync: vi.fn(),
+    status: 'idle' as const,
+    variables: undefined,
+    context: undefined,
+    failureCount: 0,
+    failureReason: null,
+    isPaused: false,
+    submittedAt: 0,
+  } as unknown as ReturnType<typeof useUpdateEngagement>
+}
+
 function renderPage(engagementId = ENGAGEMENT_ID) {
   return render(
     <MemoryRouter initialEntries={[`/engagements/${engagementId}/workspace`]}>
@@ -99,7 +128,7 @@ function renderPage(engagementId = ENGAGEMENT_ID) {
 
 // Default stub for membership hooks — all tests that don't focus on membership
 // use these so MembersList and InviteMemberForm render without network calls.
-function setupMembershipDefaults() {
+function setupMembershipDefaults(memberRole: 'owner' | 'member' = 'owner') {
   mockedUseEngagement.mockReturnValue({
     data: {
       id: ENGAGEMENT_ID,
@@ -109,7 +138,8 @@ function setupMembershipDefaults() {
       client_info: null,
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
-      member_role: 'owner' as const,
+      member_role: memberRole,
+      privacy_mode: 'local_only' as const,
     },
     isLoading: false,
     isError: false,
@@ -160,6 +190,8 @@ function setupMembershipDefaults() {
     isPaused: false,
     submittedAt: 0,
   } as unknown as ReturnType<typeof useAddMember>)
+
+  mockedUseUpdateEngagement.mockReturnValue(updateMutation())
 }
 
 beforeEach(() => {
@@ -169,6 +201,7 @@ beforeEach(() => {
   mockedUseMembers.mockReset()
   mockedUseRemoveMember.mockReset()
   mockedUseAddMember.mockReset()
+  mockedUseUpdateEngagement.mockReset()
   setupMembershipDefaults()
 })
 
@@ -306,5 +339,92 @@ describe('EngagementWorkspacePage', () => {
     renderPage()
 
     expect(screen.getByText('alice')).toBeInTheDocument()
+  })
+
+  it('passes privacyMode to WorkspaceShell from engagement data', () => {
+    mockedUseMe.mockReturnValue({
+      data: ADMIN_USER,
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    mockedUseEngagement.mockReturnValue({
+      data: {
+        id: ENGAGEMENT_ID,
+        name: 'Test Engagement',
+        status: 'active' as const,
+        scope: '10.0.0.0/8',
+        client_info: null,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        member_role: 'owner' as const,
+        privacy_mode: 'cloud_enabled' as const,
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useEngagement>)
+
+    renderPage()
+
+    expect(screen.getByTestId('workspace-shell')).toHaveAttribute(
+      'data-privacy-mode',
+      'cloud_enabled',
+    )
+  })
+
+  it('passes local_only as safe default during loading', () => {
+    mockedUseMe.mockReturnValue({
+      data: ADMIN_USER,
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    mockedUseEngagement.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useEngagement>)
+
+    renderPage()
+
+    expect(screen.getByTestId('workspace-shell')).toHaveAttribute(
+      'data-privacy-mode',
+      'local_only',
+    )
+  })
+
+  it('owner sees inline toggle in workspace', () => {
+    mockedUseMe.mockReturnValue({
+      data: ADMIN_USER,
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    // setupMembershipDefaults already sets member_role: 'owner'
+
+    renderPage()
+
+    expect(screen.getByRole('switch')).toBeInTheDocument()
+    expect(screen.getByLabelText(/enable cloud llm/i)).toBeInTheDocument()
+  })
+
+  it('non-owner cannot see inline toggle', () => {
+    mockedUseMe.mockReturnValue({
+      data: { ...ADMIN_USER, role: 'user' as const },
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    setupMembershipDefaults('member')
+
+    renderPage()
+
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument()
   })
 })

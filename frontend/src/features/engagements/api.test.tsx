@@ -12,21 +12,24 @@ import {
   useEngagements,
   useMembers,
   useRemoveMember,
+  useUpdateEngagement,
 } from './api'
 import { api } from '@/shared/api'
 
 vi.mock('@/shared/api', () => ({
-  api: { GET: vi.fn(), POST: vi.fn(), DELETE: vi.fn() },
+  api: { GET: vi.fn(), POST: vi.fn(), DELETE: vi.fn(), PATCH: vi.fn() },
 }))
 
 const mockGet = vi.mocked(api.GET)
 const mockPost = vi.mocked(api.POST)
 const mockDelete = vi.mocked(api.DELETE)
+const mockPatch = vi.mocked(api.PATCH)
 
 type FetchResult = { data?: unknown; error?: unknown; response: { status: number } }
 const resolveGet = (value: FetchResult) => mockGet.mockResolvedValue(value as never)
 const resolvePost = (value: FetchResult) => mockPost.mockResolvedValue(value as never)
 const resolveDelete = (value: FetchResult) => mockDelete.mockResolvedValue(value as never)
+const resolvePatch = (value: FetchResult) => mockPatch.mockResolvedValue(value as never)
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -41,6 +44,7 @@ const ENGAGEMENT_SUMMARY = {
   status: 'active' as const,
   created_at: '2026-01-01T00:00:00Z',
   member_role: 'owner' as const,
+  privacy_mode: 'local_only' as const,
 }
 
 const ENGAGEMENT_DETAIL = {
@@ -52,6 +56,7 @@ const ENGAGEMENT_DETAIL = {
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
   member_role: 'owner' as const,
+  privacy_mode: 'local_only' as const,
 }
 
 const MEMBER_ENTRY = {
@@ -78,6 +83,7 @@ beforeEach(() => {
   mockGet.mockReset()
   mockPost.mockReset()
   mockDelete.mockReset()
+  mockPatch.mockReset()
 })
 
 // ---------------------------------------------------------------------------
@@ -215,12 +221,13 @@ describe('useCreateEngagement', () => {
         name: 'Alpha Pentest',
         scope: '192.168.1.0/24',
         client_info: 'ACME Corp',
+        privacy_mode: 'local_only',
       })
     })
 
     expect(returned).toEqual(ENGAGEMENT_DETAIL)
     expect(mockPost).toHaveBeenCalledWith('/api/v1/engagements', {
-      body: { name: 'Alpha Pentest', scope: '192.168.1.0/24', client_info: 'ACME Corp' },
+      body: { name: 'Alpha Pentest', scope: '192.168.1.0/24', client_info: 'ACME Corp', privacy_mode: 'local_only' },
     })
   })
 
@@ -237,6 +244,7 @@ describe('useCreateEngagement', () => {
         name: 'Alpha Pentest',
         scope: '192.168.1.0/24',
         client_info: null,
+        privacy_mode: 'local_only',
       })
     })
     expect(returned).toMatchObject({ client_info: null })
@@ -251,7 +259,7 @@ describe('useCreateEngagement', () => {
 
     await act(async () => {
       await expect(
-        result.current.mutateAsync({ name: '', scope: '10.0.0.0/8', client_info: null }),
+        result.current.mutateAsync({ name: '', scope: '10.0.0.0/8', client_info: null, privacy_mode: 'local_only' }),
       ).rejects.toThrow('Failed to create engagement')
     })
   })
@@ -275,6 +283,7 @@ describe('useCreateEngagement', () => {
         name: 'Alpha Pentest',
         scope: '192.168.1.0/24',
         client_info: null,
+        privacy_mode: 'local_only',
       })
     })
 
@@ -444,5 +453,64 @@ describe('useRemoveMember', () => {
     })
 
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: membersKey(ENGAGEMENT_ID) })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// useUpdateEngagement
+// ---------------------------------------------------------------------------
+
+describe('useUpdateEngagement', () => {
+  it('returns the updated engagement detail on success', async () => {
+    const updated = { ...ENGAGEMENT_DETAIL, privacy_mode: 'cloud_enabled' as const }
+    resolvePatch({ data: updated, response: { status: 200 } })
+    const { result } = renderHook(() => useUpdateEngagement(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    let returned: unknown
+    await act(async () => {
+      returned = await result.current.mutateAsync({ privacy_mode: 'cloud_enabled' })
+    })
+
+    expect(returned).toEqual(updated)
+    expect(mockPatch).toHaveBeenCalledWith('/api/v1/engagements/{engagement_id}', {
+      params: { path: { engagement_id: ENGAGEMENT_ID } },
+      body: { privacy_mode: 'cloud_enabled' },
+    })
+  })
+
+  it('throws on 403 (non-owner caller)', async () => {
+    resolvePatch({ error: { detail: 'Forbidden' }, response: { status: 403 } })
+    const { result } = renderHook(() => useUpdateEngagement(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await act(async () => {
+      await expect(
+        result.current.mutateAsync({ privacy_mode: 'cloud_enabled' }),
+      ).rejects.toThrow('Failed to update engagement')
+    })
+  })
+
+  it('invalidates engagementKey on success', async () => {
+    resolvePatch({ data: ENGAGEMENT_DETAIL, response: { status: 200 } })
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+
+    const { result } = renderHook(() => useUpdateEngagement(ENGAGEMENT_ID), { wrapper })
+
+    await act(async () => {
+      await result.current.mutateAsync({ privacy_mode: 'local_only' })
+    })
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: engagementKey(ENGAGEMENT_ID) })
   })
 })

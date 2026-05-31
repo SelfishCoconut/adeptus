@@ -205,6 +205,58 @@
       }
     },
     "/api/v1/engagements/{engagement_id}": {
+      "patch": {
+        "tags": [
+          "engagements"
+        ],
+        "summary": "Update Engagement",
+        "description": "Update engagement settings (owner only).",
+        "operationId": "update_engagement",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngagementUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngagementDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "get": {
         "tags": [
           "engagements"
@@ -435,6 +487,15 @@
               }
             ],
             "title": "Client Info"
+          },
+          "privacy_mode": {
+            "type": "string",
+            "enum": [
+              "local_only",
+              "cloud_enabled"
+            ],
+            "title": "Privacy Mode",
+            "default": "local_only"
           }
         },
         "type": "object",
@@ -495,6 +556,14 @@
               "member"
             ],
             "title": "Member Role"
+          },
+          "privacy_mode": {
+            "type": "string",
+            "enum": [
+              "local_only",
+              "cloud_enabled"
+            ],
+            "title": "Privacy Mode"
           }
         },
         "type": "object",
@@ -506,7 +575,8 @@
           "client_info",
           "created_at",
           "updated_at",
-          "member_role"
+          "member_role",
+          "privacy_mode"
         ],
         "title": "EngagementDetail"
       },
@@ -541,6 +611,14 @@
               "member"
             ],
             "title": "Member Role"
+          },
+          "privacy_mode": {
+            "type": "string",
+            "enum": [
+              "local_only",
+              "cloud_enabled"
+            ],
+            "title": "Privacy Mode"
           }
         },
         "type": "object",
@@ -549,9 +627,31 @@
           "name",
           "status",
           "created_at",
-          "member_role"
+          "member_role",
+          "privacy_mode"
         ],
         "title": "EngagementSummary"
+      },
+      "EngagementUpdate": {
+        "properties": {
+          "privacy_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "local_only",
+                  "cloud_enabled"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Privacy Mode"
+          }
+        },
+        "type": "object",
+        "title": "EngagementUpdate"
       },
       "HTTPValidationError": {
         "properties": {
