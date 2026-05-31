@@ -584,3 +584,100 @@ async def test_remove_member_401_unauthenticated(
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
         resp = await client.delete(f"/api/v1/engagements/{uuid4()}/members/{uuid4()}")
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Tests — update_engagement (PATCH /api/v1/engagements/{id})
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_patch_engagement_200_owner(
+    owner_client: AsyncClient,
+) -> None:
+    """PATCH by the owner returns 200 with updated EngagementDetail."""
+    eid = uuid4()
+    updated_detail = EngagementDetail(
+        id=eid,
+        name="ACME Web Assessment",
+        status="active",
+        scope="192.168.1.0/24",
+        client_info="ACME Corp",
+        created_at=_now(),
+        updated_at=_now(),
+        member_role="owner",
+        privacy_mode="cloud_enabled",
+    )
+    with patch(
+        "app.features.engagements.router.service.update_engagement",
+        new=AsyncMock(return_value=updated_detail),
+    ):
+        resp = await owner_client.patch(
+            f"/api/v1/engagements/{eid}",
+            json={"privacy_mode": "cloud_enabled"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["privacy_mode"] == "cloud_enabled"
+    assert body["id"] == str(eid)
+    assert body["member_role"] == "owner"
+
+
+@pytest.mark.asyncio
+async def test_patch_engagement_403_member(
+    member_client: AsyncClient,
+) -> None:
+    """PATCH by a non-owner member returns 403."""
+    eid = uuid4()
+    with patch(
+        "app.features.engagements.router.service.update_engagement",
+        new=AsyncMock(
+            side_effect=ForbiddenError("Only the engagement owner may update engagement settings")
+        ),
+    ):
+        resp = await member_client.patch(
+            f"/api/v1/engagements/{eid}",
+            json={"privacy_mode": "cloud_enabled"},
+        )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_patch_engagement_404_non_member(
+    owner_client: AsyncClient,
+) -> None:
+    """PATCH by a non-member returns 404 per §17.1 isolation posture."""
+    eid = uuid4()
+    with patch(
+        "app.features.engagements.router.service.update_engagement",
+        new=AsyncMock(side_effect=NotFoundError("Engagement not found")),
+    ):
+        resp = await owner_client.patch(
+            f"/api/v1/engagements/{eid}",
+            json={"privacy_mode": "cloud_enabled"},
+        )
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_post_engagement_includes_privacy_mode(
+    owner_client: AsyncClient,
+) -> None:
+    """POST response includes privacy_mode in the returned EngagementDetail."""
+    detail = _make_engagement_detail()
+    with patch(
+        "app.features.engagements.router.service.create_engagement",
+        new=AsyncMock(return_value=detail),
+    ):
+        resp = await owner_client.post(
+            "/api/v1/engagements",
+            json={"name": "Privacy Test", "scope": "10.0.0.0/8", "privacy_mode": "local_only"},
+        )
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert "privacy_mode" in body
+    assert body["privacy_mode"] == "local_only"

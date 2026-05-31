@@ -7,7 +7,7 @@ receive None (which the service layer turns into 404, per §17.1 isolation).
 
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.features.auth.models import User
@@ -21,13 +21,16 @@ async def create_engagement(
     scope: str,
     client_info: str | None,
     owner_id: UUID,
+    privacy_mode: str = "local_only",
 ) -> Engagement:
     """Insert an Engagement row and its owner EngagementMember row in one transaction.
 
     The caller is responsible for committing the transaction; this function only flushes
     so that the server-generated ``id`` columns are populated before returning.
     """
-    engagement = Engagement(name=name, scope=scope, client_info=client_info)
+    engagement = Engagement(
+        name=name, scope=scope, client_info=client_info, privacy_mode=privacy_mode
+    )
     db.add(engagement)
     await db.flush()  # populate engagement.id
 
@@ -65,6 +68,23 @@ async def get_engagement_for_member(
     if row is None:
         return None
     return row[0], row[1]
+
+
+async def update_engagement(
+    db: AsyncSession,
+    engagement_id: UUID,
+    *,
+    privacy_mode: str,
+) -> Engagement | None:
+    """Update an Engagement row's ``privacy_mode`` and return the refreshed object.
+
+    Returns ``None`` if the engagement does not exist.
+    """
+    await db.execute(
+        update(Engagement).where(Engagement.id == engagement_id).values(privacy_mode=privacy_mode)
+    )
+    result = await db.execute(select(Engagement).where(Engagement.id == engagement_id))
+    return result.scalar_one_or_none()
 
 
 async def list_engagements_for_user(
