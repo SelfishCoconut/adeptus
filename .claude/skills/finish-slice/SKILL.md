@@ -55,27 +55,35 @@ allowed-tools: Read, Bash, Grep, Edit
    ## Reviewers
    - Code review: ✓ <link to review summary>
    - Security review: <✓ or N/A>
+   - Drift audit: <verdict from step 8>
 
    Closes #<github-issue-number>
    ```
 
-8. Push and open PR:
+8. **Final drift audit — the last gate before any PR is opened.** Invoke the `audit-drift` skill to compare the slice's changes against the source-of-truth docs (slice spec, PROJECT_PLAN.md, requirements.md, architecture.md, the ADRs, CLAUDE.md), run the mechanical gates, and sweep for anti-patterns / structural violations. Read its Drift & Health Report verdict and gate on it:
+   - If the audit flags **code that strayed from the plan** (anti-patterns, structural violations, gate failures): STOP, surface the report to the user, and return findings to the implementer in the main loop. Do not push or open the PR.
+   - If the audit flags **a plan that no longer matches reality** (drift better mended via an ADR / slice-planner than a code fix): surface it and ask the user how to proceed before opening the PR.
+   - Only when the verdict is clean — or the user explicitly accepts the noted drift — proceed. Capture the verdict for the PR body's Reviewers line.
+
+9. Push and open PR:
    ```
    git push -u origin slice-NN-<kebab>
    gh pr create --title "Slice NN: <goal>" --body "<generated body>" --label slice
    ```
 
-9. Update PROJECT_PLAN.md: `Status: in-progress` → `Status: done` (the human will merge; mark done now so the next pick-next-slice can proceed in parallel if needed).
+10. Update PROJECT_PLAN.md: `Status: in-progress` → `Status: done` (the human will merge; mark done now so the next pick-next-slice can proceed in parallel if needed).
 
-10. Output to the user:
+11. Output to the user:
     - PR URL
     - Code review summary (one paragraph)
     - Security review verdict (if applicable)
+    - Drift audit verdict (one line)
     - Suggestion: "After merge, run pick-next-slice for the next one."
 
 ## Hard rules
 - Never open the PR if the gate is red or reviewers flag Critical findings.
 - Never skip the security review on a risky slice.
+- Never open the PR before the final drift audit (step 8) has run and its verdict is clean or explicitly accepted by the user.
 - Never auto-merge. The human merges.
 - Never proceed if the working tree is dirty — every change must be intentional and committed.
 - If anything looks off (commits with no associated task, uncommitted scratch files, unexpected file moves), stop and ask the user first.
