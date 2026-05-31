@@ -3,14 +3,16 @@ import { useNavigate } from 'react-router-dom'
 import { useLogout, useMe } from '@/features/auth/api'
 import { TermsGate } from '@/features/auth/components/TermsGate'
 import { WorkspaceShell } from '@/features/workspace/WorkspaceShell'
+import { useEngagement } from '../api'
+import { MembersList } from '../components/MembersList'
+import { InviteMemberForm } from '../components/InviteMemberForm'
 
 export function EngagementWorkspacePage() {
-  // Engagement id is available for downstream components (future slices).
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { id: _engagementId } = useParams<{ id: string }>()
+  const { id: engagementId = '' } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const me = useMe()
   const logout = useLogout()
+  const engagement = useEngagement(engagementId)
 
   // ProtectedRoute already ensures a user is present; this narrows the type.
   if (!me.data) {
@@ -23,6 +25,9 @@ export function EngagementWorkspacePage() {
     })
   }
 
+  // Caller's role defaults to 'member' while the engagement query is loading.
+  const callerRole = engagement.data?.member_role ?? 'member'
+
   return (
     <TermsGate>
       <WorkspaceShell
@@ -31,6 +36,15 @@ export function EngagementWorkspacePage() {
         onLogout={handleLogout}
         isLoggingOut={logout.isPending}
       />
+      {engagementId && (
+        <section aria-label="Membership" className="border-t px-6 py-6">
+          <h2 className="mb-4 text-lg font-semibold">Members</h2>
+          <InviteMemberForm engagementId={engagementId} callerRole={callerRole} />
+          <div className="mt-4">
+            <MembersList engagementId={engagementId} callerRole={callerRole} />
+          </div>
+        </section>
+      )}
     </TermsGate>
   )
 }
