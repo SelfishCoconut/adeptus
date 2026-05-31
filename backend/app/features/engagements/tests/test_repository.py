@@ -5,12 +5,13 @@ Tests are async; pytest-asyncio is configured with asyncio_mode="auto" in
 pyproject.toml so no explicit @pytest.mark.asyncio decorator is required.
 """
 
-from typing import Any, cast
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.features.auth.models import User
 from app.features.auth.repository import create_user
 from app.features.engagements import repository as repo
 from app.features.engagements.models import Engagement  # noqa: TCH001
@@ -20,12 +21,12 @@ from app.features.engagements.models import Engagement  # noqa: TCH001
 # ---------------------------------------------------------------------------
 
 
-def _uid(obj: Any) -> UUID:
+def _uid(obj: Engagement | User) -> UUID:
     """Cast a SQLAlchemy UUID column value to plain uuid.UUID for type-safe calls."""
     return cast(UUID, obj.id)
 
 
-async def _make_user(db: AsyncSession, *, username: str = "alice") -> Any:
+async def _make_user(db: AsyncSession, *, username: str = "alice") -> User:
     """Create and flush a User via the auth repository."""
     return await create_user(
         db,
@@ -86,10 +87,12 @@ async def test_get_engagement_for_member_returns_engagement_for_member(
     owner = await _make_user(db_session)
     engagement = await _make_engagement(db_session, _uid(owner))
 
-    found = await repo.get_engagement_for_member(db_session, _uid(engagement), _uid(owner))
+    result = await repo.get_engagement_for_member(db_session, _uid(engagement), _uid(owner))
 
-    assert found is not None
-    assert found.id == engagement.id
+    assert result is not None
+    eng, member = result
+    assert eng.id == engagement.id
+    assert member.role == "owner"
 
 
 async def test_get_engagement_for_member_returns_none_for_non_member(
@@ -99,9 +102,9 @@ async def test_get_engagement_for_member_returns_none_for_non_member(
     outsider = await _make_user(db_session, username="outsider")
     engagement = await _make_engagement(db_session, _uid(owner))
 
-    found = await repo.get_engagement_for_member(db_session, _uid(engagement), _uid(outsider))
+    result = await repo.get_engagement_for_member(db_session, _uid(engagement), _uid(outsider))
 
-    assert found is None
+    assert result is None
 
 
 async def test_get_engagement_for_member_returns_none_for_unknown_engagement(
@@ -109,9 +112,9 @@ async def test_get_engagement_for_member_returns_none_for_unknown_engagement(
 ) -> None:
     owner = await _make_user(db_session)
 
-    found = await repo.get_engagement_for_member(db_session, uuid4(), _uid(owner))
+    result = await repo.get_engagement_for_member(db_session, uuid4(), _uid(owner))
 
-    assert found is None
+    assert result is None
 
 
 # ---------------------------------------------------------------------------

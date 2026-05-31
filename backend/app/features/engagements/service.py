@@ -70,16 +70,16 @@ async def get_engagement(
 
     Raises NotFoundError if the engagement does not exist or the caller is not
     a member — membership is never revealed to non-members (§17.1).
+
+    Uses a single JOIN query to fetch both the Engagement and the caller's
+    EngagementMember row — no second round-trip is needed for the role.
     """
-    engagement = await repo.get_engagement_for_member(db, engagement_id, cast(UUID, caller.id))
-    if engagement is None:
+    row = await repo.get_engagement_for_member(db, engagement_id, cast(UUID, caller.id))
+    if row is None:
         raise NotFoundError("Engagement not found")
 
-    caller_member = await repo.get_member(db, engagement_id, cast(UUID, caller.id))
-    member_role = cast(
-        Literal["owner", "member"],
-        caller_member.role if caller_member is not None else "member",
-    )
+    engagement, caller_member = row
+    member_role = cast(Literal["owner", "member"], caller_member.role)
 
     return EngagementDetail(
         id=cast(UUID, engagement.id),

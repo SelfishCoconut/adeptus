@@ -187,20 +187,18 @@ async def test_list_engagements_only_returns_own(db: AsyncMock, caller: MagicMoc
 
 @pytest.mark.asyncio
 async def test_get_engagement_member_can_read(db: AsyncMock, caller: MagicMock) -> None:
-    """get_engagement returns EngagementDetail when the caller is a member."""
+    """get_engagement returns EngagementDetail when the caller is a member.
+
+    get_engagement_for_member now returns (Engagement, EngagementMember) in a
+    single query — no second get_member call.
+    """
     eng_id = uuid4()
     mock_eng = _make_engagement(engagement_id=eng_id)
     mock_membership = _make_member(engagement_id=eng_id, user_id=caller.id, role="owner")
 
-    with (
-        patch(
-            "app.features.engagements.service.repo.get_engagement_for_member",
-            new=AsyncMock(return_value=mock_eng),
-        ),
-        patch(
-            "app.features.engagements.service.repo.get_member",
-            new=AsyncMock(return_value=mock_membership),
-        ),
+    with patch(
+        "app.features.engagements.service.repo.get_engagement_for_member",
+        new=AsyncMock(return_value=(mock_eng, mock_membership)),
     ):
         result = await service.get_engagement(db, caller, eng_id)
 

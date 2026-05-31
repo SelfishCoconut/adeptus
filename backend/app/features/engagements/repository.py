@@ -46,19 +46,25 @@ async def get_engagement_for_member(
     db: AsyncSession,
     engagement_id: UUID,
     user_id: UUID,
-) -> Engagement | None:
-    """Return the Engagement if ``user_id`` is a member, otherwise None.
+) -> tuple[Engagement, EngagementMember] | None:
+    """Return the (Engagement, EngagementMember) pair if ``user_id`` is a member, else None.
 
     This is the §17.1 isolation chokepoint: every read path for a single
     engagement must go through this function so non-members get None (→ 404),
     not a 403 that would reveal the engagement exists.
+
+    Returning the caller's EngagementMember in the same query avoids a second
+    round-trip when the caller's role is needed (e.g. in ``get_engagement``).
     """
     result = await db.execute(
-        select(Engagement)
+        select(Engagement, EngagementMember)
         .join(EngagementMember, EngagementMember.engagement_id == Engagement.id)
         .where(Engagement.id == engagement_id, EngagementMember.user_id == user_id)
     )
-    return result.scalar_one_or_none()
+    row = result.one_or_none()
+    if row is None:
+        return None
+    return row[0], row[1]
 
 
 async def list_engagements_for_user(
