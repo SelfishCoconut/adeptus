@@ -30,6 +30,7 @@ def _make_engagement(
     scope: str = "*.example.com",
     client_info: str | None = "ACME Corp",
     status: str = "active",
+    privacy_mode: str = "local_only",
 ) -> MagicMock:
     eng = MagicMock()
     eng.id = engagement_id or uuid4()
@@ -37,6 +38,7 @@ def _make_engagement(
     eng.scope = scope
     eng.client_info = client_info
     eng.status = status
+    eng.privacy_mode = privacy_mode
     eng.created_at = NOW
     eng.updated_at = NOW
     return eng

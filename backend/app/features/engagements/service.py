@@ -58,6 +58,7 @@ async def create_engagement(
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         member_role="owner",
+        privacy_mode=cast(Literal["local_only", "cloud_enabled"], engagement.privacy_mode),
     )
 
 
@@ -90,6 +91,7 @@ async def get_engagement(
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         member_role=member_role,
+        privacy_mode=cast(Literal["local_only", "cloud_enabled"], engagement.privacy_mode),
     )
 
 
@@ -106,6 +108,7 @@ async def list_engagements(
             status=cast(Literal["active", "archived"], eng.status),
             created_at=eng.created_at,
             member_role=cast(Literal["owner", "member"], role),
+            privacy_mode=cast(Literal["local_only", "cloud_enabled"], eng.privacy_mode),
         )
         for eng, role in rows
     ]

@@ -74,6 +74,7 @@ def _make_engagement_detail(*, engagement_id: UUID | None = None) -> EngagementD
         created_at=_now(),
         updated_at=_now(),
         member_role="owner",
+        privacy_mode="local_only",
     )
 
 
@@ -84,6 +85,7 @@ def _make_engagement_summary(*, engagement_id: UUID | None = None) -> Engagement
         status="active",
         created_at=_now(),
         member_role="owner",
+        privacy_mode="local_only",
     )
 
 
