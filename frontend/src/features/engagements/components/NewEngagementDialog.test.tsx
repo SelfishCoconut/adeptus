@@ -1,0 +1,121 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { NewEngagementDialog } from './NewEngagementDialog'
+import { useCreateEngagement } from '../api'
+
+vi.mock('../api', () => ({
+  useCreateEngagement: vi.fn(),
+}))
+
+const mockedUseCreateEngagement = vi.mocked(useCreateEngagement)
+
+// Build a fake mutation result matching the ReturnType of useCreateEngagement.
+// The mutate function optionally invokes onSuccess/onError so tests can drive
+// the success and error paths without a real network call.
+function mutationResult(overrides: {
+  mutate?: ReturnType<typeof useCreateEngagement>['mutate']
+  isPending?: boolean
+  error?: unknown
+}) {
+  return {
+    mutate: overrides.mutate ?? vi.fn(),
+    isPending: overrides.isPending ?? false,
+    error: overrides.error ?? null,
+    isIdle: true,
+    isSuccess: false,
+    isError: !!overrides.error,
+    data: undefined,
+    reset: vi.fn(),
+    mutateAsync: vi.fn(),
+    status: 'idle' as const,
+    variables: undefined,
+    context: undefined,
+    failureCount: 0,
+    failureReason: null,
+    isPaused: false,
+    submittedAt: 0,
+  } as unknown as ReturnType<typeof useCreateEngagement>
+}
+
+function renderDialog(onOpenChange = vi.fn()) {
+  return {
+    onOpenChange,
+    ...render(<NewEngagementDialog open={true} onOpenChange={onOpenChange} />),
+  }
+}
+
+describe('NewEngagementDialog', () => {
+  beforeEach(() => {
+    mockedUseCreateEngagement.mockReset()
+  })
+
+  it('renders form fields — Name, Scope, and Client Info inputs are present', () => {
+    mockedUseCreateEngagement.mockReturnValue(mutationResult({}))
+
+    renderDialog()
+
+    expect(screen.getByLabelText(/name/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/scope/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/client info/i)).toBeInTheDocument()
+  })
+
+  it('submits and calls mutation with the expected body', async () => {
+    const user = userEvent.setup()
+    const mutate = vi.fn()
+    mockedUseCreateEngagement.mockReturnValue(mutationResult({ mutate }))
+
+    renderDialog()
+
+    await user.type(screen.getByLabelText(/name/i), 'ACME Pentest')
+    await user.type(screen.getByLabelText(/scope/i), '192.168.1.0/24')
+    await user.type(screen.getByLabelText(/client info/i), 'Jane Doe, ACME Corp')
+
+    await user.click(screen.getByRole('button', { name: /create/i }))
+
+    expect(mutate).toHaveBeenCalledOnce()
+    expect(mutate).toHaveBeenCalledWith(
+      { name: 'ACME Pentest', scope: '192.168.1.0/24', client_info: 'Jane Doe, ACME Corp' },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    )
+  })
+
+  it('shows field error on 422 response', () => {
+    const validationError = {
+      detail: [
+        {
+          loc: ['body', 'name'],
+          msg: 'String should have at least 1 character',
+          type: 'string_too_short',
+        },
+      ],
+    }
+    mockedUseCreateEngagement.mockReturnValue(mutationResult({ error: validationError }))
+
+    renderDialog()
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'String should have at least 1 character',
+    )
+  })
+
+  it('closes the dialog on success', async () => {
+    const user = userEvent.setup()
+    // Cast to the expected type via unknown — the mock only needs to call
+    // onSuccess() without caring about the full MutateOptions signature.
+    const mutate = vi.fn((_body: unknown, options?: Record<string, unknown>) => {
+      const cb = options?.['onSuccess']
+      if (typeof cb === 'function') cb()
+    }) as unknown as ReturnType<typeof useCreateEngagement>['mutate']
+    mockedUseCreateEngagement.mockReturnValue(mutationResult({ mutate }))
+
+    const onOpenChange = vi.fn()
+    render(<NewEngagementDialog open={true} onOpenChange={onOpenChange} />)
+
+    await user.type(screen.getByLabelText(/name/i), 'Test')
+    await user.type(screen.getByLabelText(/scope/i), '10.0.0.0/8')
+    await user.click(screen.getByRole('button', { name: /create/i }))
+
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+})
