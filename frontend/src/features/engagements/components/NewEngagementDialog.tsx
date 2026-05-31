@@ -62,6 +62,14 @@ export function NewEngagementDialog({ open, onOpenChange }: NewEngagementDialogP
     setName('')
     setScope('')
     setClientInfo('')
+    createEngagement.reset()
+  }
+
+  function handleOpenChange(nextOpen: boolean) {
+    if (!nextOpen) {
+      resetFields()
+    }
+    onOpenChange(nextOpen)
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -80,7 +88,7 @@ export function NewEngagementDialog({ open, onOpenChange }: NewEngagementDialogP
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>New Engagement</DialogTitle>
@@ -150,7 +158,7 @@ export function NewEngagementDialog({ open, onOpenChange }: NewEngagementDialogP
             <Button
               type="button"
               variant="outline"
-              onClick={() => onOpenChange(false)}
+              onClick={() => handleOpenChange(false)}
               disabled={createEngagement.isPending}
             >
               Cancel

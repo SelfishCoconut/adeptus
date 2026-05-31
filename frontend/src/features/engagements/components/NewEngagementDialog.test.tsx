@@ -164,4 +164,43 @@ describe('NewEngagementDialog', () => {
 
     expect(onOpenChange).toHaveBeenCalledWith(false)
   })
+
+  it('clears error banner when dialog is closed and reopened (W-04)', async () => {
+    const user = userEvent.setup()
+
+    // First render: dialog open with an active error (post-submit 422 state).
+    const validationError = {
+      detail: [{ loc: ['body', 'name'], msg: 'Required', type: 'missing' }],
+    }
+    const reset = vi.fn()
+    const mutationWithError = {
+      ...mutationResult({ error: validationError }),
+      reset,
+      isError: true,
+    } as unknown as ReturnType<typeof useCreateEngagement>
+    mockedUseCreateEngagement.mockReturnValue(mutationWithError)
+
+    const { rerender } = render(
+      <NewEngagementDialog open={true} onOpenChange={vi.fn()} />,
+    )
+
+    // Error banner is visible while the dialog is open with an error.
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+
+    // Simulate closing: click Cancel (goes through handleOpenChange → resetFields → reset()).
+    // Re-mock with a clean mutation before closing so the rerender sees no error.
+    const cleanMutation = mutationResult({})
+    mockedUseCreateEngagement.mockReturnValue(cleanMutation)
+
+    await user.click(screen.getByRole('button', { name: /cancel/i }))
+
+    // Now rerender with open=false then open=true to simulate close/reopen cycle.
+    rerender(<NewEngagementDialog open={false} onOpenChange={vi.fn()} />)
+    rerender(<NewEngagementDialog open={true} onOpenChange={vi.fn()} />)
+
+    // reset() must have been called when the dialog closed.
+    expect(reset).toHaveBeenCalled()
+    // No error banner on reopen.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
 })
