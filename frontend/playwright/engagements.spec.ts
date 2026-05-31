@@ -28,13 +28,23 @@ import { test, expect, type Page } from '@playwright/test'
 const STACK_AVAILABLE = !!process.env.E2E_STACK
 
 // ---------------------------------------------------------------------------
-// Credentials — read from environment variables with sensible CI defaults.
+// Credentials. Usernames may default (they are not secret); passwords must be
+// supplied via env when the stack is live, so the spec fails loudly rather than
+// guessing weak defaults against a real backend.
 // ---------------------------------------------------------------------------
 
+function requiredPassword(name: string): string {
+  const value = process.env[name]
+  if (STACK_AVAILABLE && !value) {
+    throw new Error(`${name} must be set when E2E_STACK=1`)
+  }
+  return value ?? ''
+}
+
 const ADMIN_USERNAME = process.env.ADEPTUS_ADMIN_USER ?? 'admin'
-const ADMIN_PASSWORD = process.env.ADEPTUS_ADMIN_PASSWORD ?? 'adminpassword'
+const ADMIN_PASSWORD = requiredPassword('ADEPTUS_ADMIN_PASSWORD')
 const TEST_USERNAME = process.env.ADEPTUS_TEST_USER_USERNAME ?? 'testuser'
-const TEST_PASSWORD = process.env.ADEPTUS_TEST_USER_PASSWORD ?? 'testpassword'
+const TEST_PASSWORD = requiredPassword('ADEPTUS_TEST_USER_PASSWORD')
 
 const ENGAGEMENT_NAME = `E2E Test Engagement ${Date.now()}`
 
