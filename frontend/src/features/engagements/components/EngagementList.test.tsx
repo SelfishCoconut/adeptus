@@ -81,4 +81,24 @@ describe('EngagementList', () => {
 
     expect(screen.getByTestId('engagement-list-skeleton')).toBeInTheDocument()
   })
+
+  it('shows error message when query errors with an Error instance', () => {
+    mockedUseEngagements.mockReturnValue(
+      listResult({ isError: true, error: new Error('Network timeout') }),
+    )
+
+    renderList()
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Network timeout')
+  })
+
+  it('shows fallback error message when error is not an Error instance', () => {
+    mockedUseEngagements.mockReturnValue(
+      listResult({ isError: true, error: 'string error' as unknown as Error }),
+    )
+
+    renderList()
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Failed to load engagements.')
+  })
 })

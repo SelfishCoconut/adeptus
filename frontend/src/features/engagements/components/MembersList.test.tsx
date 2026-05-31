@@ -118,6 +118,34 @@ describe('MembersList', () => {
     expect(screen.queryByRole('button', { name: /remove/i })).not.toBeInTheDocument()
   })
 
+  it('shows error message when query errors with an Error instance', () => {
+    mockedUseMembers.mockReturnValue(
+      membersResult({ isError: true, error: new Error('Network timeout') }),
+    )
+
+    renderMembersList()
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Network timeout')
+  })
+
+  it('shows fallback error message when error is not an Error instance', () => {
+    mockedUseMembers.mockReturnValue(
+      membersResult({ isError: true, error: 'unexpected string' as unknown as Error }),
+    )
+
+    renderMembersList()
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Failed to load members.')
+  })
+
+  it('shows empty state when there are no members', () => {
+    mockedUseMembers.mockReturnValue(membersResult({ data: [] }))
+
+    renderMembersList()
+
+    expect(screen.getByText('No members yet.')).toBeInTheDocument()
+  })
+
   it('calls removeMember mutation when Remove is clicked', async () => {
     const user = userEvent.setup()
     const mutate = vi.fn()

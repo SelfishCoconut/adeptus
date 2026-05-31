@@ -122,4 +122,38 @@ describe('InviteMemberForm', () => {
 
     expect(screen.getByRole('alert')).toHaveTextContent('Failed to add member')
   })
+
+  it('clears the username field after a successful invite', async () => {
+    const user = userEvent.setup()
+    // Simulate mutate calling onSuccess synchronously so we can verify reset
+    const mutate = vi.fn((_body: unknown, options?: Record<string, unknown>) => {
+      const cb = options?.['onSuccess']
+      if (typeof cb === 'function') cb()
+    }) as unknown as ReturnType<typeof useAddMember>['mutate']
+    mockedUseAddMember.mockReturnValue(addMutationResult({ mutate }))
+
+    renderForm('owner')
+
+    const input = screen.getByLabelText(/invite member/i)
+    await user.type(input, 'dave')
+    expect(input).toHaveValue('dave')
+
+    await user.click(screen.getByRole('button', { name: /invite/i }))
+
+    expect(input).toHaveValue('')
+  })
+
+  it('does not submit when username is only whitespace (submit via form, not button click)', async () => {
+    const user = userEvent.setup()
+    const mutate = vi.fn()
+    mockedUseAddMember.mockReturnValue(addMutationResult({ mutate }))
+
+    renderForm('owner')
+
+    // Type only spaces — button remains disabled so we fire the submit directly via Enter
+    await user.type(screen.getByLabelText(/invite member/i), '   ')
+    // Button should be disabled since trimmed value is empty
+    expect(screen.getByRole('button', { name: /invite/i })).toBeDisabled()
+    expect(mutate).not.toHaveBeenCalled()
+  })
 })

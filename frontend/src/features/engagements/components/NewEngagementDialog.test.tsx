@@ -99,6 +99,52 @@ describe('NewEngagementDialog', () => {
     )
   })
 
+  it('shows scope field error on 422 response for scope', () => {
+    const validationError = {
+      detail: [
+        {
+          loc: ['body', 'scope'],
+          msg: 'Scope is required',
+          type: 'string_too_short',
+        },
+      ],
+    }
+    mockedUseCreateEngagement.mockReturnValue(mutationResult({ error: validationError }))
+
+    renderDialog()
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Scope is required')
+  })
+
+  it('shows client_info field error on 422 response for client_info', () => {
+    const validationError = {
+      detail: [
+        {
+          loc: ['body', 'client_info'],
+          msg: 'Client info too long',
+          type: 'string_too_long',
+        },
+      ],
+    }
+    mockedUseCreateEngagement.mockReturnValue(mutationResult({ error: validationError }))
+
+    renderDialog()
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Client info too long')
+  })
+
+  it('closes the dialog when Cancel is clicked', async () => {
+    const user = userEvent.setup()
+    mockedUseCreateEngagement.mockReturnValue(mutationResult({}))
+
+    const onOpenChange = vi.fn()
+    render(<NewEngagementDialog open={true} onOpenChange={onOpenChange} />)
+
+    await user.click(screen.getByRole('button', { name: /cancel/i }))
+
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
   it('closes the dialog on success', async () => {
     const user = userEvent.setup()
     // Cast to the expected type via unknown — the mock only needs to call
