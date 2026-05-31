@@ -313,3 +313,4 @@ No — this slice touches neither auth, MCP, audit log, single-writer graph, RAG
 
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-05-31T17:57:00Z — cc56ebc Merge pull request #7 from SelfishCoconut/slice-01-engagement-crud-membership
+- 2026-05-31T18:27:41Z — ed7ea3d test(slice-02): E2E privacy banner journey (cloud vs local-only)
