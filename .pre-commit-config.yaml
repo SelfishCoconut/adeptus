@@ -30,6 +30,8 @@ repos:
         additional_dependencies:
           - pydantic
           - sqlalchemy
+          - pyyaml
+          - types-PyYAML
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.4
