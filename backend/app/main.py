@@ -6,10 +6,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.core.config import get_settings
 from app.core.db import get_sessionmaker
 from app.core.errors import register_error_handlers
 from app.features.auth import service as auth_service
 from app.features.auth.router import router as auth_router
+from app.features.engagements.router import router as engagements_router
 from app.features.health.router import router as health_router
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Run startup tasks: bootstrap the admin user."""
+    settings = get_settings()
     factory = get_sessionmaker()
     async with factory() as db:
         try:
@@ -31,6 +34,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.exception("Failed to bootstrap admin user")
             # Don't crash the app — bad hash is a config problem, not a fatal startup error.
             # The admin simply won't be able to log in until the env var is fixed.
+
+        # DEV/TEST ONLY — never runs when ENVIRONMENT=production
+        if settings.ENVIRONMENT in ("development", "test"):
+            try:
+                test_user = await auth_service.bootstrap_test_user(db)
+                if test_user:
+                    await db.commit()
+                    logger.info("Test user bootstrapped: %s", test_user.username)
+                else:
+                    logger.debug("Test user bootstrap skipped (already exists or vars unset).")
+            except Exception:
+                logger.exception("Failed to bootstrap test user")
+                # Don't crash startup — misconfigured test-user vars are not fatal.
     yield
 
 
@@ -40,6 +56,7 @@ def create_app() -> FastAPI:
     # feature routers
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(engagements_router)
     return app
 
 

@@ -19,8 +19,8 @@ export function LoginForm() {
       {
         onSuccess: () => {
           // useLogin already seeds the `me` query cache (the session source of
-          // truth); just route into the workspace.
-          navigate('/workspace')
+          // truth); route to the engagements landing page.
+          navigate('/engagements')
         },
       },
     )

@@ -35,3 +35,17 @@ class ValidationError(AdeptusError):
 
     def __init__(self: "ValidationError", message: str = "Validation failed") -> None:
         super().__init__(message)
+
+
+class ConflictError(AdeptusError):
+    """Raised when an operation conflicts with the current state of a resource."""
+
+    def __init__(self: "ConflictError", message: str = "Conflict") -> None:
+        super().__init__(message)
+
+
+class BadRequestError(AdeptusError):
+    """Raised when the request is semantically invalid (distinct from schema validation)."""
+
+    def __init__(self: "BadRequestError", message: str = "Bad request") -> None:
+        super().__init__(message)

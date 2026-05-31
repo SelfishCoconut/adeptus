@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     SESSION_TTL_DAYS: int = 14
     ENVIRONMENT: str = "production"
 
+    # DEV/TEST ONLY — ignored when ENVIRONMENT=production (see auth/service.py bootstrap_test_user)
+    ADEPTUS_TEST_USER_USERNAME: str | None = None
+    ADEPTUS_TEST_USER_PASSWORD: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

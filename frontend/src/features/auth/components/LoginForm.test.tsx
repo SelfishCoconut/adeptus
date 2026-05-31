@@ -74,7 +74,7 @@ describe('LoginForm', () => {
       { username: 'admin', password: 'secret' },
       expect.objectContaining({ onSuccess: expect.any(Function) }),
     )
-    expect(mockNavigate).toHaveBeenCalledWith('/workspace')
+    expect(mockNavigate).toHaveBeenCalledWith('/engagements')
   })
 
   it('shows an error message when login fails', () => {

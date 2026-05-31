@@ -47,7 +47,11 @@ async def login(
     return UserMe.model_validate(user)
 
 
-@router.post("/logout", status_code=204)
+@router.post(
+    "/logout",
+    status_code=204,
+    responses={401: {"description": "Not authenticated"}},
+)
 async def logout(
     response: Response,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -59,7 +63,11 @@ async def logout(
     clear_session_cookie(response)
 
 
-@router.get("/me", response_model=UserMe)
+@router.get(
+    "/me",
+    response_model=UserMe,
+    responses={401: {"description": "Not authenticated"}},
+)
 async def me(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> UserMe:
@@ -67,7 +75,11 @@ async def me(
     return UserMe.model_validate(current_user)
 
 
-@router.post("/accept-terms", response_model=UserMe)
+@router.post(
+    "/accept-terms",
+    response_model=UserMe,
+    responses={401: {"description": "Not authenticated"}},
+)
 async def accept_terms(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],

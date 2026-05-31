@@ -71,6 +71,38 @@ async def bootstrap_admin(db: AsyncSession) -> User | None:
     )
 
 
+async def bootstrap_test_user(db: AsyncSession) -> User | None:
+    """Idempotently seed a dev/test user from ADEPTUS_TEST_USER_* settings.
+
+    DEV/TEST ONLY — returns None immediately when ENVIRONMENT is not in
+    ("development", "test"), so a weak test credential can never be seeded
+    into a production database (slice-01 Risk 5).
+
+    Order of checks:
+    1. Return None if ENVIRONMENT is not "development" or "test".
+    2. Return None if ADEPTUS_TEST_USER_USERNAME or ADEPTUS_TEST_USER_PASSWORD is unset.
+    3. Return None if the username already exists (idempotent re-seed).
+    4. Otherwise hash the plaintext password and create the user with role "user".
+    """
+    settings = get_settings()
+
+    # DEV/TEST ONLY — never runs when ENVIRONMENT=production
+    if settings.ENVIRONMENT not in ("development", "test"):
+        return None
+
+    username = settings.ADEPTUS_TEST_USER_USERNAME
+    password = settings.ADEPTUS_TEST_USER_PASSWORD
+    if not username or not password:
+        return None
+
+    existing = await repo.get_user_by_username(db, username)
+    if existing is not None:
+        return None
+
+    password_hash = _hasher.hash(password)
+    return await repo.create_user(db, username=username, password_hash=password_hash, role="user")
+
+
 async def accept_terms(db: AsyncSession, *, user_id: UUID) -> User:
     """Record terms-of-use acceptance. Idempotent — calling twice is safe."""
     return await repo.update_terms_accepted(db, user_id)

@@ -4,6 +4,8 @@ import { ThemeProvider } from '@/components/theme/ThemeProvider'
 import { ProtectedRoute } from './ProtectedRoute'
 import { LoginPage } from './LoginPage'
 import { WorkspacePage } from './WorkspacePage'
+import { EngagementsPage } from '@/features/engagements/pages/EngagementsPage'
+import { EngagementWorkspacePage } from '@/features/engagements/pages/EngagementWorkspacePage'
 
 const queryClient = new QueryClient()
 
@@ -15,6 +17,24 @@ export function App() {
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route
+              path="/engagements"
+              element={
+                <ProtectedRoute>
+                  <EngagementsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/engagements/:id/workspace"
+              element={
+                <ProtectedRoute>
+                  <EngagementWorkspacePage />
+                </ProtectedRoute>
+              }
+            />
+            {/* Legacy route: redirect to /engagements. Kept so any bookmarks or
+                Slice 00 navigation to /workspace doesn't hard-404. */}
+            <Route
               path="/workspace"
               element={
                 <ProtectedRoute>
@@ -22,8 +42,8 @@ export function App() {
                 </ProtectedRoute>
               }
             />
-            <Route path="/" element={<Navigate to="/workspace" replace />} />
-            <Route path="*" element={<Navigate to="/workspace" replace />} />
+            <Route path="/" element={<Navigate to="/engagements" replace />} />
+            <Route path="*" element={<Navigate to="/engagements" replace />} />
           </Routes>
         </BrowserRouter>
       </QueryClientProvider>

@@ -4,6 +4,8 @@ from fastapi.responses import JSONResponse
 
 from app.core.errors.exceptions import (
     AuthenticationError,
+    BadRequestError,
+    ConflictError,
     ForbiddenError,
     NotFoundError,
     ValidationError,
@@ -55,4 +57,18 @@ def register_error_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=400,
             content={"error": {"code": "validation_error", "message": exc.message}},
+        )
+
+    @app.exception_handler(ConflictError)
+    async def conflict_handler(request: Request, exc: ConflictError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"code": "conflict", "message": exc.message}},
+        )
+
+    @app.exception_handler(BadRequestError)
+    async def bad_request_handler(request: Request, exc: BadRequestError) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "bad_request", "message": exc.message}},
         )

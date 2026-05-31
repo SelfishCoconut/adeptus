@@ -12,6 +12,7 @@ from app.core.db import Base
 
 # Import all models so their metadata is registered on Base.
 from app.features.auth import models as _auth_models  # noqa: F401
+from app.features.engagements import models as _engagements_models  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
