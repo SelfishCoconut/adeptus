@@ -36,7 +36,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §5.1, §5.5, §17.5
 - **Depends on**: 01
 - **Risky**: no
-- **Status**: in-progress
+- **Status**: done
 
 ### Slice 39: TLS + self-signed by default
 - **Goal**: App reachable via HTTPS with bundled self-signed cert; doc swap procedure
