@@ -1,0 +1,16 @@
+# Adeptus MCP server registry
+# Loaded by backend/app/features/mcp/registry.py at startup (MCP_CONFIG_PATH).
+# Each server entry requires: name, command, tools[].
+# Each tool entry requires: name, weight (light|heavy), capability_flags (list).
+
+servers:
+  - name: shell-exec
+    command: python
+    args:
+      - /mcp-servers/shell-exec/server.py
+    tools:
+      - name: run_command
+        weight: light
+        capability_flags:
+          - shell-exec
+          - filesystem-write
