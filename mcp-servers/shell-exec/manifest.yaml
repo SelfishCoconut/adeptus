@@ -1,0 +1,7 @@
+name: shell-exec
+tools:
+  - name: run_command
+    weight: light
+    capability_flags:
+      - shell-exec
+      - filesystem-write
