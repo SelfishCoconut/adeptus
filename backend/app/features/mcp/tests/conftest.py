@@ -6,7 +6,10 @@ Postgres-specific types patched for SQLite compatibility:
 - ``User.id`` / ``Engagement.id`` / ``ToolRun.id``: server_default=text("gen_random_uuid()")
   is Postgres SQL; replaced with a Python-side ColumnDefault(uuid4).
 - ``Session.ip``: INET has no SQLite DDL equivalent; replaced with Text().
-- ``ToolRun.args``: JSONB has no SQLite DDL equivalent; replaced with JSON().
+
+``ToolRun.args`` needs no patch here: the model declares its type as a dialect
+variant (``JSONB().with_variant(JSON(), "sqlite")``) so create_all renders JSON
+on SQLite automatically.
 
 All four base tables (users, sessions, engagements, engagement_members, tool_runs) are
 created so FK references in DDL are satisfied.  SQLite does not enforce FK constraints
@@ -18,7 +21,7 @@ from collections.abc import AsyncGenerator
 from uuid import uuid4
 
 import pytest_asyncio
-from sqlalchemy import JSON, Column, ColumnDefault, Text
+from sqlalchemy import Column, ColumnDefault, Text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.db import Base
@@ -45,10 +48,6 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     # Patch ToolRun.id: Postgres gen_random_uuid() → Python-side uuid4.
     tool_run_id_col: Column = mcp_models.ToolRun.__table__.c.id  # type: ignore[assignment]
     tool_run_id_col.default = ColumnDefault(uuid4)
-
-    # Patch ToolRun.args: JSONB → JSON (SQLite-compatible).
-    args_col: Column = mcp_models.ToolRun.__table__.c.args  # type: ignore[assignment]
-    args_col.type = JSON()
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:

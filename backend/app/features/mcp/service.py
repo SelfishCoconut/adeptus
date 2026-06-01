@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -84,7 +84,7 @@ async def list_servers() -> list[McpServerInfo]:
         tools = [
             McpToolDeclaration(
                 name=tool.name,
-                weight=tool.weight,  # type: ignore[arg-type]
+                weight=cast(Literal["light", "heavy"], tool.weight),
                 capability_flags=tool.capability_flags,
             )
             for tool in config.tools
@@ -92,7 +92,7 @@ async def list_servers() -> list[McpServerInfo]:
         result.append(
             McpServerInfo(
                 server_name=server_name,
-                status=status,  # type: ignore[arg-type]
+                status=cast(Literal["running", "stopped"], status),
                 tools=tools,
             )
         )
@@ -197,13 +197,13 @@ async def execute_tool_run(
 
     # Step 7: build and return the result schema.
     return ToolRunResult(
-        tool_run_id=updated.id,  # type: ignore[arg-type]
-        engagement_id=updated.engagement_id,  # type: ignore[arg-type]
+        tool_run_id=cast(UUID, updated.id),
+        engagement_id=cast(UUID, updated.engagement_id),
         server_name=updated.server_name,
         tool_name=updated.tool_name,
-        exit_code=updated.exit_code,  # type: ignore[arg-type]
+        exit_code=cast(int, updated.exit_code),
         stdout=updated.stdout,
         stderr=updated.stderr,
         started_at=updated.started_at,
-        finished_at=updated.finished_at,  # type: ignore[arg-type]
+        finished_at=cast(datetime, updated.finished_at),
     )
