@@ -79,7 +79,7 @@ async def execute_tool_run(
     Admin role does NOT bypass the membership requirement (§4).
     """
     try:
-        return await service.execute_tool_run(
+        result = await service.execute_tool_run(
             db,
             engagement_id=body.engagement_id,
             server_name=body.server_name,
@@ -88,6 +88,8 @@ async def execute_tool_run(
             timeout_seconds=body.timeout_seconds,
             user_id=current_user.id,  # type: ignore[arg-type]
         )
+        await db.commit()
+        return result
     except EngagementNotFound as exc:
         return JSONResponse(
             status_code=404,
