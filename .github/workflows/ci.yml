@@ -77,6 +77,37 @@ jobs:
           name: backend-coverage
           path: backend/coverage.xml
 
+  mcp-servers:
+    name: MCP servers (lint + typecheck + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+        working-directory: mcp-servers
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+        working-directory: mcp-servers
+
+      - name: Ruff lint
+        run: uv run ruff check .
+        working-directory: mcp-servers
+
+      - name: Mypy
+        run: uv run mypy .
+        working-directory: mcp-servers
+
+      - name: Pytest with coverage gate
+        run: uv run pytest --cov=. --cov-fail-under=80
+        working-directory: mcp-servers
+
   frontend:
     name: Frontend (lint + typecheck + test)
     runs-on: ubuntu-latest

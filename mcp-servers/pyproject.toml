@@ -1,0 +1,53 @@
+[project]
+name = "adeptus-mcp-servers"
+version = "0.1.0"
+description = "Adeptus — internal MCP servers (standalone stdio subprocesses)"
+requires-python = ">=3.12"
+# Servers are stdlib-only by design: they run as independent subprocesses the
+# backend talks to over stdio, and must not depend on the backend's env.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
+[tool.uv]
+# Not an installable package — this tree is a collection of standalone scripts,
+# not a distributable library.
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "ASYNC", "ANN"]
+ignore = [
+    "ANN401",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_return_any = true
+strict = false
+# Test helpers import pytest and the server module via sys.path manipulation;
+# stubs for those are not installed in the isolated lint env.
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+omit = ["*/tests/*"]
