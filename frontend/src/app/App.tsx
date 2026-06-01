@@ -2,10 +2,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { ThemeProvider } from '@/components/theme/ThemeProvider'
 import { ProtectedRoute } from './ProtectedRoute'
+import { AdminRoute } from './AdminRoute'
 import { LoginPage } from './LoginPage'
 import { WorkspacePage } from './WorkspacePage'
 import { EngagementsPage } from '@/features/engagements/pages/EngagementsPage'
 import { EngagementWorkspacePage } from '@/features/engagements/pages/EngagementWorkspacePage'
+import { McpServersPage } from '@/features/admin/pages/McpServersPage'
 
 const queryClient = new QueryClient()
 
@@ -30,6 +32,14 @@ export function App() {
                 <ProtectedRoute>
                   <EngagementWorkspacePage />
                 </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/admin/mcp-servers"
+              element={
+                <AdminRoute>
+                  <McpServersPage />
+                </AdminRoute>
               }
             />
             {/* Legacy route: redirect to /engagements. Kept so any bookmarks or
