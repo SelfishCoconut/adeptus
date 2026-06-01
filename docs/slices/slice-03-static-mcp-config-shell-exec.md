@@ -309,3 +309,6 @@ Yes — this slice touches MCP subprocess spawning and direct shell-exec capabil
 
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-05-31T20:02:25Z — f764cf4 Merge pull request #10 from SelfishCoconut/slice-02-privacy-mode-banner
+- 2026-06-01T19:28:51Z — c920f5d feat(slice-03): add shell-exec MCP server with 1MB output cap
+- 2026-06-01T19:29:54Z — c920f5d feat(slice-03): add shell-exec MCP server with 1MB output cap
+- 2026-06-01T20:04:12Z — c6af393 test(slice-03): add MCP integration test and fix missing db.commit in router
