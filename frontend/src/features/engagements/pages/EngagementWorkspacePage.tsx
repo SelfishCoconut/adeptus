@@ -51,6 +51,7 @@ export function EngagementWorkspacePage() {
         onLogout={handleLogout}
         isLoggingOut={logout.isPending}
         privacyMode={privacyMode}
+        engagementId={engagementId}
       />
       {engagementId && callerRole === 'owner' && (
         <div className="flex items-center gap-2 border-b px-6 py-3">

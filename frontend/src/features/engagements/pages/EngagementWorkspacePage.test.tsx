@@ -33,14 +33,21 @@ vi.mock('@/features/workspace/WorkspaceShell', () => ({
     onLogout,
     isLoggingOut,
     privacyMode,
+    engagementId,
   }: {
     username: string
     role: string
     onLogout: () => void
     isLoggingOut: boolean
     privacyMode: PrivacyMode
+    engagementId?: string
   }) => (
-    <div data-testid="workspace-shell" data-logging-out={String(isLoggingOut)} data-privacy-mode={privacyMode}>
+    <div
+      data-testid="workspace-shell"
+      data-logging-out={String(isLoggingOut)}
+      data-privacy-mode={privacyMode}
+      data-engagement-id={engagementId ?? ''}
+    >
       <span data-testid="username">{username}</span>
       <span data-testid="role">{role}</span>
       <button type="button" onClick={onLogout}>
@@ -394,6 +401,23 @@ describe('EngagementWorkspacePage', () => {
     expect(screen.getByTestId('workspace-shell')).toHaveAttribute(
       'data-privacy-mode',
       'local_only',
+    )
+  })
+
+  it('passes engagementId to WorkspaceShell so the Console pane can render RawShellForm', () => {
+    mockedUseMe.mockReturnValue({
+      data: ADMIN_USER,
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+
+    renderPage(ENGAGEMENT_ID)
+
+    expect(screen.getByTestId('workspace-shell')).toHaveAttribute(
+      'data-engagement-id',
+      ENGAGEMENT_ID,
     )
   })
 

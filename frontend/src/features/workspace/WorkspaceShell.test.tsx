@@ -17,6 +17,10 @@ vi.mock('./components/PrivacyModeBanner', () => ({
   ),
 }))
 
+vi.mock('@/features/mcp/components/RawShellForm', () => ({
+  RawShellForm: () => <div data-testid="raw-shell-form" />,
+}))
+
 describe('WorkspaceShell', () => {
   it('renders the top bar (username, role, logout, health) and three panes', () => {
     render(
@@ -82,5 +86,57 @@ describe('WorkspaceShell', () => {
     const banner = screen.getByTestId('privacy-mode-banner')
     expect(banner).toBeInTheDocument()
     expect(banner).toHaveAttribute('data-privacy-mode', 'cloud_enabled')
+  })
+
+  describe('Console pane — RawShellForm visibility', () => {
+    it('shows the RawShellForm when an engagementId is provided', () => {
+      render(
+        <WorkspaceShell
+          username="alice"
+          role="admin"
+          onLogout={vi.fn()}
+          privacyMode="local_only"
+          engagementId="aaaaaaaa-0000-0000-0000-000000000001"
+        />,
+      )
+
+      expect(screen.getByTestId('raw-shell-form')).toBeInTheDocument()
+      expect(
+        screen.queryByText(/select an engagement/i),
+      ).not.toBeInTheDocument()
+    })
+
+    it('shows the "select an engagement" placeholder when no engagementId is provided', () => {
+      render(
+        <WorkspaceShell
+          username="alice"
+          role="admin"
+          onLogout={vi.fn()}
+          privacyMode="local_only"
+        />,
+      )
+
+      expect(screen.queryByTestId('raw-shell-form')).not.toBeInTheDocument()
+      expect(
+        screen.getByText(/select an engagement to use the shell runner/i),
+      ).toBeInTheDocument()
+    })
+
+    it('shows the "select an engagement" placeholder when engagementId is empty string', () => {
+      render(
+        <WorkspaceShell
+          username="alice"
+          role="admin"
+          onLogout={vi.fn()}
+          privacyMode="local_only"
+          engagementId=""
+        />,
+      )
+
+      expect(screen.queryByTestId('raw-shell-form')).not.toBeInTheDocument()
+      expect(
+        screen.getByText(/select an engagement to use the shell runner/i),
+      ).toBeInTheDocument()
+    })
   })
 })

@@ -3,6 +3,7 @@ import { ModeToggle } from '@/components/theme/ModeToggle'
 import type { PrivacyMode } from '@/shared/api'
 import { PrivacyModeBanner } from './components/PrivacyModeBanner'
 import { HealthIndicator } from './HealthIndicator'
+import { RawShellForm } from '@/features/mcp/components/RawShellForm'
 
 interface WorkspaceShellProps {
   username: string
@@ -10,6 +11,8 @@ interface WorkspaceShellProps {
   onLogout: () => void
   isLoggingOut?: boolean
   privacyMode: PrivacyMode
+  /** When provided, the Console pane embeds the Raw Shell debug form. */
+  engagementId?: string
 }
 
 export function WorkspaceShell({
@@ -18,6 +21,7 @@ export function WorkspaceShell({
   onLogout,
   isLoggingOut = false,
   privacyMode,
+  engagementId,
 }: WorkspaceShellProps) {
   return (
     <div className="flex h-svh flex-col bg-background text-foreground">
@@ -45,8 +49,13 @@ export function WorkspaceShell({
         <section aria-label="Graph" className="bg-background p-4">
           <h2 className="text-sm font-medium text-muted-foreground">Graph</h2>
         </section>
-        <section aria-label="Console" className="col-span-2 bg-background p-4">
-          <h2 className="text-sm font-medium text-muted-foreground">Console</h2>
+        <section aria-label="Console" className="col-span-2 overflow-y-auto bg-background p-4">
+          <h2 className="mb-3 text-sm font-medium text-muted-foreground">Console</h2>
+          {engagementId ? (
+            <RawShellForm />
+          ) : (
+            <p className="text-sm text-muted-foreground">Select an engagement to use the shell runner.</p>
+          )}
         </section>
       </div>
     </div>
