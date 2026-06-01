@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from typing import Any
 
 MAX_OUTPUT_BYTES: int = 1_048_576  # 1 MB
 TRUNCATION_SENTINEL: str = "\n[output truncated at 1 MB]"
@@ -52,7 +53,7 @@ def _truncate(data: bytes) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _run_command(arguments: dict[str, object]) -> dict[str, object]:
+async def _run_command(arguments: dict[str, Any]) -> dict[str, Any]:
     """Execute a shell command and return exit_code/stdout/stderr."""
     command = arguments.get("command")
     if not isinstance(command, str) or not command:
@@ -110,12 +111,12 @@ async def _run_command(arguments: dict[str, object]) -> dict[str, object]:
 # JSON-RPC dispatch
 # ---------------------------------------------------------------------------
 
-_TOOLS: dict[str, object] = {
+_TOOLS: dict[str, Any] = {
     "run_command": _run_command,
 }
 
 
-async def _handle_request(request: dict[str, object]) -> dict[str, object]:
+async def _handle_request(request: dict[str, Any]) -> dict[str, Any]:
     """Dispatch a single JSON-RPC 2.0 request and return a response dict."""
     req_id = request.get("id")
     method = request.get("method")
@@ -151,7 +152,7 @@ async def _handle_request(request: dict[str, object]) -> dict[str, object]:
             },
         }
 
-    result = await handler(arguments)  # type: ignore[operator]
+    result = await handler(arguments)
     return {
         "jsonrpc": "2.0",
         "id": req_id,
