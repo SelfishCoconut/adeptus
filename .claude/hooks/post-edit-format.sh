@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # .claude/hooks/post-edit-format.sh
-# Runs format + lint + typecheck on the edited file.
+# Fast per-edit formatter: runs only cheap, file-local checks on the edited file.
+#   *.py                         -> ruff format + ruff check
+#   *.ts/tsx/js/jsx              -> prettier --write
+#   *.md/json/yml/yaml           -> prettier --write
+# The slow, import-graph-aware checks (mypy, eslint, tsc) live in
+# stop-typecheck.sh and run once per turn — never per edit.
 # Non-blocking: writes summary to stderr so Claude self-corrects on next turn.
 # Uses Python stdlib for JSON parsing (no jq dependency).
 
@@ -41,21 +46,11 @@ case "$file" in
         echo "$lint_out" >&2
       fi
     fi
-    if echo "$file" | grep -qE '^backend/app/' && command -v mypy >/dev/null 2>&1; then
-      if ! mypy_out="$(cd backend && mypy --no-error-summary "${file#backend/}" 2>&1)"; then
-        echo "Mypy errors in $file:" >&2
-        echo "$mypy_out" >&2
-      fi
-    fi
     ;;
 
   *.ts|*.tsx|*.js|*.jsx)
     if [ -d frontend ]; then
       (cd frontend && npx --no-install prettier --write "../$file" 2>/dev/null) || true
-      if ! eslint_out="$(cd frontend && npx --no-install eslint "../$file" 2>&1)"; then
-        echo "ESLint failed on $file:" >&2
-        echo "$eslint_out" >&2
-      fi
     fi
     ;;
 
