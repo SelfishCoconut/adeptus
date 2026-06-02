@@ -20,7 +20,7 @@ allowed-tools: Read, Bash, Grep
 
 3. Read the git log for the slice branch: `git log main..HEAD --oneline`.
 
-4. Match commits to tasks in the slice spec's "Backend tasks" and "Frontend tasks" lists. A task is considered done if any commit message references it (look for `slice-NN: <task name>` or related keywords).
+4. Match commits to tasks by the `(task N)` token, NOT by prose keywords. A task N is done iff some commit subject on the branch contains the literal token `(task N)` (e.g. `git log main..HEAD --oneline | grep -oE '\(task [0-9]+\)'`). Task numbers are unique within a slice (numbered continuously across backend then frontend), so each token maps to exactly one task. If the tokens are ambiguous or missing on commits that clearly did work, STOP and ask the user rather than guessing from keywords.
 
 5. Determine the next task:
    - Prefer backend tasks if frontend hasn't been started — the contract-first build order means schemas exist first.
@@ -38,6 +38,6 @@ allowed-tools: Read, Bash, Grep
 
 ## Hard rules
 - Never invent a task that isn't in the slice spec. If the user wants to do something extra, tell them to amend the slice spec first.
-- Never mark tasks done in the spec yourself — the implementer's commit IS the marker.
+- Tasks are tracked by `(task N)`-tagged commits — git is the ledger. No one (not you, not the implementer, not the main loop) edits checkbox/task state in the spec. The `(task N)` token in the commit subject IS the marker.
 - If all tasks appear complete based on commits, suggest the user run `finish-slice` instead.
 - If you can't determine the next task confidently (ambiguous commits, conflicting signals), ask the user.

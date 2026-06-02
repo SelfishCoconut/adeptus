@@ -59,7 +59,7 @@ allowed-tools: Read, Write, Edit, Bash
 9. Stage and commit:
    ```
    git add mcp-servers/<name> backend/config/mcp-servers.yaml docs/runbooks/mcp-servers.md
-   git commit -m "feat(slice-NN): add <name> MCP server"
+   git commit -m "feat(slice-NN): add <name> MCP server (task N)"
    ```
 
 ## Hard rules

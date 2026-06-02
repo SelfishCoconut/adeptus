@@ -54,7 +54,7 @@ allowed-tools: Read, Write, Edit, Bash
 8. Stage and commit:
    ```
    git add backend/alembic/versions/<file> backend/tests/migrations/<file>
-   git commit -m "feat(slice-NN): migration — <description>"
+   git commit -m "feat(slice-NN): migration — <description> (task N)"
    ```
 
 9. Report to the main loop:
