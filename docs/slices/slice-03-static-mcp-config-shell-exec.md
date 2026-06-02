@@ -2,7 +2,7 @@
 
 **Branch**: `slice-03-static-mcp-config-shell-exec`
 **GitHub Issue**: #11
-**Status**: planned
+**Status**: done
 **Risky**: yes
 
 ---
@@ -14,7 +14,7 @@ Expose a static MCP capability registry to the admin UI and execute a shell comm
 ## User-visible demo
 
 - Navigate to a new **Admin > MCP Servers** page (accessible only to admins).
-- See a table listing the one built-in server: `shell-exec` with its declared capabilities (`shell-exec`, `filesystem-write`), tool name (`run_command`), weight (`light`), and status (`running` / `stopped`).
+- See a table listing the one built-in server: `shell-exec` with its declared capabilities (`shell-exec`, `filesystem-write`, `network`), tool name (`run_command`), weight (`light`), and status (`running` / `stopped`).
 - A capability-warning notice reads: "MCP servers run with full system privileges. You are responsible for vetting every server installed here."
 - In the **Tool Runner** placeholder panel (bottom pane stub from Slice 00), the admin can open a minimal "Raw shell" form: type a command (e.g. `echo hello`), click **Run**, and see the output (stdout / stderr / exit code) returned inline — proving the full path from browser → FastAPI → MCP subprocess → FastAPI → browser works.
 - The tool run is recorded: a `tool_runs` row exists in the DB with `engagement_id`, `tool_name`, `command`, `exit_code`, `output_preview`, `started_at`, `finished_at`.
@@ -38,7 +38,7 @@ Expose a static MCP capability registry to the admin UI and execute a shell comm
 - §6.2 (light path) — Light tools bypass the per-target lock and use a dedicated lane that does not consume the heavy concurrency pool. The shell-exec server declares `weight: light`; this slice implements only the light path (no heavy pool yet).
 - §6.3 — Large outputs become stored artifacts. This slice enforces a 1 MB hard cap per run and truncates output that exceeds it; the full artifact storage mechanism is Slice 04.
 - §6.4 — Generic "shell exec" MCP server as a fallback for anything not yet wrapped. This is the primary deliverable.
-- §4 — Engagement membership is explicit per-user per-engagement with no admin bypass. `POST /api/v1/tool-runs` enforces this strictly: even admin-role users must be explicit members of the engagement.
+- §4 — Engagement membership is explicit per-user per-engagement with no admin bypass. `POST /api/v1/tool-runs` enforces this strictly: even admin-role users must be explicit members of the engagement. The denial is a **404** (not a 403) so non-membership is indistinguishable from a non-existent engagement (§17.1 isolation — see Decisions recorded #4).
 - §7 — MCP extensibility model: one server per category; static config file; subprocess over stdio; admin-visible capability flags with a clear privilege warning; no signing/verification; admin is trusted to vet servers.
 
 ## Contract
@@ -89,10 +89,14 @@ paths:
                 $ref: "#/components/schemas/ToolRunResult"
         "400":
           description: Unknown MCP server or tool name
-        "403":
-          description: Caller is not a member of the engagement (no admin bypass — §4)
         "404":
-          description: Engagement not found
+          description: >
+            Engagement not found OR caller is not a member of the engagement.
+            Non-members and missing engagements are indistinguishable (no admin
+            bypass — §4; existence is not disclosed — §17.1). See "Decisions
+            recorded" #4: the original 403-for-non-member was changed to 404 at
+            security-review time to match the sacrosanct engagement-isolation
+            posture.
         "503":
           description: MCP server subprocess is not running
 
@@ -273,7 +277,7 @@ No `weight` column on `tool_runs` — weight is declared in the static MCP manif
 - Submitting `echo "slice 03 works"` in the Raw Shell form returns `exit_code: 0` and `stdout: "slice 03 works\n"` in the UI.
 - A `tool_runs` row for the above run exists in the DB (verifiable via `psql` or the `/api/v1/tool-runs` list if implemented, but at minimum via direct DB inspection).
 - `GET /api/v1/admin/mcp-servers` returns 403 when called as a non-admin user.
-- `POST /api/v1/tool-runs` returns 403 when called by an admin user who is not an explicit member of the specified engagement (confirming no admin bypass per §4).
+- `POST /api/v1/tool-runs` returns 404 when called by an admin user who is not an explicit member of the specified engagement (confirming no admin bypass per §4; the denial is a 404 rather than a 403 so engagement existence is not disclosed per §17.1 — see Decisions recorded #4).
 - Submitting a command with an explicit `timeout_seconds: 5` override in the Raw Shell form passes that value through to the MCP server (confirm via backend log or integration test; full kill/extend/wait UX deferred to Slice 06).
 - Submitting a command whose combined output exceeds 1 MB results in a truncated response with the `"[output truncated at 1 MB]"` sentinel in the affected stream and the truncation notice visible in the UI.
 
@@ -297,9 +301,13 @@ The following questions were raised during planning and answered before implemen
 
 1. **Output size cap**: 1 MB (`MAX_OUTPUT_BYTES = 1_048_576`) hard cap per tool run. Output exceeding this limit is truncated and a `"[output truncated at 1 MB]"` sentinel is appended to the affected stream. The full large-output artifact mechanism (§6.3) lands in Slice 04.
 
-2. **Admin bypass on tool runs**: No bypass. `POST /api/v1/tool-runs` requires explicit engagement membership for all callers including admins (§4). An admin who is not an explicit member of the engagement receives 403. This is verified by a dedicated test case in both unit and acceptance criteria.
+2. **Admin bypass on tool runs**: No bypass. `POST /api/v1/tool-runs` requires explicit engagement membership for all callers including admins (§4). An admin who is not an explicit member of the engagement is denied. (Originally specified as a 403; changed to **404** at security-review time — see #4.) This is verified by a dedicated test case in both unit and acceptance criteria.
 
 3. **`run_command` timeout**: Default 30 s; client may supply `timeout_seconds` (1–300) per request to override. The MCP server kills the subprocess and returns a non-zero exit code when the limit is reached. Full kill/extend/wait UX (Slice 06) is deferred.
+
+4. **Non-member denial is 404, not 403 (security-review amendment)**: The security review flagged that returning a distinct 403 for "you are not a member" while returning 404 for "engagement does not exist" leaks engagement existence to any authenticated user — a violation of the sacrosanct engagement-isolation invariant (§17.1; requirements.md "Engagement isolation is sacrosanct"). The engagements feature already enforces this by routing every single-engagement read through `get_engagement_for_member`, which returns `None` (→ 404) for non-members. `execute_tool_run` was changed to use the same fused chokepoint: both "missing" and "not a member" collapse to `EngagementNotFound` → 404. §4 (no admin bypass) is unchanged — an admin without a member row is still denied; only the status code changed (403 → 404). This supersedes the 403 in the original Contract and acceptance criteria above.
+
+5. **`network` capability flag (security-review amendment)**: The `shell-exec` server's `run_command` executes arbitrary shell commands, which can open network connections. The manifest originally declared only `shell-exec` and `filesystem-write`; the security review flagged that omitting `network` misrepresents the capability surface that the admin UI and future tooling (Slice 26) rely on. `network` was added to both `mcp-servers/shell-exec/manifest.yaml` and `mcp-servers/config/mcp.yaml` (requirements.md §7 lists `network` as a standard flag).
 
 ## Security review required?
 
@@ -312,3 +320,6 @@ Yes — this slice touches MCP subprocess spawning and direct shell-exec capabil
 - 2026-06-01T19:28:51Z — c920f5d feat(slice-03): add shell-exec MCP server with 1MB output cap
 - 2026-06-01T19:29:54Z — c920f5d feat(slice-03): add shell-exec MCP server with 1MB output cap
 - 2026-06-01T20:04:12Z — c6af393 test(slice-03): add MCP integration test and fix missing db.commit in router
+- 2026-06-02T18:09:16Z — ac393d3 chore(slice-03): mark slice 03 done in PROJECT_PLAN
+- 2026-06-02T18:18:18Z — ac393d3 chore(slice-03): mark slice 03 done in PROJECT_PLAN
+- 2026-06-02T18:30:42Z — ac393d3 chore(slice-03): mark slice 03 done in PROJECT_PLAN
