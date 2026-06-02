@@ -41,7 +41,8 @@ allowed-tools: Read, Write, Glob, Grep
 
 Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish-slice time.
 
-Status values: `todo` | `planned` | `in-progress` | `done` | `blocked`
+Status values: `todo` | `planned` | `in-progress` | `in-review` | `done` | `blocked`
+(`in-review` = PR opened, not yet merged; does NOT unblock dependents — only `done` does)
 
 ## Phase A — Foundation
 
