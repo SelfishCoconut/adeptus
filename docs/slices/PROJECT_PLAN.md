@@ -61,7 +61,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §6.1, §6.2 (light path), §7
 - **Depends on**: 00
 - **Risky**: yes (MCP, shell-exec capability)
-- **Status**: in-progress
+- **Status**: done
 
 ### Slice 04: Tool runner panel (light tools only)
 - **Goal**: Run httpx against sandbox; output appears in bottom pane
