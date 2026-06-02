@@ -2,7 +2,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { mcpServersKey, useExecuteToolRun, useListMcpServers } from './api'
+import {
+  mcpServersKey,
+  mcpToolsKey,
+  toolRunKey,
+  toolRunsKey,
+  useExecuteToolRun,
+  useExecuteToolRunAsync,
+  useListMcpServers,
+  useListTools,
+  useListToolRuns,
+  useToolRun,
+} from './api'
 import { api } from '@/shared/api'
 
 vi.mock('@/shared/api', () => ({
@@ -41,6 +52,7 @@ const TOOL_RUN_CREATE = {
   tool_name: 'run_command',
   args: { command: 'echo hello' },
   timeout_seconds: 30,
+  async_mode: false,
 }
 
 const TOOL_RUN_RESULT = {
@@ -53,6 +65,25 @@ const TOOL_RUN_RESULT = {
   stderr: '',
   started_at: '2026-01-01T00:00:00Z',
   finished_at: '2026-01-01T00:00:01Z',
+  status: 'completed' as const,
+  preset_name: null,
+}
+
+const TOOL_DESCRIPTOR = {
+  server_name: 'httpx',
+  tool_name: 'run_httpx',
+  weight: 'light' as const,
+  capability_flags: ['network'],
+  presets: [
+    { name: 'quick', description: 'fast scan', args: { flags: ['-sc', '-title'] } },
+    { name: 'full', args: { flags: ['-sc', '-title', '-tech-detect'] } },
+  ],
+  arg_schema: { type: 'object', properties: { target: { type: 'string' } } },
+}
+
+const TOOL_RUN_PAGE = {
+  items: [TOOL_RUN_RESULT],
+  next_cursor: null,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +111,111 @@ beforeEach(() => {
 describe('query key helpers', () => {
   it('mcpServersKey is a stable tuple', () => {
     expect(mcpServersKey).toEqual(['admin', 'mcp-servers'])
+  })
+
+  it('mcpToolsKey is a stable tuple', () => {
+    expect(mcpToolsKey).toEqual(['mcp', 'tools'])
+  })
+
+  it('toolRunsKey is namespaced by engagement', () => {
+    expect(toolRunsKey(ENGAGEMENT_ID)).toEqual(['tool-runs', ENGAGEMENT_ID])
+  })
+
+  it('toolRunKey is namespaced by run id', () => {
+    expect(toolRunKey(TOOL_RUN_ID)).toEqual(['tool-run', TOOL_RUN_ID])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// useListTools
+// ---------------------------------------------------------------------------
+
+describe('useListTools', () => {
+  it('returns the tool descriptor list on a 200 response', async () => {
+    resolveGet({ data: [TOOL_DESCRIPTOR], response: { status: 200 } })
+    const { result } = renderHook(() => useListTools(), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data).toEqual([TOOL_DESCRIPTOR])
+    expect(mockGet).toHaveBeenCalledWith('/api/v1/mcp/tools')
+  })
+
+  it('throws when error is set', async () => {
+    resolveGet({ error: { detail: 'server error' }, response: { status: 500 } })
+    const { result } = renderHook(() => useListTools(), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(result.current.error).toBeInstanceOf(Error)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// useListToolRuns
+// ---------------------------------------------------------------------------
+
+describe('useListToolRuns', () => {
+  it('returns the first page on success', async () => {
+    resolveGet({ data: TOOL_RUN_PAGE, response: { status: 200 } })
+    const { result } = renderHook(() => useListToolRuns(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data?.pages[0]).toEqual(TOOL_RUN_PAGE)
+    expect(mockGet).toHaveBeenCalledWith('/api/v1/tool-runs', {
+      params: { query: { engagement_id: ENGAGEMENT_ID, limit: 20 } },
+    })
+  })
+
+  it('passes the cursor when fetching the next page', async () => {
+    resolveGet({
+      data: { items: [TOOL_RUN_RESULT], next_cursor: 'CURSOR1' },
+      response: { status: 200 },
+    })
+    const { result } = renderHook(() => useListToolRuns(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.hasNextPage).toBe(true)
+
+    resolveGet({ data: { items: [], next_cursor: null }, response: { status: 200 } })
+    await act(async () => {
+      await result.current.fetchNextPage()
+    })
+
+    expect(mockGet).toHaveBeenLastCalledWith('/api/v1/tool-runs', {
+      params: { query: { engagement_id: ENGAGEMENT_ID, limit: 20, cursor: 'CURSOR1' } },
+    })
+  })
+
+  it('is disabled when engagementId is empty', () => {
+    const { result } = renderHook(() => useListToolRuns(''), { wrapper: createWrapper() })
+    expect(result.current.fetchStatus).toBe('idle')
+    expect(mockGet).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// useToolRun
+// ---------------------------------------------------------------------------
+
+describe('useToolRun', () => {
+  it('fetches a single run by id', async () => {
+    resolveGet({ data: TOOL_RUN_RESULT, response: { status: 200 } })
+    const { result } = renderHook(() => useToolRun(TOOL_RUN_ID), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data).toEqual(TOOL_RUN_RESULT)
+    expect(mockGet).toHaveBeenCalledWith('/api/v1/tool-runs/{tool_run_id}', {
+      params: { path: { tool_run_id: TOOL_RUN_ID } },
+    })
+  })
+
+  it('is disabled when toolRunId is null', () => {
+    const { result } = renderHook(() => useToolRun(null), { wrapper: createWrapper() })
+    expect(result.current.fetchStatus).toBe('idle')
+    expect(mockGet).not.toHaveBeenCalled()
   })
 })
 
@@ -170,6 +306,39 @@ describe('useExecuteToolRun', () => {
       await expect(
         result.current.mutateAsync({ ...TOOL_RUN_CREATE, server_name: 'unknown-server' }),
       ).rejects.toThrow('Failed to execute tool run')
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// useExecuteToolRunAsync
+// ---------------------------------------------------------------------------
+
+describe('useExecuteToolRunAsync', () => {
+  it('forces async_mode true and returns the partial running result', async () => {
+    const runningResult = { ...TOOL_RUN_RESULT, status: 'running', exit_code: null, finished_at: null }
+    resolvePost({ data: runningResult, response: { status: 202 } })
+    const { result } = renderHook(() => useExecuteToolRunAsync(), { wrapper: createWrapper() })
+
+    let returned: unknown
+    await act(async () => {
+      returned = await result.current.mutateAsync(TOOL_RUN_CREATE)
+    })
+
+    expect(returned).toEqual(runningResult)
+    expect(mockPost).toHaveBeenCalledWith('/api/v1/tool-runs', {
+      body: { ...TOOL_RUN_CREATE, async_mode: true },
+    })
+  })
+
+  it('throws on 403 (sandbox guard violation)', async () => {
+    resolvePost({ error: { detail: 'Forbidden' }, response: { status: 403 } })
+    const { result } = renderHook(() => useExecuteToolRunAsync(), { wrapper: createWrapper() })
+
+    await act(async () => {
+      await expect(result.current.mutateAsync(TOOL_RUN_CREATE)).rejects.toThrow(
+        'Failed to execute tool run',
+      )
     })
   })
 })

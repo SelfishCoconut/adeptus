@@ -439,3 +439,6 @@ Then api hooks (FE2), useToolRunStream (FE3), ToolRunnerForm (FE4), ToolOutputCo
 (FE5), ToolRunHistory (FE6), ToolRunnerPanel (FE7), wire into WorkspaceLayout (FE8).
 Per-task commits continue. finish-slice (full gate + code-reviewer + PR + close issue #13)
 runs after FE8.
+- 2026-06-02T20:38:43Z — 06162b6 docs(slice-04): record backend-complete handoff for context clear
+- 2026-06-02T20:42:16Z — 06162b6 docs(slice-04): record backend-complete handoff for context clear
+- 2026-06-02T20:44:17Z — 06162b6 docs(slice-04): record backend-complete handoff for context clear
