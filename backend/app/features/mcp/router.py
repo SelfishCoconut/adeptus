@@ -2,6 +2,10 @@
 
 Endpoints:
   GET  /api/v1/admin/mcp-servers  — admin-only; returns list[McpServerInfo]
+  GET  /api/v1/mcp/tools          — any authenticated session; returns flat
+                                    list[ToolDescriptor] aggregated across all
+                                    registered MCP servers (no engagement scope,
+                                    no admin requirement)
   POST /api/v1/tool-runs          — requires authenticated session AND explicit
                                     engagement membership (no admin bypass — §4)
 
@@ -29,7 +33,7 @@ from app.core.errors import ForbiddenError
 from app.features.auth.deps import get_current_user
 from app.features.auth.models import User
 from app.features.mcp import service
-from app.features.mcp.schemas import McpServerInfo, ToolRunCreate, ToolRunResult
+from app.features.mcp.schemas import McpServerInfo, ToolDescriptor, ToolRunCreate, ToolRunResult
 from app.features.mcp.subprocess_manager import McpServerDown
 
 router = APIRouter(tags=["mcp"])
@@ -56,6 +60,28 @@ async def list_mcp_servers(
         raise ForbiddenError("Admin access required")
 
     return await service.list_servers()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/mcp/tools
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/api/v1/mcp/tools",
+    response_model=list[ToolDescriptor],
+    operation_id="list_mcp_tools",
+)
+async def list_mcp_tools(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> list[ToolDescriptor]:
+    """List all tools available across all registered MCP servers.
+
+    Returns a flat list of ToolDescriptor enriched with preset definitions and
+    arg_schema.  No admin requirement and no engagement scoping — any
+    authenticated session may call this endpoint.
+    """
+    return await service.list_tools()
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import pytest
 
 from app.features.mcp.registry import (
     ConfigError,
+    McpPresetConfig,
     McpServerConfig,
     McpToolConfig,
     _reset_registry,
@@ -337,3 +338,161 @@ class TestGetRegistryBeforeLoad:
     def test_raises_config_error_when_not_loaded(self) -> None:
         with pytest.raises(ConfigError, match="not been loaded"):
             get_registry()
+
+
+# ---------------------------------------------------------------------------
+# Tool presets and arg_schema (Part A of Slice 04, Task 4)
+# ---------------------------------------------------------------------------
+
+
+class TestToolPresetsAndArgSchema:
+    def test_tool_with_presets_and_arg_schema_parses_correctly(self, tmp_path: Path) -> None:
+        yaml_with_presets = textwrap.dedent(
+            """\
+            servers:
+              - name: httpx
+                command: python
+                args:
+                  - -m
+                  - mcp_servers.httpx
+                tools:
+                  - name: run_httpx
+                    weight: light
+                    capability_flags:
+                      - network
+                    presets:
+                      - name: quick
+                        description: Quick scan
+                        args:
+                          flags: ["-sc", "-title"]
+                      - name: full
+                        description: Full scan
+                        args:
+                          flags: ["-sc", "-title", "-tech-detect", "-follow-redirects"]
+                    arg_schema:
+                      type: object
+                      properties:
+                        target:
+                          type: string
+            """
+        )
+        path = _write(tmp_path, yaml_with_presets)
+        load_registry(config_path=path)
+
+        tool = get_registry()["httpx"].tools[0]
+        assert isinstance(tool, McpToolConfig)
+        assert tool.name == "run_httpx"
+        assert tool.weight == "light"
+        assert tool.capability_flags == ["network"]
+
+        assert len(tool.presets) == 2
+        quick = tool.presets[0]
+        assert isinstance(quick, McpPresetConfig)
+        assert quick.name == "quick"
+        assert quick.description == "Quick scan"
+        assert quick.args == {"flags": ["-sc", "-title"]}
+
+        full = tool.presets[1]
+        assert full.name == "full"
+        assert "-tech-detect" in full.args["flags"]
+
+        assert tool.arg_schema == {
+            "type": "object",
+            "properties": {"target": {"type": "string"}},
+        }
+
+    def test_tool_without_presets_and_arg_schema_defaults_to_empty(self, tmp_path: Path) -> None:
+        yaml_no_extras = textwrap.dedent(
+            """\
+            servers:
+              - name: shell-exec
+                command: python
+                tools:
+                  - name: run_command
+                    weight: light
+                    capability_flags:
+                      - shell-exec
+            """
+        )
+        path = _write(tmp_path, yaml_no_extras)
+        load_registry(config_path=path)
+
+        tool = get_registry()["shell-exec"].tools[0]
+        assert tool.presets == []
+        assert tool.arg_schema == {}
+
+    def test_malformed_preset_entry_raises_config_error(self, tmp_path: Path) -> None:
+        yaml_bad_preset = textwrap.dedent(
+            """\
+            servers:
+              - name: httpx
+                command: python
+                tools:
+                  - name: run_httpx
+                    weight: light
+                    presets:
+                      - just-a-string
+            """
+        )
+        path = _write(tmp_path, yaml_bad_preset)
+        with pytest.raises(ConfigError, match="mapping"):
+            load_registry(config_path=path)
+
+    def test_preset_missing_name_raises_config_error(self, tmp_path: Path) -> None:
+        yaml_no_name = textwrap.dedent(
+            """\
+            servers:
+              - name: httpx
+                command: python
+                tools:
+                  - name: run_httpx
+                    weight: light
+                    presets:
+                      - description: Missing name field
+                        args: {}
+            """
+        )
+        path = _write(tmp_path, yaml_no_name)
+        with pytest.raises(ConfigError, match="'name'"):
+            load_registry(config_path=path)
+
+    def test_preset_with_no_description_defaults_to_none(self, tmp_path: Path) -> None:
+        yaml_no_desc = textwrap.dedent(
+            """\
+            servers:
+              - name: httpx
+                command: python
+                tools:
+                  - name: run_httpx
+                    weight: light
+                    presets:
+                      - name: quick
+                        args:
+                          flags: ["-sc"]
+            """
+        )
+        path = _write(tmp_path, yaml_no_desc)
+        load_registry(config_path=path)
+
+        preset = get_registry()["httpx"].tools[0].presets[0]
+        assert preset.description is None
+        assert preset.args == {"flags": ["-sc"]}
+
+    def test_preset_with_no_args_defaults_to_empty_dict(self, tmp_path: Path) -> None:
+        yaml_no_args = textwrap.dedent(
+            """\
+            servers:
+              - name: httpx
+                command: python
+                tools:
+                  - name: run_httpx
+                    weight: light
+                    presets:
+                      - name: quick
+            """
+        )
+        path = _write(tmp_path, yaml_no_args)
+        load_registry(config_path=path)
+
+        preset = get_registry()["httpx"].tools[0].presets[0]
+        assert preset.args == {}

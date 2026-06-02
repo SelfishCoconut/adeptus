@@ -36,6 +36,8 @@ from app.features.mcp.registry import get_registry
 from app.features.mcp.schemas import (
     McpServerInfo,
     McpToolDeclaration,
+    ToolDescriptor,
+    ToolPreset,
     ToolRunResult,
     ToolRunStatus,
 )
@@ -90,6 +92,50 @@ async def list_servers() -> list[McpServerInfo]:
                 tools=tools,
             )
         )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# list_tools
+# ---------------------------------------------------------------------------
+
+
+async def list_tools() -> list[ToolDescriptor]:
+    """Return all configured tools across all registered MCP servers.
+
+    Iterates the static registry and builds a flat list of ToolDescriptor
+    objects enriched with preset definitions and arg_schema from the config.
+
+    All tools are included regardless of subprocess running status — the
+    descriptor has no status field, so configured tools appear in the tool
+    picker even if their subprocess is momentarily down.
+
+    Ordering: registry insertion order, tools in declared order.
+    """
+    registry = get_registry()
+    result: list[ToolDescriptor] = []
+
+    for server_name, config in registry.items():
+        for tool in config.tools:
+            presets = [
+                ToolPreset(
+                    name=p.name,
+                    description=p.description,
+                    args=p.args,
+                )
+                for p in tool.presets
+            ]
+            result.append(
+                ToolDescriptor(
+                    server_name=server_name,
+                    tool_name=tool.name,
+                    weight=cast(Literal["light", "heavy"], tool.weight),
+                    capability_flags=tool.capability_flags,
+                    presets=presets,
+                    arg_schema=tool.arg_schema,
+                )
+            )
 
     return result
 

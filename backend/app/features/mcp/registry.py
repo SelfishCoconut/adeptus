@@ -42,6 +42,16 @@ class ConfigError(AdeptusError):
 # ---------------------------------------------------------------------------
 
 
+class McpPresetConfig(BaseModel):
+    """A named preset declared by a tool in the static manifest."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    description: str | None = None
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
 class McpToolConfig(BaseModel):
     """A single tool declared by an MCP server in the static manifest."""
 
@@ -50,6 +60,8 @@ class McpToolConfig(BaseModel):
     name: str
     weight: str
     capability_flags: list[str] = Field(default_factory=list)
+    presets: list[McpPresetConfig] = Field(default_factory=list)
+    arg_schema: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("weight")
     @classmethod
@@ -239,11 +251,49 @@ def _parse_tool_entry(
                 f"is missing mandatory field {field!r}"
             )
 
+    # Parse optional presets list.
+    raw_presets = entry.get("presets", [])
+    if not isinstance(raw_presets, list):
+        raise ConfigError(
+            f"MCP config {path!r}: servers[{server_idx}].tools[{tool_idx}].presets "
+            f"must be a list; got {type(raw_presets).__name__}"
+        )
+    presets: list[McpPresetConfig] = []
+    for p_idx, p_entry in enumerate(raw_presets):
+        if not isinstance(p_entry, dict) or "name" not in p_entry:
+            raise ConfigError(
+                f"MCP config {path!r}: servers[{server_idx}].tools[{tool_idx}]"
+                f".presets[{p_idx}] must be a mapping with at least 'name'"
+            )
+        try:
+            presets.append(
+                McpPresetConfig(
+                    name=str(p_entry["name"]),
+                    description=p_entry.get("description"),
+                    args=dict(p_entry.get("args", {})),
+                )
+            )
+        except Exception as exc:
+            raise ConfigError(
+                f"MCP config {path!r}: servers[{server_idx}].tools[{tool_idx}]"
+                f".presets[{p_idx}] validation failed: {exc}"
+            ) from exc
+
+    # Parse optional arg_schema mapping.
+    raw_arg_schema = entry.get("arg_schema", {})
+    if not isinstance(raw_arg_schema, dict):
+        raise ConfigError(
+            f"MCP config {path!r}: servers[{server_idx}].tools[{tool_idx}].arg_schema "
+            f"must be a mapping; got {type(raw_arg_schema).__name__}"
+        )
+
     try:
         return McpToolConfig(
             name=str(entry["name"]),
             weight=str(entry["weight"]),
             capability_flags=list(entry.get("capability_flags", [])),
+            presets=presets,
+            arg_schema=raw_arg_schema,
         )
     except Exception as exc:
         raise ConfigError(
