@@ -84,6 +84,7 @@ def _make_tool_run_result(*, engagement_id: UUID | None = None) -> ToolRunResult
         stderr="",
         started_at=_now(),
         finished_at=_now(),
+        status="completed",
     )
 
 

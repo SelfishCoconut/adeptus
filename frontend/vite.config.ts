@@ -18,6 +18,13 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      // Tool-run output stream. ws:true upgrades the proxied connection so the
+      // browser can reach the FastAPI WebSocket at /ws/tool-runs/{id}.
+      '/ws': {
+        target: 'ws://localhost:8000',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
   test: {

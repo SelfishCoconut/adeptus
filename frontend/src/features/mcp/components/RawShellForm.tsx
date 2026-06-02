@@ -56,6 +56,7 @@ export function RawShellForm({ initialEngagementId }: RawShellFormProps = {}) {
         tool_name: 'run_command',
         args: { command },
         timeout_seconds: timeoutSeconds,
+        async_mode: false,
       },
       {
         onSuccess: (data) => {

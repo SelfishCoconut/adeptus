@@ -205,9 +205,10 @@ async def test_update_tool_run_result_returns_correct_row(db_session: AsyncSessi
 async def test_list_tool_runs_returns_empty_for_unknown_engagement(
     db_session: AsyncSession,
 ) -> None:
-    runs = await repo.list_tool_runs_for_engagement(db_session, uuid4())
+    runs, next_cursor = await repo.list_tool_runs_for_engagement(db_session, uuid4())
 
     assert runs == []
+    assert next_cursor is None
 
 
 async def test_list_tool_runs_returns_runs_for_engagement(db_session: AsyncSession) -> None:
@@ -215,7 +216,7 @@ async def test_list_tool_runs_returns_runs_for_engagement(db_session: AsyncSessi
     run_a = await _create(db_session, engagement_id=engagement_id, tool_name="run_command")
     run_b = await _create(db_session, engagement_id=engagement_id, tool_name="run_command")
 
-    runs = await repo.list_tool_runs_for_engagement(db_session, engagement_id)
+    runs, _ = await repo.list_tool_runs_for_engagement(db_session, engagement_id)
 
     assert len(runs) == 2
     ids = {_uid(r) for r in runs}
@@ -232,7 +233,7 @@ async def test_list_tool_runs_does_not_return_other_engagements_runs(
     await _create(db_session, engagement_id=engagement_a)
     run_b = await _create(db_session, engagement_id=engagement_b)
 
-    runs = await repo.list_tool_runs_for_engagement(db_session, engagement_b)
+    runs, _ = await repo.list_tool_runs_for_engagement(db_session, engagement_b)
 
     assert len(runs) == 1
     assert _uid(runs[0]) == _uid(run_b)
@@ -249,7 +250,7 @@ async def test_list_tool_runs_ordered_by_started_at_desc(db_session: AsyncSessio
     run_b = await _create(db_session, engagement_id=engagement_id)
     run_c = await _create(db_session, engagement_id=engagement_id)
 
-    runs = await repo.list_tool_runs_for_engagement(db_session, engagement_id)
+    runs, _ = await repo.list_tool_runs_for_engagement(db_session, engagement_id)
 
     # All three runs are present.
     assert len(runs) == 3
@@ -257,3 +258,144 @@ async def test_list_tool_runs_ordered_by_started_at_desc(db_session: AsyncSessio
     assert _uid(run_a) in returned_ids
     assert _uid(run_b) in returned_ids
     assert _uid(run_c) in returned_ids
+
+
+# ---------------------------------------------------------------------------
+# list_tool_runs_for_engagement — keyset pagination
+# ---------------------------------------------------------------------------
+
+
+async def test_list_tool_runs_limit_caps_page_size(db_session: AsyncSession) -> None:
+    """When more rows exist than limit, only limit rows are returned."""
+    engagement_id = uuid4()
+    t_base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    for i in range(5):
+        run = await _create(db_session, engagement_id=engagement_id)
+        # Manually set started_at so rows have distinct, predictable timestamps.
+        from datetime import timedelta
+
+        from sqlalchemy import update as sa_update
+
+        await db_session.execute(
+            sa_update(ToolRun)
+            .where(ToolRun.id == run.id)
+            .values(started_at=t_base + timedelta(minutes=i))
+        )
+    await db_session.flush()
+
+    runs, next_cursor = await repo.list_tool_runs_for_engagement(db_session, engagement_id, limit=3)
+
+    assert len(runs) == 3
+    assert next_cursor is not None
+
+
+async def test_list_tool_runs_next_cursor_none_on_last_page(db_session: AsyncSession) -> None:
+    """When all rows fit within limit, next_cursor is None."""
+    engagement_id = uuid4()
+
+    for _ in range(2):
+        await _create(db_session, engagement_id=engagement_id)
+
+    runs, next_cursor = await repo.list_tool_runs_for_engagement(db_session, engagement_id, limit=5)
+
+    assert len(runs) == 2
+    assert next_cursor is None
+
+
+async def test_list_tool_runs_cursor_no_overlap(db_session: AsyncSession) -> None:
+    """Second page must not overlap with first page."""
+    engagement_id = uuid4()
+    t_base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    from datetime import timedelta
+
+    from sqlalchemy import update as sa_update
+
+    created: list[ToolRun] = []
+    for i in range(4):
+        run = await _create(db_session, engagement_id=engagement_id)
+        await db_session.execute(
+            sa_update(ToolRun)
+            .where(ToolRun.id == run.id)
+            .values(started_at=t_base + timedelta(minutes=i))
+        )
+        created.append(run)
+    await db_session.flush()
+
+    page1, cursor1 = await repo.list_tool_runs_for_engagement(db_session, engagement_id, limit=2)
+    assert len(page1) == 2
+    assert cursor1 is not None
+
+    page2, cursor2 = await repo.list_tool_runs_for_engagement(
+        db_session, engagement_id, limit=2, cursor=cursor1
+    )
+    assert len(page2) == 2
+    assert cursor2 is None
+
+    # No overlap between pages.
+    page1_ids = {_uid(r) for r in page1}
+    page2_ids = {_uid(r) for r in page2}
+    assert page1_ids.isdisjoint(page2_ids)
+    # Together they cover all rows.
+    assert page1_ids | page2_ids == {_uid(r) for r in created}
+
+
+async def test_list_tool_runs_id_tiebreak(db_session: AsyncSession) -> None:
+    """Rows with identical started_at are ordered by id DESC (deterministic tiebreak)."""
+    engagement_id = uuid4()
+    same_time = datetime(2026, 3, 15, 9, 0, 0, tzinfo=UTC)
+
+    from sqlalchemy import update as sa_update
+
+    runs: list[ToolRun] = []
+    for _ in range(3):
+        run = await _create(db_session, engagement_id=engagement_id)
+        await db_session.execute(
+            sa_update(ToolRun).where(ToolRun.id == run.id).values(started_at=same_time)
+        )
+        runs.append(run)
+    await db_session.flush()
+
+    # With limit=1, first page returns the row with the largest id.
+    page1, cursor1 = await repo.list_tool_runs_for_engagement(db_session, engagement_id, limit=1)
+    assert len(page1) == 1
+    assert cursor1 is not None
+
+    page2, cursor2 = await repo.list_tool_runs_for_engagement(
+        db_session, engagement_id, limit=1, cursor=cursor1
+    )
+    assert len(page2) == 1
+    assert cursor2 is not None
+
+    page3, cursor3 = await repo.list_tool_runs_for_engagement(
+        db_session, engagement_id, limit=1, cursor=cursor2
+    )
+    assert len(page3) == 1
+    assert cursor3 is None
+
+    # All three distinct rows returned across the three pages.
+    all_ids = {_uid(page1[0]), _uid(page2[0]), _uid(page3[0])}
+    assert all_ids == {_uid(r) for r in runs}
+
+
+# ---------------------------------------------------------------------------
+# get_tool_run_by_id
+# ---------------------------------------------------------------------------
+
+
+async def test_get_tool_run_by_id_returns_existing_row(db_session: AsyncSession) -> None:
+    """get_tool_run_by_id returns the correct row when it exists."""
+    run = await _create(db_session)
+
+    fetched = await repo.get_tool_run_by_id(db_session, _uid(run))
+
+    assert fetched is not None
+    assert _uid(fetched) == _uid(run)
+
+
+async def test_get_tool_run_by_id_returns_none_for_missing(db_session: AsyncSession) -> None:
+    """get_tool_run_by_id returns None when no row matches."""
+    result = await repo.get_tool_run_by_id(db_session, uuid4())
+
+    assert result is None

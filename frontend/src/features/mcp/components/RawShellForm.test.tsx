@@ -53,6 +53,8 @@ const TOOL_RUN_RESULT: ToolRunResult = {
   stderr: '',
   started_at: '2026-01-01T00:00:00Z',
   finished_at: '2026-01-01T00:00:01Z',
+  status: 'completed',
+  preset_name: null,
 }
 
 const TRUNCATED_RESULT: ToolRunResult = {
@@ -189,6 +191,7 @@ describe('RawShellForm', () => {
           tool_name: 'run_command',
           args: { command: 'echo hello' },
           timeout_seconds: 60,
+          async_mode: false,
         },
         expect.objectContaining({ onSuccess: expect.any(Function) }),
       )

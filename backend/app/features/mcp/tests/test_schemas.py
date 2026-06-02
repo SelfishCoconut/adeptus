@@ -14,8 +14,12 @@ from pydantic import ValidationError
 from app.features.mcp.schemas import (
     McpServerInfo,
     McpToolDeclaration,
+    ToolDescriptor,
+    ToolPreset,
     ToolRunCreate,
+    ToolRunPage,
     ToolRunResult,
+    WebSocketOutputChunk,
 )
 
 # ---------------------------------------------------------------------------
@@ -163,6 +167,7 @@ class TestToolRunResult:
             "stderr": "",
             "started_at": now,
             "finished_at": now,
+            "status": "completed",
             **overrides,
         }
 
@@ -170,6 +175,7 @@ class TestToolRunResult:
         result = ToolRunResult.model_validate(self._make())
         assert result.exit_code == 0
         assert result.stdout == "hello\n"
+        assert result.status == "completed"
 
     def test_non_zero_exit_code_accepted(self) -> None:
         result = ToolRunResult.model_validate(self._make(exit_code=127))
@@ -185,3 +191,198 @@ class TestToolRunResult:
         result = ToolRunResult.model_validate(self._make())
         assert isinstance(result.tool_run_id, uuid.UUID)
         assert isinstance(result.engagement_id, uuid.UUID)
+
+    def test_in_progress_run_accepts_null_exit_code_and_finished_at(self) -> None:
+        """A running tool-run may have exit_code=None and finished_at=None."""
+
+        result = ToolRunResult.model_validate(
+            self._make(exit_code=None, finished_at=None, status="running")
+        )
+        assert result.exit_code is None
+        assert result.finished_at is None
+        assert result.status == "running"
+
+    def test_preset_name_defaults_to_none(self) -> None:
+        result = ToolRunResult.model_validate(self._make())
+        assert result.preset_name is None
+
+    def test_preset_name_accepted(self) -> None:
+        result = ToolRunResult.model_validate(self._make(preset_name="quick-scan"))
+        assert result.preset_name == "quick-scan"
+
+
+# ---------------------------------------------------------------------------
+# ToolRunCreate — new fields from Task 2
+# ---------------------------------------------------------------------------
+
+
+class TestToolRunCreateTask2:
+    def _base(self, **overrides: Any) -> dict[str, Any]:
+        return {
+            "engagement_id": str(uuid.uuid4()),
+            "server_name": "shell-exec",
+            "tool_name": "run_command",
+            "args": {"command": "echo hello"},
+            **overrides,
+        }
+
+    def test_async_mode_defaults_to_false(self) -> None:
+        req = ToolRunCreate.model_validate(self._base())
+        assert req.async_mode is False
+
+    def test_preset_name_defaults_to_none(self) -> None:
+        req = ToolRunCreate.model_validate(self._base())
+        assert req.preset_name is None
+
+    def test_async_mode_true_accepted(self) -> None:
+        req = ToolRunCreate.model_validate(self._base(async_mode=True))
+        assert req.async_mode is True
+
+    def test_preset_name_accepted(self) -> None:
+        req = ToolRunCreate.model_validate(self._base(preset_name="full-scan"))
+        assert req.preset_name == "full-scan"
+
+
+# ---------------------------------------------------------------------------
+# ToolPreset
+# ---------------------------------------------------------------------------
+
+
+class TestToolPreset:
+    def test_valid(self) -> None:
+        preset = ToolPreset(name="quick", description="Quick scan", args={"flags": "-sV"})
+        assert preset.name == "quick"
+        assert preset.description == "Quick scan"
+        assert preset.args == {"flags": "-sV"}
+
+    def test_description_optional(self) -> None:
+        preset = ToolPreset(name="minimal", args={})
+        assert preset.description is None
+
+    def test_missing_name_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ToolPreset.model_validate({"args": {}})
+
+
+# ---------------------------------------------------------------------------
+# ToolDescriptor
+# ---------------------------------------------------------------------------
+
+
+class TestToolDescriptor:
+    def test_valid(self) -> None:
+        descriptor = ToolDescriptor(
+            server_name="shell-exec",
+            tool_name="run_command",
+            weight="light",
+            capability_flags=["shell-exec"],
+            presets=[ToolPreset(name="default", args={"command": "echo"})],
+            arg_schema={"type": "object", "properties": {"command": {"type": "string"}}},
+        )
+        assert descriptor.server_name == "shell-exec"
+        assert descriptor.tool_name == "run_command"
+        assert descriptor.weight == "light"
+        assert len(descriptor.presets) == 1
+        assert descriptor.presets[0].name == "default"
+
+    def test_empty_presets_accepted(self) -> None:
+        descriptor = ToolDescriptor(
+            server_name="nmap",
+            tool_name="scan",
+            weight="heavy",
+            capability_flags=["network-scan"],
+            presets=[],
+            arg_schema={},
+        )
+        assert descriptor.presets == []
+
+    def test_invalid_weight_rejected(self) -> None:
+        data: dict[str, Any] = {
+            "server_name": "x",
+            "tool_name": "y",
+            "weight": "medium",
+            "capability_flags": [],
+            "presets": [],
+            "arg_schema": {},
+        }
+        with pytest.raises(ValidationError):
+            ToolDescriptor.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# ToolRunPage
+# ---------------------------------------------------------------------------
+
+
+class TestToolRunPage:
+    def _make_result(self) -> dict[str, Any]:
+        from datetime import datetime
+
+        now = datetime.now(tz=UTC)
+        return {
+            "tool_run_id": str(uuid.uuid4()),
+            "engagement_id": str(uuid.uuid4()),
+            "server_name": "shell-exec",
+            "tool_name": "run_command",
+            "exit_code": 0,
+            "stdout": "ok\n",
+            "stderr": "",
+            "started_at": now,
+            "finished_at": now,
+            "status": "completed",
+        }
+
+    def test_valid_with_items(self) -> None:
+        page = ToolRunPage.model_validate({"items": [self._make_result()], "next_cursor": "abc123"})
+        assert len(page.items) == 1
+        assert page.next_cursor == "abc123"
+
+    def test_empty_items_accepted(self) -> None:
+        page = ToolRunPage.model_validate({"items": [], "next_cursor": None})
+        assert page.items == []
+        assert page.next_cursor is None
+
+
+# ---------------------------------------------------------------------------
+# WebSocketOutputChunk
+# ---------------------------------------------------------------------------
+
+
+class TestWebSocketOutputChunk:
+    def test_stdout_chunk(self) -> None:
+        chunk = WebSocketOutputChunk(type="stdout", data="hello\n")
+        assert chunk.type == "stdout"
+        assert chunk.data == "hello\n"
+        assert chunk.exit_code is None
+        assert chunk.finished_at is None
+        assert chunk.message is None
+
+    def test_stderr_chunk(self) -> None:
+        chunk = WebSocketOutputChunk(type="stderr", data="error line\n")
+        assert chunk.type == "stderr"
+        assert chunk.data == "error line\n"
+
+    def test_done_chunk(self) -> None:
+        from datetime import datetime
+
+        now = datetime.now(tz=UTC)
+        chunk = WebSocketOutputChunk(type="done", exit_code=0, finished_at=now)
+        assert chunk.type == "done"
+        assert chunk.exit_code == 0
+        assert chunk.finished_at == now
+
+    def test_error_chunk(self) -> None:
+        chunk = WebSocketOutputChunk(type="error", message="subprocess crashed")
+        assert chunk.type == "error"
+        assert chunk.message == "subprocess crashed"
+
+    def test_invalid_type_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            WebSocketOutputChunk.model_validate({"type": "unknown"})
+
+    def test_round_trip_serialisation(self) -> None:
+        chunk = WebSocketOutputChunk(type="stdout", data="line\n")
+        as_dict = chunk.model_dump()
+        restored = WebSocketOutputChunk.model_validate(as_dict)
+        assert restored.type == "stdout"
+        assert restored.data == "line\n"

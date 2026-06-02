@@ -39,6 +39,12 @@ class ToolRun(Base):
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stdout: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     stderr: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    preset_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'completed'"),
+    )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

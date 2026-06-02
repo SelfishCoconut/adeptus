@@ -473,24 +473,164 @@
         }
       }
     },
+    "/api/v1/mcp/tools": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "List Mcp Tools",
+        "description": "List all tools available across all registered MCP servers.\n\nReturns a flat list of ToolDescriptor enriched with preset definitions and\narg_schema.  No admin requirement and no engagement scoping \u2014 any\nauthenticated session may call this endpoint.",
+        "operationId": "list_mcp_tools",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ToolDescriptor"
+                  },
+                  "type": "array",
+                  "title": "Response List Mcp Tools"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tool-runs": {
       "post": {
         "tags": [
           "mcp"
         ],
         "summary": "Execute Tool Run",
-        "description": "Execute a tool call via the named MCP server and wait for the result.\n\nRequires an authenticated session AND explicit engagement membership.\nAdmin role does NOT bypass the membership requirement (\u00a74).",
+        "description": "Execute a tool call via the named MCP server and wait for the result.\n\nRequires an authenticated session AND explicit engagement membership.\nAdmin role does NOT bypass the membership requirement (\u00a74).\n\nWhen ``async_mode=True`` the endpoint returns HTTP 202 immediately with a\npartial ToolRunResult (status='running', finished_at/exit_code null).\nOutput is streamed via the WebSocket endpoint (Task 7).",
         "operationId": "execute_tool_run",
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ToolRunCreate"
               }
             }
-          },
-          "required": true
+          }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolRunResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "List Tool Runs",
+        "description": "Return a paginated list of tool runs for an engagement (newest first).\n\nRequires explicit engagement membership.  Admin role does NOT bypass the\nmembership requirement (\u00a74).  Non-member and missing-engagement both return\n404 to avoid existence disclosure (\u00a717.1).",
+        "operationId": "list_tool_runs",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolRunPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tool-runs/{tool_run_id}": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "Get Tool Run",
+        "description": "Return a single tool run by id.\n\nRequires explicit membership in the run's engagement.  Admin role does NOT\nbypass the membership requirement (\u00a74).  Both a missing run and a non-member\ncaller return 404 to avoid existence disclosure (\u00a717.1).",
+        "operationId": "get_tool_run",
+        "parameters": [
+          {
+            "name": "tool_run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Tool Run Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -848,6 +988,87 @@
         ],
         "title": "MemberEntry"
       },
+      "ToolDescriptor": {
+        "properties": {
+          "server_name": {
+            "type": "string",
+            "title": "Server Name"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "weight": {
+            "type": "string",
+            "enum": [
+              "light",
+              "heavy"
+            ],
+            "title": "Weight"
+          },
+          "capability_flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Capability Flags"
+          },
+          "presets": {
+            "items": {
+              "$ref": "#/components/schemas/ToolPreset"
+            },
+            "type": "array",
+            "title": "Presets"
+          },
+          "arg_schema": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Arg Schema"
+          }
+        },
+        "type": "object",
+        "required": [
+          "server_name",
+          "tool_name",
+          "weight",
+          "capability_flags",
+          "presets",
+          "arg_schema"
+        ],
+        "title": "ToolDescriptor",
+        "description": "Enriched descriptor for a tool, including presets and arg schema.\n\nReturned by GET /api/v1/mcp/tools; used by the tool runner panel to\npopulate the tool selector and render the dynamic argument form."
+      },
+      "ToolPreset": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "args": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Args"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "args"
+        ],
+        "title": "ToolPreset",
+        "description": "A named preset for a tool, bundling a set of default arguments."
+      },
       "ToolRunCreate": {
         "properties": {
           "engagement_id": {
@@ -875,6 +1096,23 @@
             "title": "Timeout Seconds",
             "description": "Per-request timeout override. Default 30 s. The MCP server kills the subprocess and returns a non-zero exit code when the limit is reached. Full kill/extend/wait UX is deferred to Slice 06.",
             "default": 30
+          },
+          "async_mode": {
+            "type": "boolean",
+            "title": "Async Mode",
+            "description": "When true the endpoint responds 202 with a partial ToolRunResult (finished_at null, stdout/stderr empty). Output is streamed via the WebSocket endpoint.",
+            "default": false
+          },
+          "preset_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Name"
           }
         },
         "type": "object",
@@ -886,6 +1124,35 @@
         ],
         "title": "ToolRunCreate",
         "description": "Request body for POST /api/v1/tool-runs."
+      },
+      "ToolRunPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ToolRunResult"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "ToolRunPage",
+        "description": "Paginated list of tool runs; returned by GET /api/v1/tool-runs."
       },
       "ToolRunResult": {
         "properties": {
@@ -908,7 +1175,14 @@
             "title": "Tool Name"
           },
           "exit_code": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Exit Code"
           },
           "stdout": {
@@ -925,9 +1199,37 @@
             "title": "Started At"
           },
           "finished_at": {
-            "type": "string",
-            "format": "date-time",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Finished At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "timed_out"
+            ],
+            "title": "Status"
+          },
+          "preset_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Name"
           }
         },
         "type": "object",
@@ -940,10 +1242,11 @@
           "stdout",
           "stderr",
           "started_at",
-          "finished_at"
+          "finished_at",
+          "status"
         ],
         "title": "ToolRunResult",
-        "description": "Response body for POST /api/v1/tool-runs."
+        "description": "Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}."
       },
       "UserMe": {
         "properties": {

@@ -215,6 +215,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mcp/tools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Mcp Tools
+         * @description List all tools available across all registered MCP servers.
+         *
+         *     Returns a flat list of ToolDescriptor enriched with preset definitions and
+         *     arg_schema.  No admin requirement and no engagement scoping — any
+         *     authenticated session may call this endpoint.
+         */
+        get: operations["list_mcp_tools"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tool-runs": {
         parameters: {
             query?: never;
@@ -222,7 +246,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List Tool Runs
+         * @description Return a paginated list of tool runs for an engagement (newest first).
+         *
+         *     Requires explicit engagement membership.  Admin role does NOT bypass the
+         *     membership requirement (§4).  Non-member and missing-engagement both return
+         *     404 to avoid existence disclosure (§17.1).
+         */
+        get: operations["list_tool_runs"];
         put?: never;
         /**
          * Execute Tool Run
@@ -230,8 +262,36 @@ export interface paths {
          *
          *     Requires an authenticated session AND explicit engagement membership.
          *     Admin role does NOT bypass the membership requirement (§4).
+         *
+         *     When ``async_mode=True`` the endpoint returns HTTP 202 immediately with a
+         *     partial ToolRunResult (status='running', finished_at/exit_code null).
+         *     Output is streamed via the WebSocket endpoint (Task 7).
          */
         post: operations["execute_tool_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tool-runs/{tool_run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Tool Run
+         * @description Return a single tool run by id.
+         *
+         *     Requires explicit membership in the run's engagement.  Admin role does NOT
+         *     bypass the membership requirement (§4).  Both a missing run and a non-member
+         *     caller return 404 to avoid existence disclosure (§17.1).
+         */
+        get: operations["get_tool_run"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -399,6 +459,46 @@ export interface components {
             joined_at: string;
         };
         /**
+         * ToolDescriptor
+         * @description Enriched descriptor for a tool, including presets and arg schema.
+         *
+         *     Returned by GET /api/v1/mcp/tools; used by the tool runner panel to
+         *     populate the tool selector and render the dynamic argument form.
+         */
+        ToolDescriptor: {
+            /** Server Name */
+            server_name: string;
+            /** Tool Name */
+            tool_name: string;
+            /**
+             * Weight
+             * @enum {string}
+             */
+            weight: "light" | "heavy";
+            /** Capability Flags */
+            capability_flags: string[];
+            /** Presets */
+            presets: components["schemas"]["ToolPreset"][];
+            /** Arg Schema */
+            arg_schema: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * ToolPreset
+         * @description A named preset for a tool, bundling a set of default arguments.
+         */
+        ToolPreset: {
+            /** Name */
+            name: string;
+            /** Description */
+            description?: string | null;
+            /** Args */
+            args: {
+                [key: string]: unknown;
+            };
+        };
+        /**
          * ToolRunCreate
          * @description Request body for POST /api/v1/tool-runs.
          */
@@ -422,10 +522,28 @@ export interface components {
              * @default 30
              */
             timeout_seconds: number;
+            /**
+             * Async Mode
+             * @description When true the endpoint responds 202 with a partial ToolRunResult (finished_at null, stdout/stderr empty). Output is streamed via the WebSocket endpoint.
+             * @default false
+             */
+            async_mode: boolean;
+            /** Preset Name */
+            preset_name?: string | null;
+        };
+        /**
+         * ToolRunPage
+         * @description Paginated list of tool runs; returned by GET /api/v1/tool-runs.
+         */
+        ToolRunPage: {
+            /** Items */
+            items: components["schemas"]["ToolRunResult"][];
+            /** Next Cursor */
+            next_cursor: string | null;
         };
         /**
          * ToolRunResult
-         * @description Response body for POST /api/v1/tool-runs.
+         * @description Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}.
          */
         ToolRunResult: {
             /**
@@ -443,7 +561,7 @@ export interface components {
             /** Tool Name */
             tool_name: string;
             /** Exit Code */
-            exit_code: number;
+            exit_code: number | null;
             /** Stdout */
             stdout: string;
             /** Stderr */
@@ -453,11 +571,15 @@ export interface components {
              * Format: date-time
              */
             started_at: string;
+            /** Finished At */
+            finished_at: string | null;
             /**
-             * Finished At
-             * Format: date-time
+             * Status
+             * @enum {string}
              */
-            finished_at: string;
+            status: "running" | "completed" | "failed" | "timed_out";
+            /** Preset Name */
+            preset_name?: string | null;
         };
         /** UserMe */
         UserMe: {
@@ -867,6 +989,59 @@ export interface operations {
             };
         };
     };
+    list_mcp_tools: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolDescriptor"][];
+                };
+            };
+        };
+    };
+    list_tool_runs: {
+        parameters: {
+            query: {
+                engagement_id: string;
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolRunPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     execute_tool_run: {
         parameters: {
             query?: never;
@@ -879,6 +1054,37 @@ export interface operations {
                 "application/json": components["schemas"]["ToolRunCreate"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolRunResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_tool_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tool_run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

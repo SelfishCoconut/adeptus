@@ -100,12 +100,16 @@ jobs:
         run: uv run ruff check .
         working-directory: mcp-servers
 
-      - name: Mypy
-        run: uv run mypy .
+      # Each MCP server is an independent tree with its own top-level server.py
+      # and tests/ package; a single mypy/pytest pass over all of them collides
+      # on the duplicate module names. Run one pass per server (mirrors the
+      # Makefile lint / test-mcp-servers targets).
+      - name: Mypy (per server)
+        run: for d in */server.py; do uv run mypy "$(dirname "$d")" || exit 1; done
         working-directory: mcp-servers
 
-      - name: Pytest with coverage gate
-        run: uv run pytest --cov=. --cov-fail-under=80
+      - name: Pytest with coverage gate (per server)
+        run: for d in */server.py; do s="$(dirname "$d")"; uv run pytest "$s" --cov="$s" --cov-fail-under=80 || exit 1; done
         working-directory: mcp-servers
 
   frontend:

@@ -24,7 +24,11 @@ test-backend:
 	cd backend && uv run pytest --cov=app/features --cov-fail-under=80
 
 test-mcp-servers:
-	cd mcp-servers && uv run --extra dev pytest --cov=. --cov-fail-under=80
+	# Each MCP server is an independent tree with its own top-level server.py
+	# and tests/ package. Collecting them in one pytest session clashes (a single
+	# `tests` package / `server` module can't bind to two servers at once), so
+	# run a session per server, each enforcing its own coverage gate.
+	cd mcp-servers && for d in */server.py; do s="$$(dirname "$$d")"; uv run --extra dev pytest "$$s" --cov="$$s" --cov-fail-under=80 || exit 1; done
 
 test-frontend:
 	cd frontend && pnpm test --run --coverage
@@ -37,7 +41,10 @@ lint:
 	cd backend && uv run ruff check . && uv run ruff format --check .
 	cd backend && uv run mypy app/
 	cd mcp-servers && uv run --extra dev ruff check . && uv run --extra dev ruff format --check .
-	cd mcp-servers && uv run --extra dev mypy .
+	# Each MCP server is an independent script tree with its own top-level
+	# `server.py` and `tests/` package; mypy must check them one root at a time
+	# or the colliding module names clash ("Duplicate module named ...").
+	cd mcp-servers && for d in */server.py; do uv run --extra dev mypy "$$(dirname "$$d")" || exit 1; done
 	cd frontend && pnpm lint
 	cd frontend && pnpm tsc --noEmit
 

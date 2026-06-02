@@ -15,3 +15,27 @@ servers:
           - shell-exec
           - filesystem-write
           - network
+
+  - name: httpx
+    command: python
+    args:
+      - /mcp-servers/httpx/server.py
+    tools:
+      - name: run_httpx
+        weight: light
+        capability_flags:
+          - network
+        presets:
+          - name: quick
+            description: Fetch status code and page title only
+            args: {flags: ["-sc", "-title"]}
+          - name: full
+            description: Status code, title, tech detection, and follow redirects
+            args: {flags: ["-sc", "-title", "-tech-detect", "-follow-redirects"]}
+        arg_schema:
+          type: object
+          required: [target]
+          properties:
+            target: {type: string, title: Target URL}
+            flags: {type: array, items: {type: string}, title: Extra flags}
+            timeout_seconds: {type: integer, minimum: 1, maximum: 300, default: 30, title: Timeout (s)}
