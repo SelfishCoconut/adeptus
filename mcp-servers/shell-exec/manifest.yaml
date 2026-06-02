@@ -5,3 +5,4 @@ tools:
     capability_flags:
       - shell-exec
       - filesystem-write
+      - network
