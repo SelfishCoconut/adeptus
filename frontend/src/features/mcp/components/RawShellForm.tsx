@@ -15,16 +15,22 @@ function hasTruncation(text: string): boolean {
   return text.includes(TRUNCATION_SENTINEL)
 }
 
-export function RawShellForm() {
+interface RawShellFormProps {
+  /** When provided, the engagement selector is initialised to this value. */
+  initialEngagementId?: string
+}
+
+export function RawShellForm({ initialEngagementId }: RawShellFormProps = {}) {
   const engagements = useEngagements()
   const executeToolRun = useExecuteToolRun()
 
   const [command, setCommand] = useState('')
   const [timeoutSeconds, setTimeoutSeconds] = useState<number>(DEFAULT_TIMEOUT)
-  const [engagementId, setEngagementId] = useState<string>('')
+  const [engagementId, setEngagementId] = useState<string>(initialEngagementId ?? '')
   const [result, setResult] = useState<ToolRunResult | null>(null)
 
-  // Initialise engagementId to the first engagement once loaded
+  // Initialise engagementId to the first engagement once loaded (only when
+  // no initialEngagementId was provided and user has not made a selection yet).
   const engagementList = engagements.data ?? []
   const effectiveEngagementId =
     engagementId || (engagementList.length > 0 ? engagementList[0].id : '')

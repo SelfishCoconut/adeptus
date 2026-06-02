@@ -52,7 +52,7 @@ export function WorkspaceShell({
         <section aria-label="Console" className="col-span-2 overflow-y-auto bg-background p-4">
           <h2 className="mb-3 text-sm font-medium text-muted-foreground">Console</h2>
           {engagementId ? (
-            <RawShellForm />
+            <RawShellForm initialEngagementId={engagementId} />
           ) : (
             <p className="text-sm text-muted-foreground">Select an engagement to use the shell runner.</p>
           )}

@@ -110,8 +110,8 @@ function mutationResult(overrides: {
 // Render helper
 // ---------------------------------------------------------------------------
 
-function renderForm() {
-  return render(<RawShellForm />)
+function renderForm(props: { initialEngagementId?: string } = {}) {
+  return render(<RawShellForm {...props} />)
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +399,51 @@ describe('RawShellForm', () => {
       await user.click(screen.getByRole('button', { name: /^run$/i }))
 
       expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    })
+  })
+
+  describe('initialEngagementId prop', () => {
+    it('defaults selector to initialEngagementId when provided', () => {
+      mockedUseEngagements.mockReturnValue(
+        engagementsResult({ data: [ENGAGEMENT_A, ENGAGEMENT_B] }),
+      )
+      mockedUseExecuteToolRun.mockReturnValue(mutationResult({}))
+
+      renderForm({ initialEngagementId: ENGAGEMENT_B.id })
+
+      const selector = screen.getByLabelText(/engagement/i) as HTMLSelectElement
+      expect(selector.value).toBe(ENGAGEMENT_B.id)
+    })
+
+    it('falls back to first engagement when initialEngagementId is not provided', () => {
+      mockedUseEngagements.mockReturnValue(
+        engagementsResult({ data: [ENGAGEMENT_A, ENGAGEMENT_B] }),
+      )
+      mockedUseExecuteToolRun.mockReturnValue(mutationResult({}))
+
+      renderForm()
+
+      const selector = screen.getByLabelText(/engagement/i) as HTMLSelectElement
+      expect(selector.value).toBe(ENGAGEMENT_A.id)
+    })
+
+    it('submit sends initialEngagementId when provided and user has not changed selector', async () => {
+      const user = userEvent.setup()
+      const mutate = vi.fn()
+      mockedUseEngagements.mockReturnValue(
+        engagementsResult({ data: [ENGAGEMENT_A, ENGAGEMENT_B] }),
+      )
+      mockedUseExecuteToolRun.mockReturnValue(mutationResult({ mutate }))
+
+      renderForm({ initialEngagementId: ENGAGEMENT_B.id })
+
+      await user.type(screen.getByLabelText(/command/i), 'whoami')
+      await user.click(screen.getByRole('button', { name: /^run$/i }))
+
+      expect(mutate).toHaveBeenCalledWith(
+        expect.objectContaining({ engagement_id: ENGAGEMENT_B.id }),
+        expect.anything(),
+      )
     })
   })
 
