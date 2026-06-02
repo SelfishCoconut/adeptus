@@ -77,7 +77,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §6.2 (fully)
 - **Depends on**: 04
 - **Risky**: no
-- **Status**: todo
+- **Status**: in-progress
 
 ### Slice 06: Kill switches + timeout-confirm
 - **Goal**: Per-tool stop button works; engagement-wide pause halts all in-flight; timeout prompts kill/extend/wait
