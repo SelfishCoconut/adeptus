@@ -74,15 +74,21 @@ async def update_engagement(
     db: AsyncSession,
     engagement_id: UUID,
     *,
-    privacy_mode: str,
+    privacy_mode: str | None = None,
+    concurrency_slot_limit: int | None = None,
 ) -> Engagement | None:
-    """Update an Engagement row's ``privacy_mode`` and return the refreshed object.
+    """Update an Engagement row's settings and return the refreshed object.
 
+    Only the fields passed as non-None keyword arguments are updated.
     Returns ``None`` if the engagement does not exist.
     """
-    await db.execute(
-        update(Engagement).where(Engagement.id == engagement_id).values(privacy_mode=privacy_mode)
-    )
+    values: dict[str, object] = {}
+    if privacy_mode is not None:
+        values["privacy_mode"] = privacy_mode
+    if concurrency_slot_limit is not None:
+        values["concurrency_slot_limit"] = concurrency_slot_limit
+    if values:
+        await db.execute(update(Engagement).where(Engagement.id == engagement_id).values(**values))
     result = await db.execute(select(Engagement).where(Engagement.id == engagement_id))
     return result.scalar_one_or_none()
 

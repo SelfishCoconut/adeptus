@@ -341,3 +341,5 @@ No. This slice does not touch auth, MCP subprocess spawning semantics (the exist
 
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-06-02T22:39:21Z — 2b0eb41 chore(claude): fix and harden .claude tooling (#15)
+- 2026-06-02T22:40:03Z — e713ce5 docs(slice-05): spec + plan status in-progress (#16)
+- 2026-06-02T22:41:32Z — e713ce5 docs(slice-05): spec + plan status in-progress (#16)

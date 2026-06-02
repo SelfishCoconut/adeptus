@@ -61,6 +61,7 @@ async def create_engagement(
         updated_at=engagement.updated_at,
         member_role="owner",
         privacy_mode=engagement.privacy_mode,
+        concurrency_slot_limit=engagement.concurrency_slot_limit,
     )
 
 
@@ -94,6 +95,7 @@ async def get_engagement(
         updated_at=engagement.updated_at,
         member_role=member_role,
         privacy_mode=engagement.privacy_mode,
+        concurrency_slot_limit=engagement.concurrency_slot_limit,
     )
 
 
@@ -121,8 +123,13 @@ async def update_engagement(
     if member_role != "owner":
         raise ForbiddenError("Only the engagement owner may update engagement settings")
 
-    if data.privacy_mode is not None:
-        updated = await repo.update_engagement(db, engagement_id, privacy_mode=data.privacy_mode)
+    if data.privacy_mode is not None or data.concurrency_slot_limit is not None:
+        updated = await repo.update_engagement(
+            db,
+            engagement_id,
+            privacy_mode=data.privacy_mode,
+            concurrency_slot_limit=data.concurrency_slot_limit,
+        )
         if updated is None:  # extremely unlikely race; handle defensively
             raise NotFoundError("Engagement not found")
         engagement = updated
@@ -137,6 +144,7 @@ async def update_engagement(
         updated_at=engagement.updated_at,
         member_role=member_role,
         privacy_mode=engagement.privacy_mode,
+        concurrency_slot_limit=engagement.concurrency_slot_limit,
     )
 
 

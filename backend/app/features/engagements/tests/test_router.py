@@ -75,6 +75,7 @@ def _make_engagement_detail(*, engagement_id: UUID | None = None) -> EngagementD
         updated_at=_now(),
         member_role="owner",
         privacy_mode="local_only",
+        concurrency_slot_limit=3,
     )
 
 
@@ -607,6 +608,7 @@ async def test_patch_engagement_200_owner(
         updated_at=_now(),
         member_role="owner",
         privacy_mode="cloud_enabled",
+        concurrency_slot_limit=3,
     )
     with patch(
         "app.features.engagements.router.service.update_engagement",

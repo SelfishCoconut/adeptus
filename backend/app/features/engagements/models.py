@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, SmallInteger, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func, text
@@ -33,6 +33,9 @@ class Engagement(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
     privacy_mode: Mapped[Literal["local_only", "cloud_enabled"]] = mapped_column(
         String(16), nullable=False, server_default=text("'local_only'")
+    )
+    concurrency_slot_limit: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("3")
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

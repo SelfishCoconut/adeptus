@@ -39,10 +39,12 @@ class EngagementDetail(BaseModel):
     updated_at: datetime
     member_role: Literal["owner", "member"]
     privacy_mode: PrivacyMode
+    concurrency_slot_limit: int
 
 
 class EngagementUpdate(BaseModel):
     privacy_mode: PrivacyMode | None = None
+    concurrency_slot_limit: int | None = Field(default=None, ge=1, le=16)
 
 
 class MemberEntry(BaseModel):
