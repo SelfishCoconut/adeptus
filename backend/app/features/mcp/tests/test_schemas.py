@@ -261,7 +261,7 @@ class TestToolPreset:
 
     def test_missing_name_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            ToolPreset.model_validate({"args": {}})  # type: ignore[call-arg]
+            ToolPreset.model_validate({"args": {}})
 
 
 # ---------------------------------------------------------------------------
