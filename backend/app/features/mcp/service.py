@@ -21,14 +21,17 @@ Membership check (§4 no-admin-bypass + §17.1 isolation):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.db import get_sessionmaker
 from app.core.errors import BadRequestError, NotFoundError
 from app.features.engagements import repository as eng_repo
 from app.features.mcp import repository as mcp_repo
@@ -42,10 +45,99 @@ from app.features.mcp.schemas import (
     ToolRunPage,
     ToolRunResult,
     ToolRunStatus,
+    WebSocketOutputChunk,
 )
-from app.features.mcp.subprocess_manager import McpServerNotFound
+from app.features.mcp.subprocess_manager import (
+    McpServerNotFound,
+    StreamChunk,
+    StreamDone,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# In-process pub/sub for streaming tool-run output
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _RunChannel:
+    """Per-run pub/sub channel with a replay buffer for mid-run reconnects."""
+
+    replay: list[WebSocketOutputChunk] = field(default_factory=list)
+    subscribers: set[asyncio.Queue[WebSocketOutputChunk]] = field(default_factory=set)
+    done: bool = False
+
+
+# Module-level channel map: tool_run_id → _RunChannel.
+# Lives for the duration of the async run; discarded once the final DB row is
+# committed (Task 6 / Decision 3).  In-process only — not multi-worker safe
+# (documented in Risk 3: acceptable for v1 single-process Compose deployment).
+_channels: dict[UUID, _RunChannel] = {}
+
+# Keep a strong reference to background tasks so the GC does not collect them
+# before they complete.  (asyncio.create_task() returns a weak-referenced task.)
+_background_tasks: set[asyncio.Task[None]] = set()
+
+
+def broadcast_tool_run_output(tool_run_id: UUID, chunk: WebSocketOutputChunk) -> None:
+    """Append *chunk* to the replay buffer and post it to every live subscriber.
+
+    Creates the channel on first call so callers do not need to pre-create it.
+    Safe to call from a background task (no await needed — Queue.put_nowait is
+    synchronous).
+    """
+    channel = _channels.setdefault(tool_run_id, _RunChannel())
+    channel.replay.append(chunk)
+    for queue in channel.subscribers:
+        queue.put_nowait(chunk)
+
+
+def subscribe_tool_run(
+    tool_run_id: UUID,
+) -> tuple[list[WebSocketOutputChunk], asyncio.Queue[WebSocketOutputChunk]]:
+    """Register a new subscriber for *tool_run_id* and return the replay snapshot.
+
+    Returns a ``(replay_snapshot, queue)`` tuple.  The caller should first send
+    every chunk in *replay_snapshot* to the client, then read *queue* for live
+    chunks.  The snapshot is a copy of the buffer at subscription time; chunks
+    that arrive after the snapshot but before the caller starts reading *queue*
+    will appear in both the snapshot of the *next* subscriber and in the queue —
+    the WS handler must deduplicate if needed, but in practice the snapshot +
+    queue approach is race-free because broadcast always writes to both at once.
+    """
+    channel = _channels.setdefault(tool_run_id, _RunChannel())
+    queue: asyncio.Queue[WebSocketOutputChunk] = asyncio.Queue()
+    channel.subscribers.add(queue)
+    return list(channel.replay), queue
+
+
+def unsubscribe_tool_run(tool_run_id: UUID, queue: asyncio.Queue[WebSocketOutputChunk]) -> None:
+    """Remove *queue* from the channel's live subscribers.
+
+    Safe to call even if the channel has already been discarded (guard included).
+    """
+    channel = _channels.get(tool_run_id)
+    if channel is not None:
+        channel.subscribers.discard(queue)
+
+
+def _discard_channel(tool_run_id: UUID) -> None:
+    """Mark the channel done and remove it from the module-level map.
+
+    The replay buffer is discarded; late WebSocket subscribers fall back to the
+    persisted DB row (Task 7).
+    """
+    channel = _channels.pop(tool_run_id, None)
+    if channel is not None:
+        channel.done = True
+
+
+def _reset_channels() -> None:
+    """Clear all channels.  For use in tests only."""
+    _channels.clear()
+    _background_tasks.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -181,10 +273,12 @@ async def execute_tool_run(
     args: dict[str, Any],
     timeout_seconds: int,
     user_id: UUID,
+    async_mode: bool = False,
+    preset_name: str | None = None,
 ) -> ToolRunResult:
     """Execute a tool call via the named MCP server and persist the result.
 
-    Flow:
+    Sync flow (async_mode=False):
       1. Fused existence + membership check via get_engagement_for_member —
          EngagementNotFound (404) if the engagement is missing OR the caller is
          not an explicit member (no admin bypass per §4; no existence disclosure
@@ -199,23 +293,35 @@ async def execute_tool_run(
       5. Update the ToolRun row with the raw result.
       6. Return a ToolRunResult assembled from the updated row.
 
+    Async flow (async_mode=True):
+      1–2. Same membership + registry checks.
+      3. Insert a ToolRun row with status='running'; flush+refresh for id+started_at.
+      4. Commit the row immediately so the WS endpoint and the background task
+         (which opens its own session) can see it.
+      5. Launch _stream_to_channel as an asyncio background task.
+      6. Return a partial ToolRunResult (exit_code=None, stdout/stderr='', finished_at=None).
+
     Args:
-        db:               Async database session (caller commits).
+        db:               Async database session (caller commits for sync; service
+                          commits immediately for async after inserting the row).
         engagement_id:    UUID of the engagement.
         server_name:      Key in the MCP registry.
         tool_name:        Name of the tool on that server.
         args:             Tool-specific argument map forwarded verbatim.
         timeout_seconds:  Per-request wall-clock budget (1–300 s).
         user_id:          ID of the requesting user.
+        async_mode:       When True, return immediately after inserting the running row.
+        preset_name:      Optional name of the preset the user selected.
 
     Returns:
-        ToolRunResult with all fields populated.
+        ToolRunResult — fully populated for sync; partial (running) for async.
 
     Raises:
         EngagementNotFound:  engagement_id does not exist OR user_id is not an
                              explicit member (even if admin — §4/§17.1).
         McpServerNotFound:   server_name not in the registry.
-        McpServerDown:       Subprocess not running / timed out (row left in-flight).
+        McpServerDown:       Subprocess not running / timed out (sync path only;
+                             async path surfaces failures via WS error chunk).
     """
     # Step 1: fused existence + membership check (§17.1 isolation chokepoint).
     # get_engagement_for_member returns None when the engagement is missing OR the
@@ -229,13 +335,56 @@ async def execute_tool_run(
     if server_name not in registry:
         raise McpServerNotFound(f"MCP server {server_name!r} is not in the registry")
 
-    # Step 3: insert in-flight ToolRun row.
+    if async_mode:
+        # Async path: insert running row, commit, launch background task, return partial.
+        tool_run = await mcp_repo.create_tool_run(
+            db,
+            engagement_id=engagement_id,
+            server_name=server_name,
+            tool_name=tool_name,
+            args=args,
+            status="running",
+            preset_name=preset_name,
+        )
+        # Commit so the row is durable before we return 202 and hand off to the task.
+        # The background task opens its own session and must see the committed row.
+        await db.commit()
+
+        tool_run_id: UUID = cast(UUID, tool_run.id)
+        task = asyncio.create_task(
+            _stream_to_channel(
+                tool_run_id=tool_run_id,
+                server_name=server_name,
+                tool_name=tool_name,
+                args=args,
+                timeout_seconds=float(timeout_seconds),
+            )
+        )
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+        return ToolRunResult(
+            tool_run_id=tool_run_id,
+            engagement_id=cast(UUID, tool_run.engagement_id),
+            server_name=tool_run.server_name,
+            tool_name=tool_run.tool_name,
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=tool_run.started_at,
+            finished_at=None,
+            status="running",
+            preset_name=preset_name,
+        )
+
+    # Step 3: insert in-flight ToolRun row (sync path).
     tool_run = await mcp_repo.create_tool_run(
         db,
         engagement_id=engagement_id,
         server_name=server_name,
         tool_name=tool_name,
         args=args,
+        preset_name=preset_name,
     )
 
     # Step 4: call the MCP subprocess.
@@ -276,6 +425,94 @@ async def execute_tool_run(
         status=result_status,
         preset_name=getattr(updated, "preset_name", None),
     )
+
+
+async def _stream_to_channel(
+    *,
+    tool_run_id: UUID,
+    server_name: str,
+    tool_name: str,
+    args: dict[str, Any],
+    timeout_seconds: float,
+) -> None:
+    """Background task: stream MCP output to the pub/sub channel and persist the result.
+
+    Opens a FRESH database session (independent of the request session) so it can
+    safely commit after the request has returned 202.
+
+    On StreamDone → updates the DB row to completed/timed_out status, broadcasts
+    a 'done' chunk, and returns.
+
+    On any exception → updates the DB row to 'failed', broadcasts an 'error' chunk.
+
+    In all cases the channel is discarded in the finally block so late WebSocket
+    subscribers fall back to the persisted row.
+    """
+    async with get_sessionmaker()() as session:
+        try:
+            async for ev in subprocess_manager.stream_tool_call(
+                server_name=server_name,
+                tool_name=tool_name,
+                args=args,
+                timeout_seconds=timeout_seconds,
+            ):
+                if isinstance(ev, StreamChunk):
+                    broadcast_tool_run_output(
+                        tool_run_id,
+                        WebSocketOutputChunk(type=ev.type, data=ev.data),
+                    )
+                elif isinstance(ev, StreamDone):
+                    now = datetime.now(tz=UTC)
+                    final_status: ToolRunStatus = (
+                        "timed_out" if ev.exit_code == 124 else "completed"
+                    )
+                    await mcp_repo.update_tool_run_result(
+                        session,
+                        tool_run_id,
+                        exit_code=ev.exit_code,
+                        stdout=ev.stdout,
+                        stderr=ev.stderr,
+                        finished_at=now,
+                        status=final_status,
+                    )
+                    await session.commit()
+                    broadcast_tool_run_output(
+                        tool_run_id,
+                        WebSocketOutputChunk(
+                            type="done",
+                            exit_code=ev.exit_code,
+                            finished_at=now,
+                        ),
+                    )
+                    break
+
+        except Exception as exc:  # noqa: BLE001 — catch all; detached task must not raise
+            logger.exception(
+                "Background stream task for tool_run_id=%s failed: %s", tool_run_id, exc
+            )
+            now = datetime.now(tz=UTC)
+            try:
+                await mcp_repo.update_tool_run_result(
+                    session,
+                    tool_run_id,
+                    exit_code=1,
+                    stdout="",
+                    stderr=str(exc),
+                    finished_at=now,
+                    status="failed",
+                )
+                await session.commit()
+            except Exception:  # noqa: BLE001 — DB may also be down; best-effort
+                logger.exception(
+                    "Failed to persist 'failed' status for tool_run_id=%s", tool_run_id
+                )
+            broadcast_tool_run_output(
+                tool_run_id,
+                WebSocketOutputChunk(type="error", message=str(exc)),
+            )
+
+        finally:
+            _discard_channel(tool_run_id)
 
 
 # ---------------------------------------------------------------------------

@@ -7,11 +7,16 @@ stdio transport (JSON-RPC 2.0, newline-delimited).  Exposes:
     await shutdown()  — terminate all subprocesses cleanly
     await send_tool_call(server_name, tool_name, args, timeout_seconds)
                       — send a JSON-RPC 2.0 request and return McpRawResult
+    stream_tool_call(server_name, tool_name, args, timeout_seconds)
+                      — async generator yielding StreamChunk / StreamDone events
     get_server_status(server_name) -> "running" | "stopped"
 
 JSON-RPC framing (Risk 2 from slice spec):
   - Write exactly one JSON line to stdin, ending with ``\\n``.
-  - Read exactly one JSON line from stdout.
+  - For send_tool_call: read lines until the matching-id response is found
+    (notification lines with ``"method"`` are skipped transparently).
+  - For stream_tool_call: yield StreamChunk for each notification line and
+    StreamDone for the final response line.
 
 Domain exceptions raised:
   - McpServerNotFound  — server name is not in the registry
@@ -24,8 +29,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from app.core.errors import AdeptusError, BadRequestError
 from app.features.mcp.registry import McpServerConfig, get_registry
@@ -109,6 +115,35 @@ class McpRawResult:
     exit_code: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    """A single streaming output notification from a tool call.
+
+    Corresponds to JSON-RPC notification lines with ``method == "tools/output"``
+    that the httpx MCP server emits before the final response.
+    """
+
+    type: Literal["stdout", "stderr"]
+    data: str
+
+
+@dataclass(frozen=True)
+class StreamDone:
+    """The final result from a streaming tool call.
+
+    Corresponds to the JSON-RPC response line (with ``"id"`` and ``"result"``)
+    that terminates the streaming exchange.
+    """
+
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
+# Union type for stream events yielded by stream_tool_call.
+StreamEvent = StreamChunk | StreamDone
 
 
 # ---------------------------------------------------------------------------
@@ -274,51 +309,67 @@ async def send_tool_call(
             _mark_stopped(server_name)
             raise McpServerDown(f"MCP server {server_name!r} stdin pipe broken: {exc}") from exc
 
-        # ---- read one response line with timeout --------------------------------
-        # Use timeout_seconds + margin so the server's inner communicate() timeout
-        # fires first and returns a proper JSON response; the outer guard only
-        # triggers if the subprocess is completely hung (transport-level failure).
+        # ---- read response lines, skipping notifications -------------------------
+        # Loop to skip any JSON-RPC notification lines (e.g. tools/output from
+        # httpx) until we receive the matching-id response.  This keeps shell-exec
+        # working (its first line IS the response) AND lets sync httpx runs work
+        # (notifications are emitted before the final response there).
         outer_timeout = timeout_seconds + _TIMEOUT_MARGIN_SECONDS
-        try:
-            raw_line = await asyncio.wait_for(process.stdout.readline(), timeout=outer_timeout)
-        except TimeoutError as exc:
-            _mark_stopped(server_name)
-            raise McpServerDown(
-                f"MCP server {server_name!r} timed out after {timeout_seconds}s"
-                f" waiting for tool {tool_name!r} response"
-            ) from exc
-        except (BrokenPipeError, ConnectionResetError) as exc:
-            _mark_stopped(server_name)
-            raise McpServerDown(f"MCP server {server_name!r} stdout pipe broken: {exc}") from exc
-        except ValueError as exc:
-            # LimitOverrunError (subclass of ValueError) — the response line exceeded
-            # the StreamReader buffer limit.  The subprocess is still alive; do NOT
-            # mark it stopped.
-            raise McpServerDown(
-                f"MCP server {server_name!r} response line exceeded StreamReader limit: {exc}"
-            ) from exc
+        raw_line: bytes = b""
+        response: dict[str, Any] = {}
+        while True:
+            try:
+                raw_line = await asyncio.wait_for(process.stdout.readline(), timeout=outer_timeout)
+            except TimeoutError as exc:
+                _mark_stopped(server_name)
+                raise McpServerDown(
+                    f"MCP server {server_name!r} timed out after {timeout_seconds}s"
+                    f" waiting for tool {tool_name!r} response"
+                ) from exc
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                _mark_stopped(server_name)
+                raise McpServerDown(
+                    f"MCP server {server_name!r} stdout pipe broken: {exc}"
+                ) from exc
+            except ValueError as exc:
+                # LimitOverrunError (subclass of ValueError) — the response line exceeded
+                # the StreamReader buffer limit.  The subprocess is still alive; do NOT
+                # mark it stopped.
+                raise McpServerDown(
+                    f"MCP server {server_name!r} response line exceeded StreamReader limit: {exc}"
+                ) from exc
 
-    # ---- check for subprocess death after read returned empty bytes ----------
-    if not raw_line:
-        _mark_stopped(server_name)
-        raise McpServerDown(f"MCP server {server_name!r} closed stdout (process likely died)")
+            # ---- check for subprocess death after read returned empty bytes ----
+            if not raw_line:
+                _mark_stopped(server_name)
+                raise McpServerDown(
+                    f"MCP server {server_name!r} closed stdout (process likely died)"
+                )
 
-    # ---- parse JSON-RPC response --------------------------------------------
-    try:
-        response = json.loads(raw_line.decode())
-    except json.JSONDecodeError as exc:
-        raise McpServerDown(
-            f"MCP server {server_name!r} returned non-JSON response: {raw_line!r}"
-        ) from exc
+            # ---- parse JSON-RPC line ----------------------------------------
+            try:
+                response = json.loads(raw_line.decode())
+            except json.JSONDecodeError as exc:
+                raise McpServerDown(
+                    f"MCP server {server_name!r} returned non-JSON response: {raw_line!r}"
+                ) from exc
 
-    # ---- validate response id matches request id ----------------------------
-    response_id = response.get("id")
-    if response_id != request_id:
-        _mark_stopped(server_name)
-        raise McpServerDown(
-            f"MCP server {server_name!r} response id mismatch: "
-            f"expected {request_id}, got {response_id!r} (desync)"
-        )
+            # Skip notification lines (those with a "method" field).
+            # Notification lines are emitted by httpx-style servers before the
+            # final response; shell-exec emits only a response, so the loop body
+            # normally executes once.
+            if "method" in response:
+                continue
+            # A response line (no "method") with the wrong id is a protocol desync.
+            response_id = response.get("id")
+            if response_id != request_id:
+                _mark_stopped(server_name)
+                raise McpServerDown(
+                    f"MCP server {server_name!r} response id mismatch: "
+                    f"expected {request_id}, got {response_id!r} (desync)"
+                )
+            # Matching-id response — exit the loop.
+            break
 
     if "error" in response:
         error = response["error"]
@@ -335,6 +386,132 @@ async def send_tool_call(
         stdout=str(result.get("stdout", "")),
         stderr=str(result.get("stderr", "")),
     )
+
+
+async def stream_tool_call(
+    server_name: str,
+    tool_name: str,
+    args: dict[str, Any],
+    timeout_seconds: float,
+) -> AsyncIterator[StreamEvent]:
+    """Send a JSON-RPC 2.0 tool call and yield streaming events.
+
+    Holds the per-server lock for the WHOLE duration of the streamed exchange —
+    a streaming call monopolises the subprocess (concurrency is Slice 05).
+
+    Yields:
+        StreamChunk for each ``tools/output`` notification line from the server.
+        StreamDone  for the final result line (then the generator returns).
+
+    Raises:
+        McpServerNotFound: ``server_name`` not in the registry.
+        McpServerDown:     Subprocess not running, died, timed out, or EOF on stdout.
+        McpToolNotFound:   Server returned JSON-RPC -32601 or -32602.
+    """
+    registry = get_registry()
+    if server_name not in registry:
+        raise McpServerNotFound(f"MCP server {server_name!r} is not in the registry")
+
+    handle = _handles.get(server_name)
+    if handle is None or handle.status != "running":
+        raise McpServerDown(
+            f"MCP server {server_name!r} is not running (call startup() before stream_tool_call)"
+        )
+
+    process = handle.process
+    assert process is not None  # guaranteed by status check above
+
+    if process.stdin is None or process.stdout is None:
+        raise McpServerDown(f"MCP server {server_name!r} has no stdio pipes")
+
+    outer_timeout = timeout_seconds + _TIMEOUT_MARGIN_SECONDS
+
+    async with handle.lock:
+        request_id = handle.next_id()
+        request = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": args},
+        }
+        request_line = json.dumps(request) + "\n"
+
+        try:
+            process.stdin.write(request_line.encode())
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            _mark_stopped(server_name)
+            raise McpServerDown(f"MCP server {server_name!r} stdin pipe broken: {exc}") from exc
+
+        while True:
+            try:
+                raw_line = await asyncio.wait_for(process.stdout.readline(), timeout=outer_timeout)
+            except TimeoutError as exc:
+                _mark_stopped(server_name)
+                raise McpServerDown(
+                    f"MCP server {server_name!r} timed out after {timeout_seconds}s"
+                    f" waiting for tool {tool_name!r} stream"
+                ) from exc
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                _mark_stopped(server_name)
+                raise McpServerDown(
+                    f"MCP server {server_name!r} stdout pipe broken: {exc}"
+                ) from exc
+            except ValueError as exc:
+                raise McpServerDown(
+                    f"MCP server {server_name!r} response line exceeded StreamReader limit: {exc}"
+                ) from exc
+
+            if not raw_line:
+                _mark_stopped(server_name)
+                raise McpServerDown(
+                    f"MCP server {server_name!r} closed stdout (process likely died)"
+                )
+
+            try:
+                parsed = json.loads(raw_line.decode())
+            except json.JSONDecodeError as exc:
+                raise McpServerDown(
+                    f"MCP server {server_name!r} returned non-JSON line: {raw_line!r}"
+                ) from exc
+
+            # Notification line: tools/output with matching id.
+            if "method" in parsed:
+                method = parsed.get("method")
+                if method == "tools/output":
+                    params = parsed.get("params", {})
+                    if isinstance(params, dict) and params.get("id") == request_id:
+                        chunk_type: str = params.get("type", "stdout")
+                        if chunk_type in ("stdout", "stderr"):
+                            yield StreamChunk(
+                                type=chunk_type,  # type: ignore[arg-type]
+                                data=str(params.get("data", "")),
+                            )
+                # Skip all other notifications / non-matching ids.
+                continue
+
+            # Response line — check it matches our request id.
+            if parsed.get("id") != request_id:
+                # Not our response; skip defensively.
+                continue
+
+            # Our final response.
+            if "error" in parsed:
+                error = parsed["error"]
+                error_code = error.get("code") if isinstance(error, dict) else None
+                if isinstance(error_code, int) and error_code in _JSONRPC_NOT_FOUND_CODES:
+                    raise McpToolNotFound(
+                        f"MCP server {server_name!r} tool {tool_name!r} not found: {error}"
+                    )
+                raise McpServerDown(f"MCP server {server_name!r} returned JSON-RPC error: {error}")
+
+            result = parsed.get("result", {})
+            yield StreamDone(
+                exit_code=int(result.get("exit_code", 0)),
+                stdout=str(result.get("stdout", "")),
+                stderr=str(result.get("stderr", "")),
+            )
+            return
 
 
 # ---------------------------------------------------------------------------

@@ -22,12 +22,15 @@ from app.features.mcp.subprocess_manager import (
     McpServerDown,
     McpServerNotFound,
     McpToolNotFound,
+    StreamChunk,
+    StreamDone,
     _handles,
     _reset_manager,
     get_server_status,
     send_tool_call,
     shutdown,
     startup,
+    stream_tool_call,
 )
 
 # ---------------------------------------------------------------------------
@@ -692,3 +695,208 @@ class TestMcpToolNotFound:
 
         with pytest.raises(AdeptusError):
             await send_tool_call("shell-exec", "bad_tool", {}, 5.0)
+
+
+# ---------------------------------------------------------------------------
+# send_tool_call — skips leading notification lines (httpx compat)
+# ---------------------------------------------------------------------------
+
+
+def _make_notification_line(
+    request_id: int = 1, chunk_type: str = "stdout", data: str = ""
+) -> bytes:
+    """Build a tools/output notification line as the httpx MCP server emits it."""
+    notification = {
+        "jsonrpc": "2.0",
+        "method": "tools/output",
+        "params": {"id": request_id, "type": chunk_type, "data": data},
+    }
+    return (json.dumps(notification) + "\n").encode()
+
+
+class TestSendToolCallSkipsNotifications:
+    @pytest.mark.asyncio
+    async def test_skips_notification_before_final_response(self) -> None:
+        """send_tool_call skips tools/output notification lines and returns the response."""
+        notification = _make_notification_line(request_id=1, chunk_type="stdout", data="chunk\n")
+        response_line = _make_result_line(exit_code=0, stdout="full output", id_=1)
+        fake_proc = _make_fake_process(stdout_lines=[notification, response_line])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        result = await send_tool_call("shell-exec", "run_command", {}, 10.0)
+        assert result.exit_code == 0
+        assert result.stdout == "full output"
+
+    @pytest.mark.asyncio
+    async def test_skips_multiple_notifications_before_response(self) -> None:
+        """send_tool_call skips multiple notification lines before the final response."""
+        notifications = [
+            _make_notification_line(request_id=1, chunk_type="stdout", data=f"line{i}\n")
+            for i in range(5)
+        ]
+        response_line = _make_result_line(exit_code=0, stdout="done", id_=1)
+        fake_proc = _make_fake_process(stdout_lines=[*notifications, response_line])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        result = await send_tool_call("shell-exec", "run_command", {}, 10.0)
+        assert result.stdout == "done"
+
+    @pytest.mark.asyncio
+    async def test_no_notifications_still_works(self) -> None:
+        """send_tool_call works as before when there are no notification lines."""
+        response_line = _make_result_line(exit_code=127, stdout="", stderr="not found", id_=1)
+        fake_proc = _make_fake_process(stdout_lines=[response_line])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        result = await send_tool_call("shell-exec", "run_command", {}, 10.0)
+        assert result.exit_code == 127
+
+
+# ---------------------------------------------------------------------------
+# stream_tool_call — happy path
+# ---------------------------------------------------------------------------
+
+
+class TestStreamToolCall:
+    @pytest.mark.asyncio
+    async def test_yields_chunks_then_done(self) -> None:
+        """stream_tool_call yields StreamChunk for each notification and StreamDone."""
+        notif1 = _make_notification_line(request_id=1, chunk_type="stdout", data="line1\n")
+        notif2 = _make_notification_line(request_id=1, chunk_type="stderr", data="err\n")
+        response = _make_result_line(exit_code=0, stdout="line1\n", stderr="err\n", id_=1)
+        fake_proc = _make_fake_process(stdout_lines=[notif1, notif2, response])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        events = []
+        async for ev in stream_tool_call("shell-exec", "run_command", {}, 10.0):
+            events.append(ev)
+
+        assert len(events) == 3
+        assert isinstance(events[0], StreamChunk)
+        assert events[0].type == "stdout"
+        assert events[0].data == "line1\n"
+        assert isinstance(events[1], StreamChunk)
+        assert events[1].type == "stderr"
+        assert events[1].data == "err\n"
+        assert isinstance(events[2], StreamDone)
+        assert events[2].exit_code == 0
+        assert events[2].stdout == "line1\n"
+        assert events[2].stderr == "err\n"
+
+    @pytest.mark.asyncio
+    async def test_yields_done_only_when_no_notifications(self) -> None:
+        """stream_tool_call yields only StreamDone when the server sends no notifications."""
+        response = _make_result_line(exit_code=0, stdout="out", stderr="", id_=1)
+        fake_proc = _make_fake_process(stdout_lines=[response])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        events = []
+        async for ev in stream_tool_call("shell-exec", "run_command", {}, 10.0):
+            events.append(ev)
+
+        assert len(events) == 1
+        assert isinstance(events[0], StreamDone)
+        assert events[0].exit_code == 0
+        assert events[0].stdout == "out"
+
+    @pytest.mark.asyncio
+    async def test_unknown_server_raises_not_found(self) -> None:
+        """stream_tool_call raises McpServerNotFound for an unknown server."""
+        with pytest.raises(McpServerNotFound):
+            async for _ in stream_tool_call("no-such", "run_command", {}, 5.0):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_server_not_started_raises_down(self) -> None:
+        """stream_tool_call raises McpServerDown when the server has not been started."""
+        with pytest.raises(McpServerDown):
+            async for _ in stream_tool_call("shell-exec", "run_command", {}, 5.0):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_eof_raises_server_down(self) -> None:
+        """stream_tool_call raises McpServerDown on EOF (empty readline)."""
+        fake_proc = _make_fake_process(stdout_lines=[b""])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        with pytest.raises(McpServerDown, match="closed stdout"):
+            async for _ in stream_tool_call("shell-exec", "run_command", {}, 5.0):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_jsonrpc_32601_raises_tool_not_found(self) -> None:
+        """stream_tool_call raises McpToolNotFound for -32601 error response."""
+        error_line = (
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32601, "message": "Tool not found"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        fake_proc = _make_fake_process(stdout_lines=[error_line])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        with pytest.raises(McpToolNotFound):
+            async for _ in stream_tool_call("shell-exec", "bad_tool", {}, 5.0):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_generic_jsonrpc_error_raises_server_down(self) -> None:
+        """stream_tool_call raises McpServerDown for non-not-found JSON-RPC errors."""
+        error_line = (
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32600, "message": "Invalid request"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        fake_proc = _make_fake_process(stdout_lines=[error_line])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        with pytest.raises(McpServerDown):
+            async for _ in stream_tool_call("shell-exec", "run_command", {}, 5.0):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_ignores_notifications_for_different_request_id(self) -> None:
+        """stream_tool_call ignores notification lines whose id does not match."""
+        # Notification for request id=99 (not ours, which is 1).
+        other_notif = (
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "tools/output",
+                    "params": {"id": 99, "type": "stdout", "data": "from other request"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        our_notif = _make_notification_line(request_id=1, chunk_type="stdout", data="ours\n")
+        response = _make_result_line(exit_code=0, stdout="ours\n", id_=1)
+        fake_proc = _make_fake_process(stdout_lines=[other_notif, our_notif, response])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        events = []
+        async for ev in stream_tool_call("shell-exec", "run_command", {}, 10.0):
+            events.append(ev)
+
+        # Only our notification and done — the other_notif is ignored.
+        assert len(events) == 2
+        assert isinstance(events[0], StreamChunk)
+        assert events[0].data == "ours\n"
+        assert isinstance(events[1], StreamDone)

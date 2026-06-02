@@ -24,6 +24,8 @@ async def create_tool_run(
     server_name: str,
     tool_name: str,
     args: dict[str, Any],
+    status: str = "completed",
+    preset_name: str | None = None,
 ) -> ToolRun:
     """Insert a new ToolRun row and return it with server-generated fields populated.
 
@@ -31,12 +33,20 @@ async def create_tool_run(
     stdout and stderr default to '' via the server_default on the model.
     flush() + refresh() ensure id and started_at are available before returning.
     The caller is responsible for committing (or not) the transaction.
+
+    Args:
+        status:      Initial status for the run.  Defaults to ``'completed'`` so
+                     existing callers (sync path) are unaffected.  Pass
+                     ``'running'`` for the async path.
+        preset_name: Optional name of the preset the user selected.
     """
     tool_run = ToolRun(
         engagement_id=engagement_id,
         server_name=server_name,
         tool_name=tool_name,
         args=args,
+        status=status,
+        preset_name=preset_name,
     )
     db.add(tool_run)
     await db.flush()
@@ -52,11 +62,17 @@ async def update_tool_run_result(
     stdout: str,
     stderr: str,
     finished_at: datetime,
+    status: str = "completed",
 ) -> ToolRun:
     """Update an in-flight ToolRun row with its final results and return it.
 
     Issues a SQL UPDATE then re-fetches the row so the returned object reflects
     the persisted state.  The caller is responsible for committing.
+
+    Args:
+        status: Final status for the run.  Defaults to ``'completed'`` so
+                existing callers (sync path) are unaffected.  Pass
+                ``'failed'`` or ``'timed_out'`` as appropriate.
     """
     await db.execute(
         update(ToolRun)
@@ -66,6 +82,7 @@ async def update_tool_run_result(
             stdout=stdout,
             stderr=stderr,
             finished_at=finished_at,
+            status=status,
         )
     )
     result = await db.execute(select(ToolRun).where(ToolRun.id == tool_run_id))

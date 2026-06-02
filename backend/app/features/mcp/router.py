@@ -30,7 +30,7 @@ type for HTTP 503, and adding one would widen core/ and require an ADR.
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -108,6 +108,7 @@ async def list_mcp_tools(
 )
 async def execute_tool_run(
     body: ToolRunCreate,
+    response: Response,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ToolRunResult | JSONResponse:
@@ -115,6 +116,10 @@ async def execute_tool_run(
 
     Requires an authenticated session AND explicit engagement membership.
     Admin role does NOT bypass the membership requirement (§4).
+
+    When ``async_mode=True`` the endpoint returns HTTP 202 immediately with a
+    partial ToolRunResult (status='running', finished_at/exit_code null).
+    Output is streamed via the WebSocket endpoint (Task 7).
     """
     try:
         result = await service.execute_tool_run(
@@ -125,8 +130,14 @@ async def execute_tool_run(
             args=body.args,
             timeout_seconds=body.timeout_seconds,
             user_id=current_user.id,  # type: ignore[arg-type]
+            async_mode=body.async_mode,
+            preset_name=body.preset_name,
         )
-        await db.commit()
+        if body.async_mode:
+            # The service has already committed the running row; set 202.
+            response.status_code = status.HTTP_202_ACCEPTED
+        else:
+            await db.commit()
         return result
     except McpServerDown as exc:
         # No core error type maps to HTTP 503; translate this one inline.
