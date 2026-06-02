@@ -113,6 +113,27 @@ def subscribe_tool_run(
     return list(channel.replay), queue
 
 
+def try_subscribe_tool_run(
+    tool_run_id: UUID,
+) -> tuple[list[WebSocketOutputChunk], asyncio.Queue[WebSocketOutputChunk]] | None:
+    """Subscribe to an *existing* channel without creating one if it is absent.
+
+    Returns ``(replay_snapshot, queue)`` if a live channel exists for
+    *tool_run_id*, or ``None`` if no channel exists (the run has already
+    completed or was never started in async mode).
+
+    This is the non-creating variant of ``subscribe_tool_run``.  Use this in
+    the WebSocket handler so a late connect to a finished run does not
+    fabricate a channel that would block forever.
+    """
+    channel = _channels.get(tool_run_id)
+    if channel is None:
+        return None
+    queue: asyncio.Queue[WebSocketOutputChunk] = asyncio.Queue()
+    channel.subscribers.add(queue)
+    return list(channel.replay), queue
+
+
 def unsubscribe_tool_run(tool_run_id: UUID, queue: asyncio.Queue[WebSocketOutputChunk]) -> None:
     """Remove *queue* from the channel's live subscribers.
 
