@@ -17,8 +17,10 @@ vi.mock('./components/PrivacyModeBanner', () => ({
   ),
 }))
 
-vi.mock('@/features/mcp/components/RawShellForm', () => ({
-  RawShellForm: () => <div data-testid="raw-shell-form" />,
+vi.mock('@/features/mcp/components/ToolRunnerPanel', () => ({
+  ToolRunnerPanel: ({ engagementId }: { engagementId: string }) => (
+    <div data-testid="tool-runner-panel" data-engagement-id={engagementId} />
+  ),
 }))
 
 describe('WorkspaceShell', () => {
@@ -88,8 +90,8 @@ describe('WorkspaceShell', () => {
     expect(banner).toHaveAttribute('data-privacy-mode', 'cloud_enabled')
   })
 
-  describe('Console pane — RawShellForm visibility', () => {
-    it('shows the RawShellForm when an engagementId is provided', () => {
+  describe('Console pane — ToolRunnerPanel visibility', () => {
+    it('shows the ToolRunnerPanel for the engagement when an engagementId is provided', () => {
       render(
         <WorkspaceShell
           username="alice"
@@ -100,7 +102,9 @@ describe('WorkspaceShell', () => {
         />,
       )
 
-      expect(screen.getByTestId('raw-shell-form')).toBeInTheDocument()
+      const panel = screen.getByTestId('tool-runner-panel')
+      expect(panel).toBeInTheDocument()
+      expect(panel).toHaveAttribute('data-engagement-id', 'aaaaaaaa-0000-0000-0000-000000000001')
       expect(
         screen.queryByText(/select an engagement/i),
       ).not.toBeInTheDocument()
@@ -116,9 +120,9 @@ describe('WorkspaceShell', () => {
         />,
       )
 
-      expect(screen.queryByTestId('raw-shell-form')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('tool-runner-panel')).not.toBeInTheDocument()
       expect(
-        screen.getByText(/select an engagement to use the shell runner/i),
+        screen.getByText(/select an engagement to use the tool runner/i),
       ).toBeInTheDocument()
     })
 
@@ -133,9 +137,9 @@ describe('WorkspaceShell', () => {
         />,
       )
 
-      expect(screen.queryByTestId('raw-shell-form')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('tool-runner-panel')).not.toBeInTheDocument()
       expect(
-        screen.getByText(/select an engagement to use the shell runner/i),
+        screen.getByText(/select an engagement to use the tool runner/i),
       ).toBeInTheDocument()
     })
   })

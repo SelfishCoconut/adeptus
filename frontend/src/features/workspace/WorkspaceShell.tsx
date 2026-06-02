@@ -3,7 +3,7 @@ import { ModeToggle } from '@/components/theme/ModeToggle'
 import type { PrivacyMode } from '@/shared/api'
 import { PrivacyModeBanner } from './components/PrivacyModeBanner'
 import { HealthIndicator } from './HealthIndicator'
-import { RawShellForm } from '@/features/mcp/components/RawShellForm'
+import { ToolRunnerPanel } from '@/features/mcp/components/ToolRunnerPanel'
 
 interface WorkspaceShellProps {
   username: string
@@ -11,7 +11,7 @@ interface WorkspaceShellProps {
   onLogout: () => void
   isLoggingOut?: boolean
   privacyMode: PrivacyMode
-  /** When provided, the Console pane embeds the Raw Shell debug form. */
+  /** When provided, the Console pane embeds the tool runner for this engagement. */
   engagementId?: string
 }
 
@@ -52,9 +52,9 @@ export function WorkspaceShell({
         <section aria-label="Console" className="col-span-2 overflow-y-auto bg-background p-4">
           <h2 className="mb-3 text-sm font-medium text-muted-foreground">Console</h2>
           {engagementId ? (
-            <RawShellForm initialEngagementId={engagementId} />
+            <ToolRunnerPanel engagementId={engagementId} />
           ) : (
-            <p className="text-sm text-muted-foreground">Select an engagement to use the shell runner.</p>
+            <p className="text-sm text-muted-foreground">Select an engagement to use the tool runner.</p>
           )}
         </section>
       </div>
