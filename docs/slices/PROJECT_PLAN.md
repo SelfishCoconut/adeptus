@@ -68,7 +68,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §6.2, §6.3, §11.2 (bottom pane), §11.4 (partial)
 - **Depends on**: 03
 - **Risky**: no
-- **Status**: todo
+- **Status**: in-progress
 
 ### Slice 05: Concurrency model + per-target lock
 - **Goal**: Two heavy tools against same host serialize correctly; FIFO queue when full
