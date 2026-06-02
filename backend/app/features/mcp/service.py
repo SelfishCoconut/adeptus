@@ -21,6 +21,7 @@ Membership check (§4 no-admin-bypass + §17.1 isolation):
 
 from __future__ import annotations
 
+import base64
 import logging
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -28,7 +29,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import NotFoundError
+from app.core.errors import BadRequestError, NotFoundError
 from app.features.engagements import repository as eng_repo
 from app.features.mcp import repository as mcp_repo
 from app.features.mcp import subprocess_manager
@@ -38,12 +39,38 @@ from app.features.mcp.schemas import (
     McpToolDeclaration,
     ToolDescriptor,
     ToolPreset,
+    ToolRunPage,
     ToolRunResult,
     ToolRunStatus,
 )
 from app.features.mcp.subprocess_manager import McpServerNotFound
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Cursor encoding helpers
+# ---------------------------------------------------------------------------
+
+
+def _encode_cursor(started_at: datetime, run_id: UUID) -> str:
+    """Encode a (started_at, id) pair as an opaque base64url string."""
+    raw = f"{started_at.isoformat()}|{run_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, UUID]:
+    """Decode an opaque cursor string back to (started_at, id).
+
+    Raises ValueError when the cursor is malformed.
+    """
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+        ts_part, id_part = raw.split("|", 1)
+        return datetime.fromisoformat(ts_part), UUID(id_part)
+    except Exception as exc:
+        raise ValueError(f"Malformed cursor: {cursor!r}") from exc
+
 
 # ---------------------------------------------------------------------------
 # Domain exceptions
@@ -248,4 +275,137 @@ async def execute_tool_run(
         finished_at=cast(datetime, updated.finished_at),
         status=result_status,
         preset_name=getattr(updated, "preset_name", None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# list_tool_runs
+# ---------------------------------------------------------------------------
+
+
+async def list_tool_runs(
+    db: AsyncSession,
+    *,
+    engagement_id: UUID,
+    user_id: UUID,
+    limit: int,
+    cursor: str | None,
+) -> ToolRunPage:
+    """Return a paginated page of ToolRunResult for an engagement.
+
+    Flow:
+      1. Fused existence + membership check — EngagementNotFound (404) if the
+         engagement is missing OR the caller is not an explicit member (§4/§17.1).
+      2. Decode the opaque cursor string if provided; a malformed non-empty cursor
+         raises BadRequestError (400).
+      3. Call the repo with keyset pagination parameters.
+      4. Map each ToolRun row → ToolRunResult and encode next_cursor.
+
+    Args:
+        db:            Async database session.
+        engagement_id: UUID of the engagement.
+        user_id:       ID of the requesting user.
+        limit:         Maximum number of rows per page (1–100).
+        cursor:        Opaque keyset cursor from a previous response, or None for
+                       the first page.
+
+    Returns:
+        ToolRunPage with items and optional next_cursor.
+
+    Raises:
+        EngagementNotFound: engagement_id does not exist OR user_id is not a member.
+        BadRequestError:    cursor string is non-empty but malformed.
+    """
+    # Step 1: fused membership check (§17.1 isolation chokepoint).
+    if await eng_repo.get_engagement_for_member(db, engagement_id, user_id) is None:
+        raise EngagementNotFound(f"Engagement {engagement_id} not found")
+
+    # Step 2: decode cursor if provided.
+    decoded_cursor: tuple[datetime, UUID] | None = None
+    if cursor:
+        try:
+            decoded_cursor = _decode_cursor(cursor)
+        except ValueError as exc:
+            raise BadRequestError(f"Invalid cursor: {exc}") from exc
+
+    # Step 3: query the repo.
+    rows, next_cursor_raw = await mcp_repo.list_tool_runs_for_engagement(
+        db, engagement_id, limit=limit, cursor=decoded_cursor
+    )
+
+    # Step 4: map rows → ToolRunResult and encode next_cursor.
+    items = [_row_to_result(row) for row in rows]
+    next_cursor_str: str | None = None
+    if next_cursor_raw is not None:
+        nc_started, nc_id = next_cursor_raw
+        next_cursor_str = _encode_cursor(nc_started, nc_id)
+
+    return ToolRunPage(items=items, next_cursor=next_cursor_str)
+
+
+# ---------------------------------------------------------------------------
+# get_tool_run
+# ---------------------------------------------------------------------------
+
+
+async def get_tool_run(
+    db: AsyncSession,
+    *,
+    tool_run_id: UUID,
+    user_id: UUID,
+) -> ToolRunResult:
+    """Return a single ToolRunResult, enforcing engagement membership.
+
+    Flow:
+      1. Fetch the run by id; if missing → EngagementNotFound (404) — collapses
+         missing-run and non-member into the same 404 to avoid existence disclosure.
+      2. Membership check on run.engagement_id — same chokepoint as execute_tool_run.
+      3. Map and return.
+
+    Args:
+        db:          Async database session.
+        tool_run_id: UUID of the tool run.
+        user_id:     ID of the requesting user.
+
+    Returns:
+        ToolRunResult with all fields populated.
+
+    Raises:
+        EngagementNotFound: tool_run_id does not exist OR user_id is not a member
+                            of the run's engagement (404, no existence disclosure).
+    """
+    # Step 1: fetch the run.
+    run = await mcp_repo.get_tool_run_by_id(db, tool_run_id)
+    if run is None:
+        raise EngagementNotFound("Tool run not found")
+
+    # Step 2: membership check.
+    if await eng_repo.get_engagement_for_member(db, cast(UUID, run.engagement_id), user_id) is None:
+        raise EngagementNotFound("Tool run not found")
+
+    # Step 3: map and return.
+    return _row_to_result(run)
+
+
+# ---------------------------------------------------------------------------
+# Private helper
+# ---------------------------------------------------------------------------
+
+
+def _row_to_result(row: Any) -> ToolRunResult:
+    """Map a ToolRun ORM row to a ToolRunResult schema."""
+    raw_status: str | None = getattr(row, "status", None)
+    result_status = cast(ToolRunStatus, raw_status) if raw_status else "completed"
+    return ToolRunResult(
+        tool_run_id=cast(UUID, row.id),
+        engagement_id=cast(UUID, row.engagement_id),
+        server_name=row.server_name,
+        tool_name=row.tool_name,
+        exit_code=row.exit_code,
+        stdout=row.stdout or "",
+        stderr=row.stderr or "",
+        started_at=row.started_at,
+        finished_at=row.finished_at,
+        status=result_status,
+        preset_name=getattr(row, "preset_name", None),
     )

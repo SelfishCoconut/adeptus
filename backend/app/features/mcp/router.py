@@ -1,30 +1,36 @@
 """FastAPI routes for the MCP feature.
 
 Endpoints:
-  GET  /api/v1/admin/mcp-servers  — admin-only; returns list[McpServerInfo]
-  GET  /api/v1/mcp/tools          — any authenticated session; returns flat
-                                    list[ToolDescriptor] aggregated across all
-                                    registered MCP servers (no engagement scope,
-                                    no admin requirement)
-  POST /api/v1/tool-runs          — requires authenticated session AND explicit
-                                    engagement membership (no admin bypass — §4)
+  GET  /api/v1/admin/mcp-servers       — admin-only; returns list[McpServerInfo]
+  GET  /api/v1/mcp/tools               — any authenticated session; returns flat
+                                         list[ToolDescriptor] aggregated across all
+                                         registered MCP servers (no engagement scope,
+                                         no admin requirement)
+  POST /api/v1/tool-runs               — requires authenticated session AND explicit
+                                         engagement membership (no admin bypass — §4)
+  GET  /api/v1/tool-runs               — paginated list of tool runs for an engagement;
+                                         requires explicit membership (§4/§17.1)
+  GET  /api/v1/tool-runs/{tool_run_id} — single tool run; requires membership on its
+                                         engagement (§4/§17.1)
 
 Most domain exceptions subclass the core error hierarchy and are translated by
 the registered handlers in app.core.errors.handlers:
 
   McpServerNotFound  (BadRequestError) → 400  (unknown MCP server)
   McpToolNotFound    (BadRequestError) → 400  (unknown tool / bad params)
+  BadRequestError                      → 400  (malformed cursor)
   EngagementNotFound (NotFoundError)   → 404  (engagement missing OR caller is
-                                              not a member — §17.1 hides existence,
-                                              §4 allows no admin bypass)
+                                               not a member — §17.1 hides existence,
+                                               §4 allows no admin bypass)
 
 Only McpServerDown → 503 is translated inline below: there is no core error
 type for HTTP 503, and adding one would widen core/ and require an ADR.
 """
 
 from typing import Annotated
+from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,7 +39,13 @@ from app.core.errors import ForbiddenError
 from app.features.auth.deps import get_current_user
 from app.features.auth.models import User
 from app.features.mcp import service
-from app.features.mcp.schemas import McpServerInfo, ToolDescriptor, ToolRunCreate, ToolRunResult
+from app.features.mcp.schemas import (
+    McpServerInfo,
+    ToolDescriptor,
+    ToolRunCreate,
+    ToolRunPage,
+    ToolRunResult,
+)
 from app.features.mcp.subprocess_manager import McpServerDown
 
 router = APIRouter(tags=["mcp"])
@@ -124,3 +136,63 @@ async def execute_tool_run(
             status_code=503,
             content={"error": {"code": "service_unavailable", "message": exc.message}},
         )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/tool-runs
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/api/v1/tool-runs",
+    response_model=ToolRunPage,
+    operation_id="list_tool_runs",
+)
+async def list_tool_runs(
+    engagement_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: str | None = None,
+) -> ToolRunPage:
+    """Return a paginated list of tool runs for an engagement (newest first).
+
+    Requires explicit engagement membership.  Admin role does NOT bypass the
+    membership requirement (§4).  Non-member and missing-engagement both return
+    404 to avoid existence disclosure (§17.1).
+    """
+    return await service.list_tool_runs(
+        db,
+        engagement_id=engagement_id,
+        user_id=current_user.id,  # type: ignore[arg-type]
+        limit=limit,
+        cursor=cursor,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/tool-runs/{tool_run_id}
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/api/v1/tool-runs/{tool_run_id}",
+    response_model=ToolRunResult,
+    operation_id="get_tool_run",
+)
+async def get_tool_run(
+    tool_run_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> ToolRunResult:
+    """Return a single tool run by id.
+
+    Requires explicit membership in the run's engagement.  Admin role does NOT
+    bypass the membership requirement (§4).  Both a missing run and a non-member
+    caller return 404 to avoid existence disclosure (§17.1).
+    """
+    return await service.get_tool_run(
+        db,
+        tool_run_id=tool_run_id,
+        user_id=current_user.id,  # type: ignore[arg-type]
+    )
