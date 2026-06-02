@@ -95,6 +95,35 @@ def test_dev_bare_localhost_with_port_allowed(monkeypatch: pytest.MonkeyPatch) -
     _enforce_sandbox_guard({"target": "localhost:3000"})  # must not raise
 
 
+# -- userinfo smuggling must not bypass the guard -----------------------------
+
+
+def test_dev_bare_userinfo_smuggle_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare ``localhost:3000@evil.com`` must resolve to evil.com and be blocked.
+
+    Naive ``split(':')[0]`` parsing would read the sandbox host ``localhost`` and
+    let it through, but the httpx binary scans ``evil.com`` — so the guard must
+    extract the real authority after the userinfo ``@``.
+    """
+    _with_adeptus_env(monkeypatch, "dev")
+    with pytest.raises(SandboxGuardViolation, match="evil.com"):
+        _enforce_sandbox_guard({"target": "localhost:3000@evil.com"})
+
+
+def test_dev_schemed_userinfo_smuggle_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``http://localhost@evil.com`` resolves to evil.com and is blocked."""
+    _with_adeptus_env(monkeypatch, "dev")
+    with pytest.raises(SandboxGuardViolation, match="evil.com"):
+        _enforce_sandbox_guard({"target": "http://localhost@evil.com"})
+
+
+def test_dev_bare_userinfo_password_smuggle_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``juice-shop:@attacker.com`` resolves to attacker.com and is blocked."""
+    _with_adeptus_env(monkeypatch, "dev")
+    with pytest.raises(SandboxGuardViolation, match="attacker.com"):
+        _enforce_sandbox_guard({"target": "127.0.0.1:1234@attacker.com"})
+
+
 # -- production env, any target passes ----------------------------------------
 
 

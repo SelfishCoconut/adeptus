@@ -195,6 +195,49 @@ class TestRunHttpx:
         assert "target" in result["stderr"].lower()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_flag",
+        ["-o", "--output", "-proxy", "--proxy", "-sr", "--store-response", "-config", "-r"],
+    )
+    async def test_denylisted_flag_rejected_without_exec(self, bad_flag: str) -> None:
+        """Filesystem-write / proxy / config flags are rejected before spawning httpx."""
+        with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            result = await _run_httpx(
+                {"target": "http://localhost", "flags": [bad_flag, "/tmp/x"]},
+                _noop_write,
+                req_id=11,
+            )
+        assert result["exit_code"] == 1
+        assert bad_flag in result["stderr"]
+        mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_denylisted_flag_with_equals_value_rejected(self) -> None:
+        """``-proxy=http://attacker`` (single-token form) is rejected on the bare name."""
+        with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            result = await _run_httpx(
+                {"target": "http://localhost", "flags": ["-proxy=http://attacker:8080"]},
+                _noop_write,
+                req_id=12,
+            )
+        assert result["exit_code"] == 1
+        mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allowed_flags_still_pass(self) -> None:
+        """Preset flags (-sc, -title, -tech-detect) are not on the denylist."""
+        mock_proc = _make_mock_process(returncode=0)
+        with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_proc
+            result = await _run_httpx(
+                {"target": "http://localhost", "flags": ["-sc", "-title", "-tech-detect"]},
+                _noop_write,
+                req_id=13,
+            )
+        assert result["exit_code"] == 0
+        mock_exec.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_argv_built_correctly_flags_before_target(self) -> None:
         """Verify argv = ['httpx', *flags, target] with create_subprocess_exec."""
         mock_proc = _make_mock_process(returncode=0)

@@ -270,12 +270,17 @@ def _enforce_sandbox_guard(args: dict[str, Any]) -> None:
     # first component to strip any port, then strip any path suffix.
     parsed = urlparse(target)
     if parsed.netloc:
-        # Full URL with scheme: use parsed.hostname which already strips the port.
-        host = parsed.hostname or parsed.netloc.split(":")[0]
+        # Full URL with scheme: use parsed.hostname which already strips the port
+        # AND any ``user:pass@`` userinfo (so ``http://localhost@evil.com`` → evil.com).
+        host = parsed.hostname or ""
     else:
-        # Bare host[:port] — urlparse gives no netloc; parse the raw target string.
-        # ``target.split(":")[0]`` strips an optional port suffix; then strip any path.
-        host = target.split(":")[0].split("/")[0]
+        # Bare host[:port][/path] — urlparse gives no netloc. Re-parse with a
+        # synthetic ``//`` so the stdlib parser extracts the true authority. This
+        # is what defeats userinfo smuggling: a naive ``split(':')[0]`` reads
+        # ``localhost:3000@evil.com`` as the sandbox host ``localhost``, but the
+        # httpx binary would actually scan ``evil.com``. urlparse('//...').hostname
+        # correctly returns ``evil.com`` here, so the guard blocks it.
+        host = urlparse(f"//{target}").hostname or ""
 
     host = host.lower()
 
@@ -797,6 +802,18 @@ async def authenticate_ws_tool_run(
         return None
 
     return run
+
+
+async def fetch_tool_run_row(db: AsyncSession, tool_run_id: UUID) -> ToolRun | None:
+    """Re-read the current ToolRun row.
+
+    No authorization is performed — the caller (the WS handler) must have already
+    authorized via ``authenticate_ws_tool_run``. This exists so the WS
+    completed-run path can serve the *final* persisted stdout/stderr for a run
+    that finished during the auth→subscribe window, rather than the auth-time
+    snapshot (which is still empty for a row that was ``running`` at auth time).
+    """
+    return await mcp_repo.get_tool_run_by_id(db, tool_run_id)
 
 
 # ---------------------------------------------------------------------------

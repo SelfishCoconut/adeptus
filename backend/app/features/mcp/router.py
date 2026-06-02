@@ -298,7 +298,13 @@ async def stream_tool_run_ws(websocket: WebSocket, tool_run_id: UUID) -> None:
             await websocket.close(code=1000)
 
         else:
-            # No live channel — run already completed. Send stored output.
+            # No live channel — run already completed (possibly during the
+            # auth→subscribe window). Re-read the row so we serve the final
+            # persisted output, not the auth-time snapshot (empty while running).
+            async with get_sessionmaker()() as session:
+                latest = await service.fetch_tool_run_row(session, tool_run_id)
+            if latest is not None:
+                run = latest
             try:
                 if run.stdout:
                     await websocket.send_json(

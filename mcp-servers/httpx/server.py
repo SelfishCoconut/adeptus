@@ -46,6 +46,34 @@ from typing import Any
 MAX_OUTPUT_BYTES: int = 1_048_576  # 1 MB
 TRUNCATION_SENTINEL: str = "\n[output truncated at 1 MB]"
 
+# Flags that would let a caller exceed the server's declared capabilities
+# (capability_flags: [network]) or open an exfiltration path. The manifest
+# declares network access only, so flags that write to the filesystem or route
+# traffic through a caller-supplied proxy/config are rejected before exec. This
+# is defense-in-depth on the light path; full per-command approval-gating for
+# dangerous invocations lands in Slice 16.
+DENYLISTED_FLAGS: frozenset[str] = frozenset(
+    {
+        "-o",
+        "-output",
+        "--output",
+        "-sr",
+        "-store-response",
+        "--store-response",
+        "-srd",
+        "-store-response-dir",
+        "--store-response-dir",
+        "-config",
+        "--config",
+        "-proxy",
+        "-http-proxy",
+        "--proxy",
+        "-resolvers",
+        "-r",
+        "--resolvers",
+    }
+)
+
 JSONRPC_METHOD_NOT_FOUND: int = -32601
 JSONRPC_PARSE_ERROR: int = -32700
 JSONRPC_INVALID_REQUEST: int = -32600
@@ -105,6 +133,17 @@ async def _run_httpx(
         flags_raw = []
     # Ensure every flag is a string; silently drop non-strings.
     flags: list[str] = [f for f in flags_raw if isinstance(f, str)]
+
+    # Reject flags that would breach the declared capability set (network only):
+    # filesystem-write (-o/-sr/...), arbitrary config, or a caller-supplied proxy
+    # (an exfiltration vector). Compared case-insensitively on the bare flag name.
+    denied = [f for f in flags if f.split("=", 1)[0].lower() in DENYLISTED_FLAGS]
+    if denied:
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": f"run_httpx rejected disallowed flag(s): {' '.join(denied)}",
+        }
 
     timeout_seconds: float = float(arguments.get("timeout_seconds", 30))
 
