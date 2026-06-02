@@ -50,7 +50,7 @@ For feature `<name>`, create `frontend/src/features/<name>/`:
 4. Create the frontend folder + files. Same minimalism.
 5. Register the backend router in `app/main.py` under the marker.
 6. Stage the changes: `git add backend/app/features/<name> frontend/src/features/<name>`.
-7. Commit: `chore(slice-NN): scaffold <name> feature folders`.
+7. Commit, citing the scaffolding task's id with a `(task N)` token: `chore(slice-NN): scaffold <name> feature folders (task N)`. (If scaffolding isn't its own numbered task in the spec, attach it to the first task it enables.)
 8. Report to the main loop what was created.
 
 ## Hard rules

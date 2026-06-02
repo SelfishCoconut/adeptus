@@ -2,7 +2,9 @@
 
 Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish-slice time.
 
-**Status values**: `todo` | `planned` | `in-progress` | `done` | `blocked`
+**Status values**: `todo` | `planned` | `in-progress` | `in-review` | `done` | `blocked`
+
+- `in-review`: PR opened but not yet merged. Does NOT satisfy a dependency — `pick-next-slice` treats only `done` (merged) as unblocking dependents.
 
 **Phase legend**:
 - A: Foundation

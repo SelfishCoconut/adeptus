@@ -18,9 +18,10 @@ allowed-tools: Read, Grep
 
 2. Build the candidate list: every slice with `Status: todo`.
 
-3. Filter to slices where every entry in `Depends on:` has `Status: done`.
+3. Filter to slices where every entry in `Depends on:` has `Status: done`. Only `done` (i.e. PR merged) satisfies a dependency. A dependency that is `in-review` (PR open but not merged) does NOT count — do not unblock a slice whose dependency is merely in-review.
 
 4. If the candidate list is empty:
+   - If there are `in-review` slices, surface them: their PRs are open but unmerged, so their dependents stay blocked until merged. Suggest the user merge the PR and then flip the slice `in-review` → `done` in PROJECT_PLAN.md.
    - If there are `in-progress` slices, suggest the user finish them first.
    - If there are `blocked` slices and nothing else, list them and surface why.
    - Otherwise: "All slices are done."
@@ -41,5 +42,6 @@ allowed-tools: Read, Grep
 
 ## Hard rules
 - Never write the spec yourself. Always delegate to slice-planner.
-- Never modify PROJECT_PLAN.md. Status transitions are owned by start-slice and finish-slice.
+- A dependency is satisfied ONLY when its status is `done` (PR merged). `in-review` (PR open, unmerged) does NOT satisfy a dependency — never unblock a slice on top of unmerged code.
+- Never modify PROJECT_PLAN.md. Status transitions are owned by start-slice (todo/planned → in-progress) and finish-slice (in-progress → in-review). The final `in-review` → `done` flip happens after the human merges the PR.
 - If the user names a different slice (e.g. "actually do slice 15 instead"), surface the dependency status before delegating — if 15's dependencies aren't done, warn but pass the choice to the user.

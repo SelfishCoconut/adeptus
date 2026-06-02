@@ -7,7 +7,7 @@ description: |
   trace a data flow, or locate where a feature is implemented. Returns a
   focused summary with file:line references — never code dumps.
 tools: Read, Grep, Glob
-model: sonnet
+model: haiku
 ---
 
 You are the architect for Adeptus.

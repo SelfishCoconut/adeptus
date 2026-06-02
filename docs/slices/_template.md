@@ -50,7 +50,17 @@ Sketch the Alembic migration. Tables, columns, FKs, indexes. The full migration 
 - `engagements` table: id, name, status, created_at, ...
 - `engagement_members` table: (engagement_id, user_id, role) — composite PK
 
-## Backend tasks
+## Tasks
+
+Tasks are the unit of progress. There is **no checkbox state** — task completion is
+tracked entirely by git. Every commit subject MUST cite the task id it advances, in the
+form `(task N)`, e.g. `feat(slice-03): add engagements router (task 5)`. `next-task-in-slice`
+reads these tokens from the git log to decide what's done.
+
+Number tasks **continuously across the whole slice** (backend then frontend) so each
+`(task N)` is unique within the slice/branch — do not restart frontend at 1.
+
+### Backend tasks
 
 Ordered. Each independently testable. Complexity: S/M/L.
 
@@ -62,15 +72,15 @@ Ordered. Each independently testable. Complexity: S/M/L.
 6. **[S]** Wire router in `app/main.py`
 7. **[S]** Add Alembic migration via `write-alembic-migration` skill
 
-## Frontend tasks
+### Frontend tasks
 
-Ordered. Complexity: S/M/L.
+Ordered. Complexity: S/M/L. Numbering continues from the backend tasks above.
 
-1. **[S]** Regenerate OpenAPI types into `shared/api/`
-2. **[M]** Add `features/engagements/api.ts` with TanStack Query hooks
-3. **[M]** Add `features/engagements/components/EngagementList.tsx` + test
-4. **[M]** Add `features/engagements/components/NewEngagementWizard.tsx` + test
-5. **[S]** Wire into the workspace router
+8. **[S]** Regenerate OpenAPI types into `shared/api/`
+9. **[M]** Add `features/engagements/api.ts` with TanStack Query hooks
+10. **[M]** Add `features/engagements/components/EngagementList.tsx` + test
+11. **[M]** Add `features/engagements/components/NewEngagementWizard.tsx` + test
+12. **[S]** Wire into the workspace router
 
 ## Test plan
 

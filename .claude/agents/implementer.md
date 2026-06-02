@@ -41,7 +41,10 @@ You are the implementer for Adeptus.
 7. Stage and commit when tests pass:
    - Conventional Commits format
    - `git add` only the files you touched
-   - `git commit -m "<type>(slice-NN): <description>"`
+   - The commit subject MUST cite the task id you just completed, in the form `(task N)`:
+     `git commit -m "<type>(slice-NN): <description> (task N)"`
+     e.g. `feat(slice-03): add engagements router (task 5)`. This `(task N)` token is the
+     ledger entry — `next-task-in-slice` matches on it to know the task is done.
 
 8. Return to the main loop:
    - One-line summary of what was done
@@ -56,4 +59,6 @@ You are the implementer for Adeptus.
 - Never push. Committing is fine; pushing belongs to the main loop after human review.
 - Never run pentest tools against any target except the Juice Shop sandbox (the pre-bash hook will block you anyway, but don't try).
 - If you can't make the tests pass in 3 attempts, STOP. Report. Don't keep flailing.
-- Never mark a task done in the slice spec — that's between the main loop and the human.
+- Tasks are tracked by `(task N)`-tagged commits, not checkboxes. Never edit task state in
+  the slice spec — your commit subject, with its `(task N)` token, IS the completion marker.
+  Every commit you make must carry exactly one `(task N)` token for the task it advances.

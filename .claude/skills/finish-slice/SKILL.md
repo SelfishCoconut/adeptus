@@ -4,7 +4,7 @@ description: |
   Wraps up an Adeptus slice. Runs the full test gate (lint + typecheck +
   tests + coverage), invokes code-reviewer and (for risky slices)
   security-reviewer, generates a PR body from the slice spec, opens the
-  pull request, marks the slice done in PROJECT_PLAN.md, and closes the
+  pull request, marks the slice in-review in PROJECT_PLAN.md, and closes the
   GitHub Issue. Use when the user says "finish slice", "ship it", "wrap
   up", "open PR", or when next-task-in-slice reports all tasks complete.
 allowed-tools: Read, Bash, Grep, Edit
@@ -71,14 +71,15 @@ allowed-tools: Read, Bash, Grep, Edit
    gh pr create --title "Slice NN: <goal>" --body "<generated body>" --label slice
    ```
 
-10. Update PROJECT_PLAN.md: `Status: in-progress` → `Status: done` (the human will merge; mark done now so the next pick-next-slice can proceed in parallel if needed).
+10. Update PROJECT_PLAN.md: `Status: in-progress` → `Status: in-review`. The PR is open but NOT merged, so the slice is NOT `done` yet. `in-review` deliberately does not satisfy dependencies, so pick-next-slice won't unblock dependents built on unmerged code. The slice becomes `done` only after the human merges the PR (mark it then — e.g. on the next pick-next-slice, confirm the PR merged and flip in-review → done).
 
 11. Output to the user:
     - PR URL
     - Code review summary (one paragraph)
     - Security review verdict (if applicable)
     - Drift audit verdict (one line)
-    - Suggestion: "After merge, run pick-next-slice for the next one."
+    - Status note: "Slice is now `in-review` (PR open, not merged). It won't unblock dependents until it's `done`."
+    - Suggestion: "After the PR merges, flip this slice to `done` in PROJECT_PLAN.md, then run pick-next-slice for the next one."
 
 ## Hard rules
 - Never open the PR if the gate is red or reviewers flag Critical findings.
