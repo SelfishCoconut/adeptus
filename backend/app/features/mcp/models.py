@@ -1,6 +1,7 @@
 """SQLAlchemy ORM models for the MCP feature: ToolRun."""
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -34,7 +35,7 @@ class ToolRun(Base):
     )
     server_name: Mapped[str] = mapped_column(String(100), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    args: Mapped[dict] = mapped_column(_ARGS_JSON, nullable=False)
+    args: Mapped[dict[str, Any]] = mapped_column(_ARGS_JSON, nullable=False)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stdout: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     stderr: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))

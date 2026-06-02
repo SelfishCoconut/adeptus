@@ -7,6 +7,7 @@ server-generated defaults, select() + execute() for reads.
 """
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import desc, select, update
@@ -21,7 +22,7 @@ async def create_tool_run(
     engagement_id: UUID,
     server_name: str,
     tool_name: str,
-    args: dict,
+    args: dict[str, Any],
 ) -> ToolRun:
     """Insert a new ToolRun row and return it with server-generated fields populated.
 

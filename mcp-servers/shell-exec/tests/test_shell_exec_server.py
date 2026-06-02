@@ -544,7 +544,7 @@ class TestMainLoop:
         mock_proc = _make_mock_process(stdout=b"hi\n", stderr=b"", returncode=0)
 
         with (
-            patch("server.asyncio.get_event_loop", return_value=mock_loop),
+            patch("server.asyncio.get_running_loop", return_value=mock_loop),
             patch("server.asyncio.StreamReader", return_value=mock_reader),
             patch("server.asyncio.StreamReaderProtocol"),
             patch("server.asyncio.create_subprocess_shell", new_callable=AsyncMock) as mock_shell,
@@ -568,7 +568,7 @@ class TestMainLoop:
         mock_loop, mock_reader, mock_write_transport = _make_main_mocks([b"not valid json\n"])
 
         with (
-            patch("server.asyncio.get_event_loop", return_value=mock_loop),
+            patch("server.asyncio.get_running_loop", return_value=mock_loop),
             patch("server.asyncio.StreamReader", return_value=mock_reader),
             patch("server.asyncio.StreamReaderProtocol"),
         ):
@@ -590,7 +590,7 @@ class TestMainLoop:
         )
 
         with (
-            patch("server.asyncio.get_event_loop", return_value=mock_loop),
+            patch("server.asyncio.get_running_loop", return_value=mock_loop),
             patch("server.asyncio.StreamReader", return_value=mock_reader),
             patch("server.asyncio.StreamReaderProtocol"),
         ):
@@ -607,7 +607,7 @@ class TestMainLoop:
         mock_loop, mock_reader, mock_write_transport = _make_main_mocks([b"\n", b"   \n"])
 
         with (
-            patch("server.asyncio.get_event_loop", return_value=mock_loop),
+            patch("server.asyncio.get_running_loop", return_value=mock_loop),
             patch("server.asyncio.StreamReader", return_value=mock_reader),
             patch("server.asyncio.StreamReaderProtocol"),
         ):
@@ -621,7 +621,7 @@ class TestMainLoop:
         mock_loop, mock_reader, mock_write_transport = _make_main_mocks([])  # immediate EOF
 
         with (
-            patch("server.asyncio.get_event_loop", return_value=mock_loop),
+            patch("server.asyncio.get_running_loop", return_value=mock_loop),
             patch("server.asyncio.StreamReader", return_value=mock_reader),
             patch("server.asyncio.StreamReaderProtocol"),
         ):
@@ -642,7 +642,7 @@ class TestMainLoop:
         mock_loop.connect_write_pipe = AsyncMock(return_value=(mock_write_transport, MagicMock()))
 
         with (
-            patch("server.asyncio.get_event_loop", return_value=mock_loop),
+            patch("server.asyncio.get_running_loop", return_value=mock_loop),
             patch("server.asyncio.StreamReader", return_value=mock_reader),
             patch("server.asyncio.StreamReaderProtocol"),
         ):
@@ -676,7 +676,7 @@ class TestMainLoop:
         proc_b = _make_mock_process(stdout=b"b\n", stderr=b"", returncode=0)
 
         with (
-            patch("server.asyncio.get_event_loop", return_value=mock_loop),
+            patch("server.asyncio.get_running_loop", return_value=mock_loop),
             patch("server.asyncio.StreamReader", return_value=mock_reader),
             patch("server.asyncio.StreamReaderProtocol"),
             patch(

@@ -179,7 +179,7 @@ async def _handle_request(request: dict[str, Any]) -> dict[str, Any]:
 
 async def main() -> None:
     """Read JSON-RPC requests from stdin; write responses to stdout."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
     await loop.connect_read_pipe(lambda: protocol, sys.stdin)
