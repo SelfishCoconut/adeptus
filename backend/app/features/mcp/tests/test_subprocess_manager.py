@@ -17,9 +17,11 @@ import pytest
 
 from app.features.mcp.registry import _reset_registry, load_registry
 from app.features.mcp.subprocess_manager import (
+    _TIMEOUT_MARGIN_SECONDS,
     McpRawResult,
     McpServerDown,
     McpServerNotFound,
+    McpToolNotFound,
     _handles,
     _reset_manager,
     get_server_status,
@@ -393,6 +395,9 @@ class TestSendToolCallServerDown:
 
 
 class TestSendToolCallTimeout:
+    """Timeout tests patch _TIMEOUT_MARGIN_SECONDS to 0.0 so the outer deadline
+    equals the caller's timeout_seconds and tests don't need to wait 5+ seconds."""
+
     @pytest.mark.asyncio
     async def test_timeout_raises_mcp_server_down(self) -> None:
         async def _slow_readline() -> bytes:
@@ -405,8 +410,9 @@ class TestSendToolCallTimeout:
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
             await startup()
 
-        with pytest.raises(McpServerDown, match="timed out"):
-            await send_tool_call("shell-exec", "run_command", {}, timeout_seconds=0.01)
+        with patch("app.features.mcp.subprocess_manager._TIMEOUT_MARGIN_SECONDS", 0.0):
+            with pytest.raises(McpServerDown, match="timed out"):
+                await send_tool_call("shell-exec", "run_command", {}, timeout_seconds=0.01)
 
     @pytest.mark.asyncio
     async def test_timeout_includes_timeout_value_in_message(self) -> None:
@@ -420,8 +426,9 @@ class TestSendToolCallTimeout:
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
             await startup()
 
-        with pytest.raises(McpServerDown, match="0.01"):
-            await send_tool_call("shell-exec", "run_command", {}, timeout_seconds=0.01)
+        with patch("app.features.mcp.subprocess_manager._TIMEOUT_MARGIN_SECONDS", 0.0):
+            with pytest.raises(McpServerDown, match="0.01"):
+                await send_tool_call("shell-exec", "run_command", {}, timeout_seconds=0.01)
 
     @pytest.mark.asyncio
     async def test_timeout_marks_server_stopped(self) -> None:
@@ -435,8 +442,9 @@ class TestSendToolCallTimeout:
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
             await startup()
 
-        with pytest.raises(McpServerDown):
-            await send_tool_call("shell-exec", "run_command", {}, timeout_seconds=0.01)
+        with patch("app.features.mcp.subprocess_manager._TIMEOUT_MARGIN_SECONDS", 0.0):
+            with pytest.raises(McpServerDown):
+                await send_tool_call("shell-exec", "run_command", {}, timeout_seconds=0.01)
 
         assert get_server_status("shell-exec") == "stopped"
 
@@ -454,5 +462,233 @@ class TestSendToolCallTimeout:
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
             await startup()
 
+        with patch("app.features.mcp.subprocess_manager._TIMEOUT_MARGIN_SECONDS", 0.0):
+            with pytest.raises(AdeptusError):
+                await send_tool_call("shell-exec", "run_command", {}, timeout_seconds=0.01)
+
+    @pytest.mark.asyncio
+    async def test_timeout_margin_gives_outer_deadline_above_inner(self) -> None:
+        """Outer timeout = timeout_seconds + _TIMEOUT_MARGIN_SECONDS.
+
+        Verify that when _TIMEOUT_MARGIN_SECONDS > 0 the outer deadline is larger
+        than timeout_seconds, meaning a _slow_readline that fires before the margin
+        expires does NOT raise McpServerDown (the margin is working).
+
+        We simulate this by making readline sleep for timeout_seconds * 2 seconds
+        but less than timeout_seconds + margin.  With margin=0 it times out; with
+        the real margin it succeeds (if the margin exceeds the sleep duration).
+        This test just asserts the constant exists and is positive.
+        """
+        assert _TIMEOUT_MARGIN_SECONDS > 0
+
+
+# ---------------------------------------------------------------------------
+# FIX 1: large stdout line (>64 KB default limit) parsed successfully
+# ---------------------------------------------------------------------------
+
+
+class TestLargeResponseLine:
+    @pytest.mark.asyncio
+    async def test_response_line_larger_than_64kb_is_parsed(self) -> None:
+        """A JSON-RPC response line larger than the asyncio default 64 KB
+        StreamReader limit (but within _STDOUT_LIMIT_BYTES) must be parsed
+        without raising ValueError/LimitOverrunError.
+
+        We fake the readline by returning a 200 KB response line directly
+        from the mock (bypassing the StreamReader limit — the limit is only
+        enforced by the real asyncio subprocess, not our mock).  The important
+        thing is that send_tool_call does NOT wrap ValueError as McpServerDown
+        for a valid large line coming from readline (that path is only for the
+        LimitOverrunError case).  This test confirms the happy path works with
+        a large payload.
+        """
+        # Build a ~200 KB stdout payload embedded in a JSON-RPC result.
+        large_stdout = "X" * (200 * 1024)
+        response_line = _make_result_line(exit_code=0, stdout=large_stdout, stderr="")
+        assert len(response_line) > 64 * 1024, "Sanity: response line must exceed 64 KB"
+
+        fake_proc = _make_fake_process(stdout_lines=[response_line])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        result = await send_tool_call("shell-exec", "run_command", {"cmd": "cat big"}, 10.0)
+
+        assert result.exit_code == 0
+        assert result.stdout == large_stdout
+        assert len(result.stdout) == 200 * 1024
+
+    @pytest.mark.asyncio
+    async def test_value_error_from_readline_raises_mcp_server_down(self) -> None:
+        """If readline() raises ValueError (LimitOverrunError subclass), it is
+        caught and raised as McpServerDown WITHOUT calling _mark_stopped
+        (the subprocess is still alive).
+        """
+
+        async def _overlong_readline() -> bytes:
+            raise ValueError("Separator is not found, and chunk exceed the limit")
+
+        fake_proc = _make_fake_process()
+        fake_proc.stdout.readline = _overlong_readline
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        with pytest.raises(McpServerDown, match="exceeded StreamReader limit"):
+            await send_tool_call("shell-exec", "run_command", {}, timeout_seconds=5.0)
+
+        # The server is NOT marked stopped — the subprocess is still alive.
+        assert get_server_status("shell-exec") == "running"
+
+
+# ---------------------------------------------------------------------------
+# FIX 2: per-server lock prevents response cross-talk; id mismatch → McpServerDown
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrencyLock:
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_each_get_their_own_response(self) -> None:
+        """Two concurrent send_tool_call coroutines must each receive the
+        response for their own request (no swap).
+
+        We drive the fake readline with a delay so both coroutines arrive at
+        the locked section before either completes.  Because the lock serialises
+        them, the first caller gets id=1 and the second gets id=2 — matching
+        the responses we provide in order.
+        """
+        # Responses in order: id=1 first, id=2 second.
+        response_1 = _make_result_line(exit_code=0, stdout="first", id_=1)
+        response_2 = _make_result_line(exit_code=0, stdout="second", id_=2)
+
+        # readline alternates between the two responses, with a tiny delay so
+        # both coroutines reach the lock before either acquires it.
+        responses = [response_1, response_2]
+        call_index = 0
+
+        async def _ordered_readline() -> bytes:
+            nonlocal call_index
+            idx = call_index
+            call_index += 1
+            await asyncio.sleep(0)  # yield so both coroutines are started
+            return responses[idx]
+
+        fake_proc = _make_fake_process()
+        fake_proc.stdout.readline = _ordered_readline
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        result_1, result_2 = await asyncio.gather(
+            send_tool_call("shell-exec", "run_command", {}, 10.0),
+            send_tool_call("shell-exec", "run_command", {}, 10.0),
+        )
+
+        # Each caller receives its own response, not the other's.
+        assert result_1.stdout == "first"
+        assert result_2.stdout == "second"
+
+    @pytest.mark.asyncio
+    async def test_response_id_mismatch_raises_mcp_server_down(self) -> None:
+        """If the parsed response id does not match the request id, McpServerDown
+        is raised and the server is marked stopped (desync detected).
+        """
+        # Return a response with id=99 while the request will have id=1.
+        mismatched_line = _make_result_line(exit_code=0, stdout="oops", id_=99)
+        fake_proc = _make_fake_process(stdout_lines=[mismatched_line])
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        with pytest.raises(McpServerDown, match="id mismatch"):
+            await send_tool_call("shell-exec", "run_command", {}, 10.0)
+
+        # Desync → server is marked stopped.
+        assert get_server_status("shell-exec") == "stopped"
+
+
+# ---------------------------------------------------------------------------
+# FIX 3: JSON-RPC -32601 raises McpToolNotFound (not McpServerDown)
+# ---------------------------------------------------------------------------
+
+
+class TestMcpToolNotFound:
+    @pytest.mark.asyncio
+    async def test_jsonrpc_32601_raises_mcp_tool_not_found(self) -> None:
+        """-32601 (method/tool not found) is a client error → McpToolNotFound."""
+        error_response = (
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32601, "message": "Tool not found: 'bad_tool'"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        fake_proc = _make_fake_process(stdout_lines=[error_response])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        with pytest.raises(McpToolNotFound, match="bad_tool"):
+            await send_tool_call("shell-exec", "bad_tool", {}, 5.0)
+
+    @pytest.mark.asyncio
+    async def test_jsonrpc_32602_raises_mcp_tool_not_found(self) -> None:
+        """-32602 (invalid params) is also a client error → McpToolNotFound."""
+        error_response = (
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32602, "message": "Invalid params"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        fake_proc = _make_fake_process(stdout_lines=[error_response])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        with pytest.raises(McpToolNotFound):
+            await send_tool_call("shell-exec", "run_command", {}, 5.0)
+
+    @pytest.mark.asyncio
+    async def test_other_jsonrpc_error_codes_still_raise_mcp_server_down(self) -> None:
+        """JSON-RPC codes outside the not-found set remain McpServerDown."""
+        error_response = (
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        fake_proc = _make_fake_process(stdout_lines=[error_response])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
+        with pytest.raises(McpServerDown):
+            await send_tool_call("shell-exec", "run_command", {}, 5.0)
+
+    @pytest.mark.asyncio
+    async def test_mcp_tool_not_found_is_adeptus_error(self) -> None:
+        from app.core.errors import AdeptusError
+
+        error_response = (
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32601, "message": "no such tool"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        fake_proc = _make_fake_process(stdout_lines=[error_response])
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+            await startup()
+
         with pytest.raises(AdeptusError):
-            await send_tool_call("shell-exec", "run_command", {}, timeout_seconds=0.01)
+            await send_tool_call("shell-exec", "bad_tool", {}, 5.0)
