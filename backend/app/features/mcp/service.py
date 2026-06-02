@@ -24,15 +24,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
+from urllib.parse import urlparse
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_sessionmaker
-from app.core.errors import BadRequestError, NotFoundError
+from app.core.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.features.engagements import repository as eng_repo
 from app.features.mcp import repository as mcp_repo
 from app.features.mcp import subprocess_manager
@@ -201,6 +203,87 @@ class EngagementNotFound(NotFoundError):
         super().__init__(message)
 
 
+class SandboxGuardViolation(ForbiddenError):
+    """Raised when a tool run targets a host outside the sandbox allow-list.
+
+    Subclasses the core ``ForbiddenError`` so the registered error handler maps
+    it to HTTP 403 — no inline translation needed in the router.
+
+    Active only when ``ADEPTUS_ENV`` is not ``"production"`` (Risk 5: fail-closed
+    default — an unset or unrecognised value is treated as a guarded environment).
+    """
+
+    def __init__(self, message: str = "Target is outside the sandbox allow-list") -> None:
+        super().__init__(message)
+
+
+# ---------------------------------------------------------------------------
+# Sandbox guard
+# ---------------------------------------------------------------------------
+
+# Hosts that are allowed as tool targets in dev/test environments.
+_SANDBOX_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "juice-shop"})
+
+
+def _enforce_sandbox_guard(args: dict[str, Any]) -> None:
+    """Raise SandboxGuardViolation if ``args["target"]`` is outside the sandbox.
+
+    Guard logic:
+    - If ``ADEPTUS_ENV == "production"``: no-op (guard disabled in production).
+    - If ``args`` contains no ``"target"`` key, or the value is not a non-empty
+      string: no-op (tools without a ``target`` field, e.g. run_command, are not
+      guarded at this layer; run_command guarding is deferred to Slice 16 via the
+      approval-gating mechanism — Risk 5).
+    - Otherwise extract the hostname from ``target`` (handles full URLs such as
+      ``http://localhost:3000`` and bare host[:port] strings such as ``localhost``),
+      strip any port suffix, lowercase, and check against ``_SANDBOX_HOSTS``.
+
+    Reconciliation note: the slice task text mentions guarding both ``target``
+    (run_httpx) and ``command`` (run_command).  Risk 5 in the same spec clarifies
+    that run_command has NO target guard at this layer because it surfaces no
+    ``target`` field.  We guard generically on the presence of a non-empty
+    ``target`` arg key: run_httpx is covered; run_command is not (deferred to
+    Slice 16); future target-bearing tools are covered automatically.
+
+    Env-read source: ``os.environ.get("ADEPTUS_ENV", "dev")``.  The ``Settings``
+    object in ``app.core.config`` exposes an ``ENVIRONMENT`` field with a default
+    of ``"production"``, which is fail-OPEN — unusable here.  This function reads
+    ``ADEPTUS_ENV`` directly so that an unset variable defaults to ``"dev"``
+    (fail-closed per Risk 5).  Only the exact value ``"production"`` disables the
+    guard.
+    """
+    env = os.environ.get("ADEPTUS_ENV", "dev")
+    if env == "production":
+        return  # Guard is a no-op in production.
+
+    target = args.get("target")
+    if not isinstance(target, str) or not target:
+        return  # Nothing to guard for tools without a target.
+
+    # Extract the hostname from the target value.
+    # urlparse handles full URLs: ``http://localhost:3000`` → netloc ``localhost:3000``.
+    # For bare strings like ``localhost`` or ``juice-shop:3000``, urlparse treats
+    # them as ``scheme:path`` (scheme="localhost", path="3000") so netloc is empty.
+    # In that case parse the raw target string directly: split on ``:`` and take the
+    # first component to strip any port, then strip any path suffix.
+    parsed = urlparse(target)
+    if parsed.netloc:
+        # Full URL with scheme: use parsed.hostname which already strips the port.
+        host = parsed.hostname or parsed.netloc.split(":")[0]
+    else:
+        # Bare host[:port] — urlparse gives no netloc; parse the raw target string.
+        # ``target.split(":")[0]`` strips an optional port suffix; then strip any path.
+        host = target.split(":")[0].split("/")[0]
+
+    host = host.lower()
+
+    if host not in _SANDBOX_HOSTS:
+        raise SandboxGuardViolation(
+            f"Target {host!r} is outside the sandbox allow-list"
+            " (dev/test only allow localhost, 127.0.0.1, juice-shop)"
+        )
+
+
 # ---------------------------------------------------------------------------
 # list_servers
 # ---------------------------------------------------------------------------
@@ -355,6 +438,12 @@ async def execute_tool_run(
     registry = get_registry()
     if server_name not in registry:
         raise McpServerNotFound(f"MCP server {server_name!r} is not in the registry")
+
+    # Step 2b: sandbox guard — applies in dev/test for any tool whose args carry a
+    # non-empty ``target`` key.  Must run BEFORE any DB row is created so a guarded
+    # run never produces a tool_runs row.  Applies to both async and sync paths.
+    # See ``_enforce_sandbox_guard`` docstring for the Risk-5 reconciliation note.
+    _enforce_sandbox_guard(args)
 
     if async_mode:
         # Async path: insert running row, commit, launch background task, return partial.
