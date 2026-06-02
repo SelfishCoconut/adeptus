@@ -403,3 +403,39 @@ No — this slice does not touch auth, MCP subprocess spawning (httpx MCP is str
 
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-06-02T19:12:15Z — 0ffab0d Merge pull request #12 from SelfishCoconut/slice-03-static-mcp-config-shell-exec
+
+### Handoff — backend complete (2026-06-02)
+
+**All 9 backend tasks done and committed on `slice-04-tool-runner-panel`.** Gate is green:
+359 backend tests pass (7 integration deselected); `app/features/mcp` coverage **94%**
+(gate 80%); whole-project mypy clean (both the pre-commit and `make lint` configs);
+mcp-servers httpx suite 29 tests pass; all pre-commit hooks pass per commit.
+
+Commits (newest first): `bb414f7` register httpx + Dockerfile binary · `1194dd9` sandbox
+guard · `3906b0c` drop spurious type-ignore · `7e4287d` WebSocket endpoint · `22883be`
+async streaming + pub/sub · `48ebca7` list/detail endpoints · `dc1aee9` GET /mcp/tools ·
+`54f76f3` schemas · `8c30553` migration · `a098c56` open slice.
+
+**Key cross-task contracts established (frontend must match):**
+- httpx MCP wire protocol: per-line JSON-RPC **notifications**
+  `{"jsonrpc":"2.0","method":"tools/output","params":{"id":N,"type":"stdout"|"stderr","data":"..."}}`
+  then a final JSON-RPC **response** with full capped output. The WS endpoint converts the
+  final result into a `done` chunk.
+- WS endpoint `GET /ws/tool-runs/{id}`: session-cookie auth on upgrade; **closes with 4003**
+  for unauth / not-found / non-member (no disclosure); replays buffered chunks then streams
+  live; for an already-completed run sends stored stdout/stderr + synthetic `done`.
+  Message shape = `WebSocketOutputChunk` (`type` stdout|stderr|done|error; `exclude_none`).
+- POST `/api/v1/tool-runs` with `async_mode:true` → **202** + partial `ToolRunResult`
+  (status `running`, exit_code/finished_at null); client then opens the WS.
+- `GET /api/v1/mcp/tools` → `ToolDescriptor[]` (httpx present with quick/full presets +
+  flat arg_schema: target/flags/timeout_seconds).
+- `GET /api/v1/tool-runs?engagement_id&limit&cursor` → `ToolRunPage` (opaque base64 cursor,
+  newest-first); `GET /api/v1/tool-runs/{id}` → `ToolRunResult`. Both **404** for non-member.
+- Sandbox guard: non-sandbox `target` in dev/test → **403** (`SandboxGuardViolation`).
+
+**NEXT: Frontend tasks 1–8.** Start with FE task 1 = `make generate-api` (regenerate the
+typed client from the new backend contract) — this MUST run before the hooks/components.
+Then api hooks (FE2), useToolRunStream (FE3), ToolRunnerForm (FE4), ToolOutputConsole
+(FE5), ToolRunHistory (FE6), ToolRunnerPanel (FE7), wire into WorkspaceLayout (FE8).
+Per-task commits continue. finish-slice (full gate + code-reviewer + PR + close issue #13)
+runs after FE8.
