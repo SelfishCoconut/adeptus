@@ -37,7 +37,10 @@ lint:
 	cd backend && uv run ruff check . && uv run ruff format --check .
 	cd backend && uv run mypy app/
 	cd mcp-servers && uv run --extra dev ruff check . && uv run --extra dev ruff format --check .
-	cd mcp-servers && uv run --extra dev mypy .
+	# Each MCP server is an independent script tree with its own top-level
+	# `server.py` and `tests/` package; mypy must check them one root at a time
+	# or the colliding module names clash ("Duplicate module named ...").
+	cd mcp-servers && for d in */server.py; do uv run --extra dev mypy "$$(dirname "$$d")" || exit 1; done
 	cd frontend && pnpm lint
 	cd frontend && pnpm tsc --noEmit
 
