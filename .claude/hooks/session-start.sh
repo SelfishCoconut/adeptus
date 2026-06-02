@@ -6,6 +6,13 @@
 set -o pipefail
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 
+# Bootstrap the problem-log scaffold so the loggers aren't silently off on a
+# fresh clone. post-tool-problem-logger.sh and the [BLOCKED] path in
+# pre-bash-guard-with-logging.sh both bail when docs/logs/problems.log is
+# missing; create it (and the details dir) once here, without clobbering.
+mkdir -p docs/logs/details 2>/dev/null || true
+[ -f docs/logs/problems.log ] || touch docs/logs/problems.log 2>/dev/null || true
+
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 echo "== Adeptus session =="
 echo "Branch: $branch"
