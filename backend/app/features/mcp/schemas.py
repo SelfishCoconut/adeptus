@@ -1,6 +1,6 @@
 """Pydantic v2 request/response models for the MCP feature.
 
-Schemas match the Slice 03 OpenAPI contract exactly — field names, types,
+Schemas match the Slice 03/04 OpenAPI contract exactly — field names, types,
 enums, and validation constraints are authoritative here.
 """
 
@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 McpServerStatus = Literal["running", "stopped"]
 ToolWeight = Literal["light", "heavy"]
+ToolRunStatus = Literal["running", "completed", "failed", "timed_out"]
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,34 @@ class McpServerInfo(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Tool preset and descriptor schemas (used by GET /api/v1/mcp/tools)
+# ---------------------------------------------------------------------------
+
+
+class ToolPreset(BaseModel):
+    """A named preset for a tool, bundling a set of default arguments."""
+
+    name: str
+    description: str | None = None
+    args: dict[str, Any]
+
+
+class ToolDescriptor(BaseModel):
+    """Enriched descriptor for a tool, including presets and arg schema.
+
+    Returned by GET /api/v1/mcp/tools; used by the tool runner panel to
+    populate the tool selector and render the dynamic argument form.
+    """
+
+    server_name: str
+    tool_name: str
+    weight: ToolWeight
+    capability_flags: list[str]
+    presets: list[ToolPreset]
+    arg_schema: dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
 # Tool-run request / response schemas
 # ---------------------------------------------------------------------------
 
@@ -65,10 +94,19 @@ class ToolRunCreate(BaseModel):
             "when the limit is reached. Full kill/extend/wait UX is deferred to Slice 06."
         ),
     )
+    async_mode: bool = Field(
+        default=False,
+        description=(
+            "When true the endpoint responds 202 with a partial ToolRunResult "
+            "(finished_at null, stdout/stderr empty). Output is streamed via "
+            "the WebSocket endpoint."
+        ),
+    )
+    preset_name: str | None = None
 
 
 class ToolRunResult(BaseModel):
-    """Response body for POST /api/v1/tool-runs."""
+    """Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -76,8 +114,42 @@ class ToolRunResult(BaseModel):
     engagement_id: UUID
     server_name: str
     tool_name: str
-    exit_code: int
+    exit_code: int | None
     stdout: str
     stderr: str
     started_at: datetime
-    finished_at: datetime
+    finished_at: datetime | None
+    status: ToolRunStatus
+    preset_name: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Paginated tool-run listing
+# ---------------------------------------------------------------------------
+
+
+class ToolRunPage(BaseModel):
+    """Paginated list of tool runs; returned by GET /api/v1/tool-runs."""
+
+    items: list[ToolRunResult]
+    next_cursor: str | None
+
+
+# ---------------------------------------------------------------------------
+# WebSocket output streaming
+# ---------------------------------------------------------------------------
+
+
+class WebSocketOutputChunk(BaseModel):
+    """A single JSON message sent over the /ws/tool-runs/{id} WebSocket.
+
+    type "stdout" / "stderr": data carries the output line.
+    type "done": exit_code and finished_at are populated.
+    type "error": message carries the error description.
+    """
+
+    type: Literal["stdout", "stderr", "done", "error"]
+    data: str | None = None
+    exit_code: int | None = None
+    finished_at: datetime | None = None
+    message: str | None = None

@@ -98,6 +98,8 @@ def _make_tool_run(
     run.stderr = stderr
     run.started_at = started_at or datetime.now(tz=UTC)
     run.finished_at = finished_at or datetime.now(tz=UTC)
+    run.status = "completed"
+    run.preset_name = None
     return run
 
 

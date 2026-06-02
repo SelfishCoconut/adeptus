@@ -37,6 +37,7 @@ from app.features.mcp.schemas import (
     McpServerInfo,
     McpToolDeclaration,
     ToolRunResult,
+    ToolRunStatus,
 )
 from app.features.mcp.subprocess_manager import McpServerNotFound
 
@@ -185,6 +186,10 @@ async def execute_tool_run(
     )
 
     # Step 6: build and return the result schema.
+    # updated.status may be None if the server_default hasn't been flushed back to the
+    # in-memory object; the sync path always ends in "completed", so fall back safely.
+    raw_status: str | None = getattr(updated, "status", None)
+    result_status = cast(ToolRunStatus, raw_status) if raw_status else "completed"
     return ToolRunResult(
         tool_run_id=cast(UUID, updated.id),
         engagement_id=cast(UUID, updated.engagement_id),
@@ -195,4 +200,6 @@ async def execute_tool_run(
         stderr=updated.stderr,
         started_at=updated.started_at,
         finished_at=cast(datetime, updated.finished_at),
+        status=result_status,
+        preset_name=getattr(updated, "preset_name", None),
     )
