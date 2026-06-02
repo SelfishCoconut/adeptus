@@ -12,8 +12,10 @@ satisfy the get_current_user dependency.
 
 Status codes tested:
   GET /admin/mcp-servers:  200 (admin), 403 (non-admin), 401 (unauthenticated)
-  POST /tool-runs:         200 (success), 400 (unknown server), 403 (non-member),
-                           403 (admin but not member), 404 (engagement not found),
+  POST /tool-runs:         200 (success), 400 (unknown server),
+                           404 (non-member — existence hidden per §17.1),
+                           404 (admin but not member — §4 no-bypass, §17.1),
+                           404 (engagement not found),
                            503 (server down), 401 (unauthenticated)
 """
 
@@ -42,7 +44,7 @@ from app.features.engagements import models as eng_models  # noqa: F401 — regi
 from app.features.mcp import models as mcp_models  # noqa: F401 — registers ORM tables
 from app.features.mcp.router import router as mcp_router
 from app.features.mcp.schemas import McpServerInfo, McpToolDeclaration, ToolRunResult
-from app.features.mcp.service import EngagementNotFound, NotMember
+from app.features.mcp.service import EngagementNotFound
 from app.features.mcp.subprocess_manager import McpServerDown, McpServerNotFound, McpToolNotFound
 
 # ---------------------------------------------------------------------------
@@ -340,41 +342,45 @@ async def test_execute_tool_run_returns_400_for_unknown_tool_name(
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_run_returns_403_for_non_member(
+async def test_execute_tool_run_returns_404_for_non_member(
     regular_client: AsyncClient,
 ) -> None:
-    """NotMember from service → 403 Forbidden."""
-    with patch(
-        "app.features.mcp.router.service.execute_tool_run",
-        new=AsyncMock(side_effect=NotMember("Not a member of this engagement")),
-    ):
-        resp = await regular_client.post("/api/v1/tool-runs", json=_TOOL_RUN_BODY)
+    """A non-member receives 404 — existence is hidden per §17.1 (not a 403).
 
-    assert resp.status_code == 403
-    body = resp.json()
-    assert body["error"]["code"] == "forbidden"
-
-
-@pytest.mark.asyncio
-async def test_execute_tool_run_returns_403_for_admin_not_member(
-    admin_client: AsyncClient,
-) -> None:
-    """Admin who is NOT an explicit engagement member receives 403 — §4 no-admin-bypass.
-
-    The service enforces the membership check without consulting the user's role;
-    this test confirms the router correctly surfaces that 403 even for admin callers.
+    The service raises EngagementNotFound for non-members so a caller cannot
+    distinguish "engagement does not exist" from "exists but I'm not a member".
     """
     with patch(
         "app.features.mcp.router.service.execute_tool_run",
-        new=AsyncMock(
-            side_effect=NotMember("Admin user is not an explicit member of this engagement")
-        ),
+        new=AsyncMock(side_effect=EngagementNotFound("Engagement not found")),
+    ):
+        resp = await regular_client.post("/api/v1/tool-runs", json=_TOOL_RUN_BODY)
+
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["error"]["code"] == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_run_returns_404_for_admin_not_member(
+    admin_client: AsyncClient,
+) -> None:
+    """Admin who is NOT an explicit engagement member receives 404 — §4 no-admin-bypass.
+
+    The service enforces the membership check without consulting the user's role,
+    and collapses the denial to EngagementNotFound (404, not 403) so existence is
+    not disclosed (§17.1). This test confirms the router surfaces that 404 even
+    for admin callers.
+    """
+    with patch(
+        "app.features.mcp.router.service.execute_tool_run",
+        new=AsyncMock(side_effect=EngagementNotFound("Engagement not found")),
     ):
         resp = await admin_client.post("/api/v1/tool-runs", json=_TOOL_RUN_BODY)
 
-    assert resp.status_code == 403
+    assert resp.status_code == 404
     body = resp.json()
-    assert body["error"]["code"] == "forbidden"
+    assert body["error"]["code"] == "not_found"
 
 
 @pytest.mark.asyncio

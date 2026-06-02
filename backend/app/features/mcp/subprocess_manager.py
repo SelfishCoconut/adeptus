@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.core.errors import AdeptusError
+from app.core.errors import AdeptusError, BadRequestError
 from app.features.mcp.registry import McpServerConfig, get_registry
 
 logger = logging.getLogger(__name__)
@@ -56,25 +56,35 @@ _JSONRPC_NOT_FOUND_CODES: frozenset[int] = frozenset({-32601, -32602})
 # ---------------------------------------------------------------------------
 
 
-class McpServerNotFound(AdeptusError):
-    """Raised when the requested server name is not in the registry."""
+class McpServerNotFound(BadRequestError):
+    """Raised when the requested server name is not in the registry.
+
+    Subclasses the core ``BadRequestError`` so the registered handler maps it to
+    HTTP 400 (unknown MCP server) — no inline translation needed in the router.
+    """
 
     def __init__(self, message: str = "MCP server not found") -> None:
         super().__init__(message)
 
 
 class McpServerDown(AdeptusError):
-    """Raised when the subprocess is not running, has died, or timed out."""
+    """Raised when the subprocess is not running, has died, or timed out.
+
+    Stays a bare ``AdeptusError`` (not a core subclass): there is no core error
+    type for HTTP 503, so the router translates this one inline.  Adding a core
+    ``ServiceUnavailableError`` would widen ``core/`` and require an ADR.
+    """
 
     def __init__(self, message: str = "MCP server is down") -> None:
         super().__init__(message)
 
 
-class McpToolNotFound(AdeptusError):
+class McpToolNotFound(BadRequestError):
     """Raised when the MCP server returns JSON-RPC -32601/-32602 (tool not found).
 
     This is a client-side error (bad tool name / bad params) rather than a
-    transport failure, so it maps to HTTP 400 in the router.
+    transport failure, so it maps to HTTP 400 in the router via the core
+    ``BadRequestError`` handler.
     """
 
     def __init__(self, message: str = "MCP tool not found") -> None:

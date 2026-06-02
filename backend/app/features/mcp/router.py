@@ -5,16 +5,17 @@ Endpoints:
   POST /api/v1/tool-runs          — requires authenticated session AND explicit
                                     engagement membership (no admin bypass — §4)
 
-Domain exceptions are translated to HTTP codes inline (try/except) because the
-MCP-specific exceptions (EngagementNotFound, NotMember, McpServerNotFound,
-McpServerDown) are feature-level types, not subclasses of the core error
-hierarchy, and registering them in core/errors/handlers.py would require an
-ADR per CLAUDE.md.  The mapping is:
+Most domain exceptions subclass the core error hierarchy and are translated by
+the registered handlers in app.core.errors.handlers:
 
-  McpServerNotFound   → 400  (unknown MCP server or tool)
-  EngagementNotFound  → 404  (engagement does not exist)
-  NotMember           → 403  (caller is not an explicit member — no admin bypass)
-  McpServerDown       → 503  (subprocess not running)
+  McpServerNotFound  (BadRequestError) → 400  (unknown MCP server)
+  McpToolNotFound    (BadRequestError) → 400  (unknown tool / bad params)
+  EngagementNotFound (NotFoundError)   → 404  (engagement missing OR caller is
+                                              not a member — §17.1 hides existence,
+                                              §4 allows no admin bypass)
+
+Only McpServerDown → 503 is translated inline below: there is no core error
+type for HTTP 503, and adding one would widen core/ and require an ADR.
 """
 
 from typing import Annotated
@@ -29,8 +30,7 @@ from app.features.auth.deps import get_current_user
 from app.features.auth.models import User
 from app.features.mcp import service
 from app.features.mcp.schemas import McpServerInfo, ToolRunCreate, ToolRunResult
-from app.features.mcp.service import EngagementNotFound, NotMember
-from app.features.mcp.subprocess_manager import McpServerDown, McpServerNotFound, McpToolNotFound
+from app.features.mcp.subprocess_manager import McpServerDown
 
 router = APIRouter(tags=["mcp"])
 
@@ -90,27 +90,10 @@ async def execute_tool_run(
         )
         await db.commit()
         return result
-    except EngagementNotFound as exc:
-        return JSONResponse(
-            status_code=404,
-            content={"error": {"code": "not_found", "message": exc.message}},
-        )
-    except NotMember as exc:
-        return JSONResponse(
-            status_code=403,
-            content={"error": {"code": "forbidden", "message": exc.message}},
-        )
-    except McpServerNotFound as exc:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"code": "bad_request", "message": exc.message}},
-        )
-    except McpToolNotFound as exc:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"code": "bad_request", "message": exc.message}},
-        )
     except McpServerDown as exc:
+        # No core error type maps to HTTP 503; translate this one inline.
+        # EngagementNotFound/McpServerNotFound/McpToolNotFound subclass core error
+        # types and are handled by the registered handlers.
         return JSONResponse(
             status_code=503,
             content={"error": {"code": "service_unavailable", "message": exc.message}},

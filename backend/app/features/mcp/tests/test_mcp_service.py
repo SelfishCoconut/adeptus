@@ -8,8 +8,9 @@ Tests cover:
   - execute_tool_run happy path
   - execute_tool_run: unknown server → McpServerNotFound
   - execute_tool_run: down server → McpServerDown
-  - execute_tool_run: non-member → NotMember
-  - execute_tool_run: admin user who is not an explicit engagement member → NotMember (§4 no-bypass)
+  - execute_tool_run: non-member → EngagementNotFound (404, existence hidden — §17.1)
+  - execute_tool_run: admin user who is not an explicit engagement member →
+    EngagementNotFound (§4 no-bypass; denial is a 404, not a 403, per §17.1)
   - execute_tool_run: engagement not found → EngagementNotFound
 """
 
@@ -26,7 +27,6 @@ from app.features.mcp.registry import McpServerConfig, McpToolConfig
 from app.features.mcp.schemas import McpServerInfo, McpToolDeclaration, ToolRunResult
 from app.features.mcp.service import (
     EngagementNotFound,
-    NotMember,
     execute_tool_run,
     list_servers,
 )
@@ -210,12 +210,14 @@ async def test_list_servers_multiple_servers() -> None:
 
 
 def _make_db_with_engagement(engagement: MagicMock | None) -> AsyncMock:
-    """Return a mock AsyncSession whose execute().scalar_one_or_none() returns engagement."""
-    db = AsyncMock()
-    scalar_result = MagicMock()
-    scalar_result.scalar_one_or_none.return_value = engagement
-    db.execute = AsyncMock(return_value=scalar_result)
-    return db
+    """Return a generic mock AsyncSession.
+
+    The §17.1 membership chokepoint (eng_repo.get_engagement_for_member) is patched
+    directly in each test, so the session itself is only passed through to the
+    patched repository calls and never executes a real query. The ``engagement``
+    argument is retained for call-site readability.
+    """
+    return AsyncMock()
 
 
 # ---------------------------------------------------------------------------
@@ -237,9 +239,9 @@ async def test_execute_tool_run_happy_path() -> None:
 
     with (
         patch(
-            "app.features.mcp.service.eng_repo.get_member",
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
             new_callable=AsyncMock,
-            return_value=_make_member_mock(),
+            return_value=(_make_engagement_mock(), _make_member_mock()),
         ),
         patch(
             "app.features.mcp.service.get_registry",
@@ -293,9 +295,9 @@ async def test_execute_tool_run_calls_send_tool_call_with_correct_args() -> None
 
     with (
         patch(
-            "app.features.mcp.service.eng_repo.get_member",
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
             new_callable=AsyncMock,
-            return_value=_make_member_mock(),
+            return_value=(_make_engagement_mock(), _make_member_mock()),
         ),
         patch("app.features.mcp.service.get_registry", return_value=_make_registry()),
         patch(
@@ -340,9 +342,16 @@ async def test_execute_tool_run_calls_send_tool_call_with_correct_args() -> None
 @pytest.mark.asyncio
 async def test_execute_tool_run_engagement_not_found() -> None:
     """execute_tool_run raises EngagementNotFound when the engagement does not exist."""
-    db = _make_db_with_engagement(None)  # engagement not found
+    db = _make_db_with_engagement(None)
 
-    with pytest.raises(EngagementNotFound):
+    with (
+        patch(
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
+            new_callable=AsyncMock,
+            return_value=None,  # engagement missing
+        ),
+        pytest.raises(EngagementNotFound),
+    ):
         await execute_tool_run(
             db,
             engagement_id=uuid4(),
@@ -355,23 +364,26 @@ async def test_execute_tool_run_engagement_not_found() -> None:
 
 
 # ---------------------------------------------------------------------------
-# execute_tool_run — NotMember (including admin-but-not-member, §4)
+# execute_tool_run — non-member collapses to EngagementNotFound (§4 + §17.1)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_run_non_member_raises_not_member() -> None:
-    """execute_tool_run raises NotMember when the user has no explicit member row."""
-    engagement = _make_engagement_mock()
-    db = _make_db_with_engagement(engagement)
+async def test_execute_tool_run_non_member_raises_engagement_not_found() -> None:
+    """A non-member receives EngagementNotFound (404), not a 403.
+
+    get_engagement_for_member returns None for non-members; the service collapses
+    that to EngagementNotFound so existence is not disclosed (§17.1).
+    """
+    db = _make_db_with_engagement(None)
 
     with (
         patch(
-            "app.features.mcp.service.eng_repo.get_member",
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
             new_callable=AsyncMock,
-            return_value=None,  # not a member
+            return_value=None,  # not a member → indistinguishable from "missing"
         ),
-        pytest.raises(NotMember),
+        pytest.raises(EngagementNotFound),
     ):
         await execute_tool_run(
             db,
@@ -385,24 +397,22 @@ async def test_execute_tool_run_non_member_raises_not_member() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_run_admin_without_membership_raises_not_member() -> None:
-    """Admin users without an explicit member row receive NotMember (§4 no-bypass).
+async def test_execute_tool_run_admin_without_membership_raises_engagement_not_found() -> None:
+    """Admin users without an explicit member row are denied (§4 no-bypass).
 
-    The membership check is a pure explicit per-user-per-engagement lookup —
-    admin role does NOT grant access to tool runs.
+    The fused membership query never consults user.role, so an admin who is not a
+    member gets None → EngagementNotFound, exactly like any other non-member. The
+    denial is a 404 (not a 403) to avoid existence disclosure (§17.1).
     """
-    engagement = _make_engagement_mock()
-    db = _make_db_with_engagement(engagement)
+    db = _make_db_with_engagement(None)
 
-    # Simulate: get_member returns None for an admin who is not a member.
-    # The service does not consult user.role anywhere — only the member row matters.
     with (
         patch(
-            "app.features.mcp.service.eng_repo.get_member",
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
             new_callable=AsyncMock,
-            return_value=None,  # admin has no explicit member row
+            return_value=None,  # admin has no explicit member row; role never checked
         ),
-        pytest.raises(NotMember),
+        pytest.raises(EngagementNotFound),
     ):
         await execute_tool_run(
             db,
@@ -428,9 +438,9 @@ async def test_execute_tool_run_unknown_server_raises_not_found() -> None:
 
     with (
         patch(
-            "app.features.mcp.service.eng_repo.get_member",
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
             new_callable=AsyncMock,
-            return_value=_make_member_mock(),
+            return_value=(_make_engagement_mock(), _make_member_mock()),
         ),
         patch("app.features.mcp.service.get_registry", return_value={}),  # empty registry
         pytest.raises(McpServerNotFound),
@@ -463,9 +473,9 @@ async def test_execute_tool_run_server_down_propagates() -> None:
 
     with (
         patch(
-            "app.features.mcp.service.eng_repo.get_member",
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
             new_callable=AsyncMock,
-            return_value=_make_member_mock(),
+            return_value=(_make_engagement_mock(), _make_member_mock()),
         ),
         patch("app.features.mcp.service.get_registry", return_value=_make_registry()),
         patch(
@@ -509,9 +519,9 @@ async def test_execute_tool_run_server_down_does_not_update_row() -> None:
 
     with (
         patch(
-            "app.features.mcp.service.eng_repo.get_member",
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
             new_callable=AsyncMock,
-            return_value=_make_member_mock(),
+            return_value=(_make_engagement_mock(), _make_member_mock()),
         ),
         patch("app.features.mcp.service.get_registry", return_value=_make_registry()),
         patch(
