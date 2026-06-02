@@ -26,6 +26,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://adeptus:adeptus@postgres:5432/adeptus
+      MCP_CONFIG_PATH: /etc/adeptus/mcp.yaml
     depends_on:
       postgres:
         condition: service_healthy
@@ -34,6 +35,10 @@ services:
       # Anonymous volume masks the in-image .venv so the container never writes its
       # (root-owned, container-specific) virtualenv back onto the host bind mount.
       - /app/.venv
+      # MCP config file — registry.py reads MCP_CONFIG_PATH at startup.
+      - ./mcp-servers/config/mcp.yaml:/etc/adeptus/mcp.yaml:ro
+      # MCP server scripts — server.py is invoked as python /mcp-servers/shell-exec/server.py.
+      - ./mcp-servers:/mcp-servers:ro
     # Bind to loopback only: all external traffic must go through the TLS edge
     # (web) on 443. Exposing 8000 on 0.0.0.0 would let the LAN reach the plaintext
     # API directly, bypassing TLS. 127.0.0.1 keeps host-side tooling working.

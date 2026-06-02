@@ -10,6 +10,7 @@ dependencies = [
     "fastapi>=0.111",
     "pydantic-settings>=2.0",
     "python-multipart",
+    "pyyaml>=6.0",
     "sqlalchemy[asyncio]>=2.0",
     "uvicorn[standard]",
 ]
@@ -74,3 +75,8 @@ concurrency = ["greenlet", "thread"]
 # Integration test modules are deselected from the default (coverage-gated) run, so
 # measuring them as "uncovered" is noise — they run under `make test-integration`.
 omit = ["*/tests/test_integration.py"]
+
+[dependency-groups]
+dev = [
+    "types-pyyaml>=6.0.12.20260518",
+]

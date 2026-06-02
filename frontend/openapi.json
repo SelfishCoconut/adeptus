@@ -446,6 +446,74 @@
           }
         }
       }
+    },
+    "/api/v1/admin/mcp-servers": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "List Mcp Servers",
+        "description": "List all registered MCP servers with their declared capabilities and live status.\n\nAdmin-only.  Returns 403 for any authenticated non-admin caller.",
+        "operationId": "list_mcp_servers",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/McpServerInfo"
+                  },
+                  "type": "array",
+                  "title": "Response List Mcp Servers"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tool-runs": {
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "Execute Tool Run",
+        "description": "Execute a tool call via the named MCP server and wait for the result.\n\nRequires an authenticated session AND explicit engagement membership.\nAdmin role does NOT bypass the membership requirement (\u00a74).",
+        "operationId": "execute_tool_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolRunCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolRunResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -684,6 +752,68 @@
         ],
         "title": "LoginRequest"
       },
+      "McpServerInfo": {
+        "properties": {
+          "server_name": {
+            "type": "string",
+            "title": "Server Name"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "stopped"
+            ],
+            "title": "Status"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/McpToolDeclaration"
+            },
+            "type": "array",
+            "title": "Tools"
+          }
+        },
+        "type": "object",
+        "required": [
+          "server_name",
+          "status",
+          "tools"
+        ],
+        "title": "McpServerInfo",
+        "description": "Runtime view of a registered MCP server \u2014 used in GET /admin/mcp-servers."
+      },
+      "McpToolDeclaration": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "weight": {
+            "type": "string",
+            "enum": [
+              "light",
+              "heavy"
+            ],
+            "title": "Weight"
+          },
+          "capability_flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Capability Flags"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "weight",
+          "capability_flags"
+        ],
+        "title": "McpToolDeclaration",
+        "description": "A single tool declared by an MCP server in its manifest."
+      },
       "MemberEntry": {
         "properties": {
           "user_id": {
@@ -717,6 +847,103 @@
           "joined_at"
         ],
         "title": "MemberEntry"
+      },
+      "ToolRunCreate": {
+        "properties": {
+          "engagement_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Engagement Id"
+          },
+          "server_name": {
+            "type": "string",
+            "title": "Server Name"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "args": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Args"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "maximum": 300.0,
+            "minimum": 1.0,
+            "title": "Timeout Seconds",
+            "description": "Per-request timeout override. Default 30 s. The MCP server kills the subprocess and returns a non-zero exit code when the limit is reached. Full kill/extend/wait UX is deferred to Slice 06.",
+            "default": 30
+          }
+        },
+        "type": "object",
+        "required": [
+          "engagement_id",
+          "server_name",
+          "tool_name",
+          "args"
+        ],
+        "title": "ToolRunCreate",
+        "description": "Request body for POST /api/v1/tool-runs."
+      },
+      "ToolRunResult": {
+        "properties": {
+          "tool_run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tool Run Id"
+          },
+          "engagement_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Engagement Id"
+          },
+          "server_name": {
+            "type": "string",
+            "title": "Server Name"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "exit_code": {
+            "type": "integer",
+            "title": "Exit Code"
+          },
+          "stdout": {
+            "type": "string",
+            "title": "Stdout"
+          },
+          "stderr": {
+            "type": "string",
+            "title": "Stderr"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Finished At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tool_run_id",
+          "engagement_id",
+          "server_name",
+          "tool_name",
+          "exit_code",
+          "stdout",
+          "stderr",
+          "started_at",
+          "finished_at"
+        ],
+        "title": "ToolRunResult",
+        "description": "Response body for POST /api/v1/tool-runs."
       },
       "UserMe": {
         "properties": {

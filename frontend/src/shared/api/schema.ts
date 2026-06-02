@@ -193,6 +193,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/mcp-servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Mcp Servers
+         * @description List all registered MCP servers with their declared capabilities and live status.
+         *
+         *     Admin-only.  Returns 403 for any authenticated non-admin caller.
+         */
+        get: operations["list_mcp_servers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tool-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Execute Tool Run
+         * @description Execute a tool call via the named MCP server and wait for the result.
+         *
+         *     Requires an authenticated session AND explicit engagement membership.
+         *     Admin role does NOT bypass the membership requirement (§4).
+         */
+        post: operations["execute_tool_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -303,6 +348,36 @@ export interface components {
             /** Password */
             password: string;
         };
+        /**
+         * McpServerInfo
+         * @description Runtime view of a registered MCP server — used in GET /admin/mcp-servers.
+         */
+        McpServerInfo: {
+            /** Server Name */
+            server_name: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "stopped";
+            /** Tools */
+            tools: components["schemas"]["McpToolDeclaration"][];
+        };
+        /**
+         * McpToolDeclaration
+         * @description A single tool declared by an MCP server in its manifest.
+         */
+        McpToolDeclaration: {
+            /** Name */
+            name: string;
+            /**
+             * Weight
+             * @enum {string}
+             */
+            weight: "light" | "heavy";
+            /** Capability Flags */
+            capability_flags: string[];
+        };
         /** MemberEntry */
         MemberEntry: {
             /**
@@ -322,6 +397,67 @@ export interface components {
              * Format: date-time
              */
             joined_at: string;
+        };
+        /**
+         * ToolRunCreate
+         * @description Request body for POST /api/v1/tool-runs.
+         */
+        ToolRunCreate: {
+            /**
+             * Engagement Id
+             * Format: uuid
+             */
+            engagement_id: string;
+            /** Server Name */
+            server_name: string;
+            /** Tool Name */
+            tool_name: string;
+            /** Args */
+            args: {
+                [key: string]: unknown;
+            };
+            /**
+             * Timeout Seconds
+             * @description Per-request timeout override. Default 30 s. The MCP server kills the subprocess and returns a non-zero exit code when the limit is reached. Full kill/extend/wait UX is deferred to Slice 06.
+             * @default 30
+             */
+            timeout_seconds: number;
+        };
+        /**
+         * ToolRunResult
+         * @description Response body for POST /api/v1/tool-runs.
+         */
+        ToolRunResult: {
+            /**
+             * Tool Run Id
+             * Format: uuid
+             */
+            tool_run_id: string;
+            /**
+             * Engagement Id
+             * Format: uuid
+             */
+            engagement_id: string;
+            /** Server Name */
+            server_name: string;
+            /** Tool Name */
+            tool_name: string;
+            /** Exit Code */
+            exit_code: number;
+            /** Stdout */
+            stdout: string;
+            /** Stderr */
+            stderr: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
         };
         /** UserMe */
         UserMe: {
@@ -699,6 +835,59 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_mcp_servers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpServerInfo"][];
+                };
+            };
+        };
+    };
+    execute_tool_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolRunCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolRunResult"];
+                };
             };
             /** @description Validation Error */
             422: {

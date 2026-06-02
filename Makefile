@@ -18,10 +18,13 @@ help:
 dev:
 	docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 
-test: lint test-backend test-frontend
+test: lint test-backend test-mcp-servers test-frontend
 
 test-backend:
 	cd backend && uv run pytest --cov=app/features --cov-fail-under=80
+
+test-mcp-servers:
+	cd mcp-servers && uv run --extra dev pytest --cov=. --cov-fail-under=80
 
 test-frontend:
 	cd frontend && pnpm test --run --coverage
@@ -33,11 +36,14 @@ test-integration:
 lint:
 	cd backend && uv run ruff check . && uv run ruff format --check .
 	cd backend && uv run mypy app/
+	cd mcp-servers && uv run --extra dev ruff check . && uv run --extra dev ruff format --check .
+	cd mcp-servers && uv run --extra dev mypy .
 	cd frontend && pnpm lint
 	cd frontend && pnpm tsc --noEmit
 
 format:
 	cd backend && uv run ruff format .
+	cd mcp-servers && uv run --extra dev ruff format .
 	cd backend && uv run ruff check --fix .
 	cd frontend && pnpm prettier --write .
 

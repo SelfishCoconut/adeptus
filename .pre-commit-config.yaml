@@ -18,18 +18,26 @@ repos:
     hooks:
       - id: ruff
         args: [--fix]
-        files: ^backend/
+        files: ^(backend|mcp-servers)/
       - id: ruff-format
-        files: ^backend/
+        files: ^(backend|mcp-servers)/
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.11.0
     hooks:
       - id: mypy
+        name: mypy (backend)
         files: ^backend/app/
         additional_dependencies:
           - pydantic
           - sqlalchemy
+          - pyyaml
+          - types-PyYAML
+      - id: mypy
+        name: mypy (mcp-servers)
+        # Standalone stdlib-only subprocesses — no third-party stubs needed.
+        files: ^mcp-servers/.*\.py$
+        args: [--config-file=mcp-servers/pyproject.toml]
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.4
