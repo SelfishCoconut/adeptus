@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_sessionmaker
 from app.core.errors import BadRequestError, ForbiddenError, NotFoundError
+from app.features.auth import repository as auth_repo
 from app.features.engagements import repository as eng_repo
 from app.features.mcp import repository as mcp_repo
 from app.features.mcp import subprocess_manager
@@ -733,6 +734,69 @@ async def get_tool_run(
 
     # Step 3: map and return.
     return _row_to_result(run)
+
+
+# ---------------------------------------------------------------------------
+# authenticate_ws_tool_run
+# ---------------------------------------------------------------------------
+
+
+async def authenticate_ws_tool_run(
+    db: AsyncSession,
+    *,
+    session_id: str | None,
+    tool_run_id: UUID,
+) -> ToolRun | None:
+    """Authenticate + authorize a WebSocket subscription to a tool run.
+
+    Mirrors ``auth.deps.get_current_session`` but WITHOUT sliding the session
+    expiry or emitting a ``Set-Cookie`` header — both are inappropriate on a
+    WebSocket upgrade. The cookie value is extracted by the router (a transport
+    concern) and passed in as *session_id*.
+
+    Returns the ``ToolRun`` row when the caller holds a valid, unexpired session
+    AND is an explicit member of the engagement that owns the run. Returns
+    ``None`` on ANY failure — missing/invalid/expired cookie, unknown user,
+    missing run, or non-member — so the caller can collapse every failure into a
+    single close code (no existence disclosure; §4 no-admin-bypass, §17.1).
+
+    Args:
+        db:          Async database session.
+        session_id:  Opaque session id from the upgrade request cookie, if any.
+        tool_run_id: UUID of the tool run being subscribed to.
+
+    Returns:
+        The owning ``ToolRun`` row on success, else ``None``.
+    """
+    if session_id is None:
+        return None
+
+    db_session = await auth_repo.get_session(db, session_id)
+    if db_session is None:
+        return None
+
+    now = datetime.now(UTC)
+    exp = db_session.expires_at
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=UTC)
+    if exp <= now:
+        return None
+
+    user = await auth_repo.get_user_by_id(db, cast(UUID, db_session.user_id))
+    if user is None:
+        return None
+
+    run = await mcp_repo.get_tool_run_by_id(db, tool_run_id)
+    if run is None:
+        return None
+
+    membership = await eng_repo.get_engagement_for_member(
+        db, cast(UUID, run.engagement_id), cast(UUID, user.id)
+    )
+    if membership is None:
+        return None
+
+    return run
 
 
 # ---------------------------------------------------------------------------

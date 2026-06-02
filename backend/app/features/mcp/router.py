@@ -31,8 +31,7 @@ Only McpServerDown → 503 is translated inline below: there is no core error
 type for HTTP 503, and adding one would widen core/ and require an ADR.
 """
 
-from datetime import UTC, datetime
-from typing import Annotated, cast
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, WebSocket, WebSocketDisconnect, status
@@ -42,11 +41,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.db import get_db, get_sessionmaker
 from app.core.errors import ForbiddenError
-from app.features.auth import repository as auth_repo
 from app.features.auth.deps import get_current_user
 from app.features.auth.models import User
-from app.features.engagements import repository as eng_repo
-from app.features.mcp import repository as mcp_repo
 from app.features.mcp import service
 from app.features.mcp.schemas import (
     McpServerInfo,
@@ -253,48 +249,18 @@ async def stream_tool_run_ws(websocket: WebSocket, tool_run_id: UUID) -> None:
     _WS_CLOSE_UNAUTH = 4003
 
     # ------------------------------------------------------------------
-    # Auth + authorization (BEFORE accepting the WebSocket)
+    # Auth + authorization (BEFORE accepting the WebSocket). The cookie is a
+    # transport concern resolved here; the session/membership protocol lives in
+    # the service layer. Any failure collapses to one close code (no disclosure).
     # ------------------------------------------------------------------
+    session_id = websocket.cookies.get(get_settings().SESSION_COOKIE_NAME)
     async with get_sessionmaker()() as session:
-        # Step 1: resolve session cookie (mirrors get_current_session in deps.py).
-        session_id = websocket.cookies.get(get_settings().SESSION_COOKIE_NAME)
-        if session_id is None:
-            await websocket.close(code=_WS_CLOSE_UNAUTH)
-            return
-
-        db_session = await auth_repo.get_session(session, session_id)
-        if db_session is None:
-            await websocket.close(code=_WS_CLOSE_UNAUTH)
-            return
-
-        now = datetime.now(UTC)
-        exp = db_session.expires_at
-        if exp.tzinfo is None:
-            exp = exp.replace(tzinfo=UTC)
-        if exp <= now:
-            await websocket.close(code=_WS_CLOSE_UNAUTH)
-            return
-
-        # Step 2: resolve user.
-        user = await auth_repo.get_user_by_id(session, cast(UUID, db_session.user_id))
-        if user is None:
-            await websocket.close(code=_WS_CLOSE_UNAUTH)
-            return
-
-        # Step 3: resolve the tool run row.
-        run = await mcp_repo.get_tool_run_by_id(session, tool_run_id)
-        if run is None:
-            await websocket.close(code=_WS_CLOSE_UNAUTH)
-            return
-
-        # Step 4: membership check — collapses non-member and missing engagement
-        # into the same 4003 to avoid existence disclosure (§17.1 / §4).
-        membership = await eng_repo.get_engagement_for_member(
-            session, cast(UUID, run.engagement_id), cast(UUID, user.id)
+        run = await service.authenticate_ws_tool_run(
+            session, session_id=session_id, tool_run_id=tool_run_id
         )
-        if membership is None:
-            await websocket.close(code=_WS_CLOSE_UNAUTH)
-            return
+    if run is None:
+        await websocket.close(code=_WS_CLOSE_UNAUTH)
+        return
 
     # ------------------------------------------------------------------
     # All checks passed — accept the WebSocket and start streaming.
