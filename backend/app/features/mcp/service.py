@@ -38,6 +38,7 @@ from app.core.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.features.engagements import repository as eng_repo
 from app.features.mcp import repository as mcp_repo
 from app.features.mcp import subprocess_manager
+from app.features.mcp.models import ToolRun
 from app.features.mcp.registry import get_registry
 from app.features.mcp.schemas import (
     McpServerInfo,
@@ -739,10 +740,8 @@ async def get_tool_run(
 # ---------------------------------------------------------------------------
 
 
-def _row_to_result(row: Any) -> ToolRunResult:
+def _row_to_result(row: ToolRun) -> ToolRunResult:
     """Map a ToolRun ORM row to a ToolRunResult schema."""
-    raw_status: str | None = getattr(row, "status", None)
-    result_status = cast(ToolRunStatus, raw_status) if raw_status else "completed"
     return ToolRunResult(
         tool_run_id=cast(UUID, row.id),
         engagement_id=cast(UUID, row.engagement_id),
@@ -753,6 +752,6 @@ def _row_to_result(row: Any) -> ToolRunResult:
         stderr=row.stderr or "",
         started_at=row.started_at,
         finished_at=row.finished_at,
-        status=result_status,
-        preset_name=getattr(row, "preset_name", None),
+        status=cast(ToolRunStatus, row.status),
+        preset_name=row.preset_name,
     )

@@ -404,7 +404,7 @@ describe('EngagementWorkspacePage', () => {
     )
   })
 
-  it('passes engagementId to WorkspaceShell so the Console pane can render RawShellForm', () => {
+  it('passes engagementId to WorkspaceShell so the Console pane can render the ToolRunnerPanel', () => {
     mockedUseMe.mockReturnValue({
       data: ADMIN_USER,
       isLoading: false,

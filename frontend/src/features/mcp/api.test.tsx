@@ -5,14 +5,12 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import {
   mcpServersKey,
   mcpToolsKey,
-  toolRunKey,
   toolRunsKey,
   useExecuteToolRun,
   useExecuteToolRunAsync,
   useListMcpServers,
   useListTools,
   useListToolRuns,
-  useToolRun,
 } from './api'
 import { api } from '@/shared/api'
 
@@ -120,10 +118,6 @@ describe('query key helpers', () => {
   it('toolRunsKey is namespaced by engagement', () => {
     expect(toolRunsKey(ENGAGEMENT_ID)).toEqual(['tool-runs', ENGAGEMENT_ID])
   })
-
-  it('toolRunKey is namespaced by run id', () => {
-    expect(toolRunKey(TOOL_RUN_ID)).toEqual(['tool-run', TOOL_RUN_ID])
-  })
 })
 
 // ---------------------------------------------------------------------------
@@ -191,29 +185,6 @@ describe('useListToolRuns', () => {
 
   it('is disabled when engagementId is empty', () => {
     const { result } = renderHook(() => useListToolRuns(''), { wrapper: createWrapper() })
-    expect(result.current.fetchStatus).toBe('idle')
-    expect(mockGet).not.toHaveBeenCalled()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// useToolRun
-// ---------------------------------------------------------------------------
-
-describe('useToolRun', () => {
-  it('fetches a single run by id', async () => {
-    resolveGet({ data: TOOL_RUN_RESULT, response: { status: 200 } })
-    const { result } = renderHook(() => useToolRun(TOOL_RUN_ID), { wrapper: createWrapper() })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    expect(result.current.data).toEqual(TOOL_RUN_RESULT)
-    expect(mockGet).toHaveBeenCalledWith('/api/v1/tool-runs/{tool_run_id}', {
-      params: { path: { tool_run_id: TOOL_RUN_ID } },
-    })
-  })
-
-  it('is disabled when toolRunId is null', () => {
-    const { result } = renderHook(() => useToolRun(null), { wrapper: createWrapper() })
     expect(result.current.fetchStatus).toBe('idle')
     expect(mockGet).not.toHaveBeenCalled()
   })

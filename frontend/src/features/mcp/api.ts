@@ -17,10 +17,6 @@ export function toolRunsKey(engagementId: string) {
   return ['tool-runs', engagementId] as const
 }
 
-export function toolRunKey(toolRunId: string) {
-  return ['tool-run', toolRunId] as const
-}
-
 // --- Queries ---
 
 export function useListMcpServers() {
@@ -73,20 +69,11 @@ export function useListToolRuns(engagementId: string, options?: { enabled?: bool
   })
 }
 
-/** Fetch a single (historical) tool run by id, including its stored output. */
-export function useToolRun(toolRunId: string | null) {
-  return useQuery<ToolRunResult>({
-    queryKey: toolRunKey(toolRunId ?? ''),
-    enabled: Boolean(toolRunId),
-    queryFn: async () => {
-      const { data, error } = await api.GET('/api/v1/tool-runs/{tool_run_id}', {
-        params: { path: { tool_run_id: toolRunId as string } },
-      })
-      if (error || !data) throw new Error('Failed to load tool run')
-      return data
-    },
-  })
-}
+// Note: a single-run REST hook (GET /api/v1/tool-runs/{id}) is intentionally
+// omitted. Historical replay is served by ToolOutputConsole via the WebSocket
+// completed-run fallback (the backend replays stored stdout/stderr + a synthetic
+// `done`), which keeps the console on one uniform data path. The single-run
+// endpoint remains available in the API client if a REST fallback is ever needed.
 
 // --- Mutations ---
 
