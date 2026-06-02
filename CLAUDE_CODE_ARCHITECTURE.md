@@ -88,12 +88,14 @@ Adeptus/
 │   │   ├── add-mcp-server/SKILL.md
 │   │   ├── pentest-sandbox/SKILL.md
 │   │   └── compact-handoff/SKILL.md
-│   └── hooks/                        # Deterministic guardrails (shell)
-│       ├── pre-bash-guard.sh
-│       ├── post-edit-format.sh
-│       ├── pre-commit-secrets.sh
-│       ├── stop-checkpoint.sh
-│       └── session-start.sh
+│   └── hooks/                        # Deterministic guardrails (shell) — see §7
+│       ├── session-start.sh              # SessionStart: orientation + log scaffold
+│       ├── pre-bash-guard.sh             # target/command guard (defense-in-depth)
+│       ├── pre-bash-guard-with-logging.sh # PreToolUse wrapper: guard + [BLOCKED] log
+│       ├── post-edit-format.sh           # PostToolUse: fast per-edit format/lint
+│       ├── post-tool-problem-logger.sh   # PostToolUse: log failures / auto-resolve
+│       ├── stop-checkpoint.sh            # Stop: append progress to slice spec
+│       └── stop-typecheck.sh             # Stop: per-turn mypy + eslint + tsc
 ├── CLAUDE.md                         # Project DNA — see §3
 ├── AGENTS.md                         # Subagent coordination protocol — see §4
 ├── README.md
@@ -193,82 +195,12 @@ Adeptus/
 
 This file gets injected into every session's system prompt. It survives `/clear`, `/compact`, and context resets. **Every byte costs you across the whole project**, so it stays short. Anything verbose lives in a skill or a doc that gets loaded on demand.
 
-The template (drop verbatim, edit values in `< >`):
-
-```markdown
-# Adeptus
-
-Locally-deployable AI-assisted pentest platform. See `docs/requirements.md` for full spec.
-
-## Stack
-- Backend: Python 3.12, FastAPI (async), SQLAlchemy 2.x async, Alembic, Pydantic v2, pytest
-- Frontend: Vite + React 18 + TypeScript (strict), TanStack Query, Zustand, Tailwind, shadcn/ui, Vitest, Playwright
-- DB: PostgreSQL 16 + pgvector
-- LLM (local): Ollama. Cloud: Anthropic Claude API (optional, per-engagement).
-- MCP: stdio subprocesses per tool category. See `docs/architecture.md#mcp`.
-
-## Commands (run from repo root)
-- `make dev`           — full stack up (compose, hot-reload)
-- `make test`          — backend + frontend tests + lint + typecheck
-- `make test-backend`  — pytest only
-- `make test-frontend` — vitest + playwright
-- `make lint`          — ruff + mypy + eslint + tsc --noEmit
-- `make format`        — ruff format + prettier
-- `make migrate`       — alembic upgrade head
-- `make sandbox`       — bring up Juice Shop on http://localhost:3000
-
-## Conventions — Backend
-- PEP 8 enforced by Ruff. Line length 100. Type hints mandatory.
-- One folder per feature under `app/features/<name>/`. NEVER add to `core/` or `shared/`
-  without an ADR in `docs/decisions/`.
-- Every feature folder: `router.py`, `schemas.py`, `models.py`, `service.py`,
-  `repository.py`, `tests/`. Don't merge layers into one file even when small.
-- Async everywhere. No sync SQLAlchemy sessions. No blocking I/O in routes.
-- Errors: raise domain exceptions in `service.py`, translate to HTTP in `router.py`
-  via `core.errors.handlers`.
-
-## Conventions — Frontend
-- TypeScript strict. No `any`. Use `unknown` + narrowing.
-- TanStack Query for server state. Zustand for ephemeral client state. No Redux.
-- API client auto-generated from OpenAPI into `frontend/src/shared/api/`. Don't hand-write.
-- Tailwind classes only — no inline styles, no styled-components.
-
-## Conventions — Tests
-- Pragmatic TDD: write tests alongside the code, must pass before commit.
-- Coverage gate: 80% on `backend/app/features/*`, 60% on `frontend/src/features/*`.
-- External services (Ollama, Anthropic, Docker, MCP subprocesses) MUST be mocked
-  in unit tests. Integration tests use the sandbox compose stack.
-- Pentest tools NEVER run against external targets in tests. Only `sandbox/juice-shop`.
-
-## Workflow
-- Vertical slices. One slice = one PR. Slices live in `docs/slices/`.
-- Plan-gated: every slice has a `docs/slices/slice-NN-*.md` with a plan section.
-  Wait for human approval on the plan before executing the slice.
-- Branch naming: `slice-NN-short-name`.
-- Commit style: Conventional Commits. One logical change per commit.
-
-## How to navigate the codebase
-- "Where does X live?" → `app/features/<X>/` and `src/features/<X>/`.
-- "What's the source of truth for slice plans?" → `docs/slices/PROJECT_PLAN.md`.
-- "Why was a decision made?" → `docs/decisions/`.
-- "How does single-writer-per-engagement work?" → `docs/decisions/0001-*.md`
-  and `app/features/graph/writer.py`.
-
-## Anti-patterns (do not do these)
-- Don't widen `core/` or `shared/` without an ADR.
-- Don't write to the graph outside the single-writer process (§8.2 of requirements).
-- Don't redact data before sending to the LLM. Privacy lives at the engagement
-  toggle and the egress pattern-friction layer.
-- Don't add provenance fields to entities — the audit log is the source of truth.
-- Don't run pentest tools against anything other than the sandbox in dev/test.
-
-## When stuck
-Stop and ask. Don't invent file paths, API shapes, or library APIs.
-Use the `Context7` MCP to check current docs for FastAPI, SQLAlchemy, React,
-Tailwind, shadcn, Playwright, etc.
-```
-
-Total: ~80 lines. Stays under ~1200 tokens. That's the budget.
+The live file is **`./CLAUDE.md`** at the repo root — read it there; it is the single
+source of truth and is what actually gets injected into every session. It is
+deliberately NOT copied into this doc: an inlined copy only drifts (this section used
+to hold one, and it had). The same budget discipline still applies — keep `CLAUDE.md`
+short (roughly ~80 lines / ~1200 tokens); anything verbose belongs in a skill or an
+on-demand doc.
 
 ---
 
@@ -276,39 +208,10 @@ Total: ~80 lines. Stays under ~1200 tokens. That's the budget.
 
 A short file (~30 lines) that tells Claude **when** to fork off a subagent versus do work in the main loop. Subagents have their own context windows; the main loop only sees their summary. Without this file, Claude won't reach for them and your main context will bloat.
 
-```markdown
-# Subagent coordination
-
-Subagent definitions are in `.claude/agents/`. Use them aggressively — every
-investigation, review, or research task should be delegated, not done in the
-main loop. The main loop's job is orchestration, not exploration.
-
-## When to delegate
-
-| Task | Subagent |
-|---|---|
-| Read 5+ files to answer a "where does X happen" question | `architect` |
-| Plan a new slice (decompose requirements → tasks) | `slice-planner` |
-| Implement a single feature folder from an approved plan | `implementer` |
-| Write or expand tests for a feature | `test-writer` |
-| Review a finished slice before PR | `code-reviewer` |
-| Security/threat-model a slice that touches auth, MCP, or audit | `security-reviewer` |
-| Update `docs/architecture.md` or write an ADR | `docs-writer` |
-
-## Handoff format (use this every time)
-
-When delegating, include:
-- **Goal**: one sentence
-- **Files in scope**: explicit list of paths
-- **Files OUT of scope**: paths the subagent must not touch
-- **Done when**: testable acceptance criterion
-- **Return**: what to put in the summary
-
-## What never goes in a subagent
-- Final approval of a plan (that's the human)
-- Committing/pushing to git (main loop only, after human ack)
-- Anything destructive in `/sandbox` (run interactively so the user sees it)
-```
+The live file is **`./AGENTS.md`** at the repo root — read it there for the current
+delegation rules, the when-to-fork table, and the handoff format. It is not copied into
+this doc, for the same drift-avoidance reason as `CLAUDE.md` above: one source of truth,
+not two.
 
 ---
 
@@ -318,65 +221,17 @@ Each lives at `.claude/agents/<name>.md`. Frontmatter format from current Claude
 
 | Agent | Purpose | Tools | Model |
 |---|---|---|---|
-| `architect` | Read-only codebase exploration; answers "where/why/how" questions without polluting main context | Read, Grep, Glob | sonnet |
-| `slice-planner` | Reads `docs/requirements.md` + `docs/slices/PROJECT_PLAN.md`, produces the next slice's full spec | Read, Grep, Glob, Write (to `docs/slices/` only) | sonnet |
+| `architect` | Read-only codebase exploration; answers "where/why/how" questions without polluting main context | Read, Grep, Glob | haiku |
+| `slice-planner` | Reads `docs/requirements.md` + `docs/slices/PROJECT_PLAN.md`, produces the next slice's full spec | Read, Grep, Glob, Write (to `docs/slices/` only) | opus |
 | `implementer` | Executes an approved slice plan; writes code + tests; can edit, run tests | Read, Write, Edit, Bash | sonnet |
 | `test-writer` | Writes pytest / vitest tests against a spec; runs them; reports pass/fail | Read, Write, Edit, Bash | sonnet |
 | `code-reviewer` | Reviews a diff against CLAUDE.md conventions + the slice plan; returns findings with severity | Read, Grep, Glob, Bash (git diff) | sonnet |
-| `security-reviewer` | Threat-models slices that touch auth, MCP, secrets, audit, single-writer, RAG isolation | Read, Grep, Glob | sonnet |
+| `security-reviewer` | Threat-models slices that touch auth, MCP, secrets, audit, single-writer, RAG isolation | Read, Grep, Glob, Bash | opus |
 | `docs-writer` | Updates architecture doc, writes ADRs, keeps slice docs synced with reality | Read, Write, Edit, Grep | sonnet (cheap, mostly text) |
 
-A representative example:
-
-```markdown
----
-name: slice-planner
-description: |
-  Plans the next vertical slice for Adeptus. Reads docs/requirements.md and
-  docs/slices/PROJECT_PLAN.md, picks the next slice (or refines the one the
-  user names), and writes a complete slice spec to docs/slices/slice-NN-*.md
-  using docs/slices/_template.md. Use proactively whenever the user says
-  "plan the next slice", "what's next", or "start slice N".
-tools: Read, Grep, Glob, Write
-model: sonnet
----
-
-You are the slice planner for Adeptus.
-
-## Inputs
-- `docs/requirements.md` — the locked spec (authoritative, never modify)
-- `docs/slices/PROJECT_PLAN.md` — ordered backlog with status
-- `docs/slices/_template.md` — the spec template
-- `docs/architecture.md` — current high-level architecture
-- Existing slices under `docs/slices/slice-*.md` (read for context only)
-
-## Method
-1. If user named a slice, locate it. Otherwise pick the next `Status: todo`
-   from PROJECT_PLAN.md whose dependencies are all `Status: done`.
-2. Re-read the relevant sections of requirements.md.
-3. Use `architect` agent if you need to read implementation details from
-   /backend or /frontend — never read more than 3 source files yourself.
-4. Produce `docs/slices/slice-NN-<kebab>.md` matching the template exactly:
-   - Goal (1 sentence)
-   - User-visible outcome (the demo)
-   - Out of scope (what this slice intentionally does NOT do)
-   - Contract (OpenAPI snippet for new/changed endpoints)
-   - Backend tasks (ordered, each independently testable)
-   - Frontend tasks (ordered)
-   - Data model changes (Alembic migration sketch)
-   - Test plan (unit + integration + e2e if applicable)
-   - Acceptance criteria (executable: which `make` command proves it works)
-   - Risks & open questions for the human
-5. Update PROJECT_PLAN.md: set this slice's `Status: planned`.
-6. Return: path to the new file + a 5-line summary + the open questions.
-
-## Never
-- Write code. You write specs.
-- Mark a slice `done` or `in-progress` — that's the implementer/finisher.
-- Combine two slices into one. If two things naturally couple, write two specs
-  and document the dependency.
-- Skip the open-questions section. If there are none, write "None".
-```
+Each agent's full definition (description, tools, model, and instructions) lives in its
+own `.claude/agents/<name>.md` file — read those for the authoritative version. They are
+not reproduced here, to avoid the inlined-copy drift this doc is shedding elsewhere.
 
 ---
 
@@ -392,289 +247,98 @@ The roster:
 |---|---|---|
 | `plan-project` | "plan the project", "break down the requirements" — once at start | Reads `docs/requirements.md` and emits `docs/slices/PROJECT_PLAN.md` with every slice ordered by dependency. Then stops. |
 | `pick-next-slice` | "what's next", "next slice" | Looks at PROJECT_PLAN.md, picks the next unblocked todo, delegates spec-writing to `slice-planner` subagent |
-| `start-slice` | "start slice N", "let's do slice X" | Loads the slice spec, runs `/clear` ritual, creates branch, opens GitHub Issue, asks for plan approval |
-| `next-task-in-slice` | "next step", "what now" mid-slice | Reads the in-progress slice spec + git log + last commit, returns the next ordered task |
-| `finish-slice` | "finish slice", "ship it", "wrap up" | Runs full test gate, generates PR body from slice spec, closes the GitHub Issue, marks slice done in PROJECT_PLAN.md |
+| `start-slice` | "start slice N", "let's do slice X" | Creates the branch, opens the GitHub Issue, updates PROJECT_PLAN status, prints the plan for approval — then hands the `/clear` back to the human before any code is written |
+| `next-task-in-slice` | "next step", "what now" mid-slice | Reads the in-progress slice spec + git log, matches `(task N)` commit tokens to find the next ordered task |
+| `finish-slice` | "finish slice", "ship it", "wrap up" | Runs full test gate, generates PR body from slice spec, opens the PR, closes the GitHub Issue, marks slice `in-review` in PROJECT_PLAN.md (becomes `done` only after the human merges) |
 | `add-feature-folder` | "create feature X", "scaffold X" | Generates the canonical 6-file feature folder (router/schemas/models/service/repository/deps + tests/) for both backend and frontend |
 | `write-alembic-migration` | "migration for X", "alembic" | Generates Alembic migration with both up and down, runs autogenerate against current models, validates downgrade works |
 | `add-mcp-server` | "new MCP server", "wrap tool X as MCP" | Scaffolds a new MCP server from `mcp-servers/_template/`, declares weight + capability flags, adds it to the static MCP config |
 | `pentest-sandbox` | "test against juice shop", "run X against sandbox" | Brings up the Juice Shop compose stack, points the tool at it, never anywhere else |
 | `compact-handoff` | "context is getting full", "compact" | Writes session state to `docs/slices/slice-NN-*.md#progress`, runs `/compact` with structured preservation instructions |
+| `switch-task` | "switch to", "new task", "let's do X instead" | Preserves the current slice's state, then hands a clean context switch to an unrelated task |
+| `review-problems` | "problem summary", "what broke during slice N" | Reads `docs/logs/problems.log`, groups OPEN/BLOCKED/RESOLVED entries by slice + type, surfaces recurring patterns |
+| `audit-drift` | "are we drifting", "codebase health", "did this slice stay on plan" | Read-only audit of the slice's changes vs. the source-of-truth docs; emits a Drift & Health Report (also the final gate inside `finish-slice`) |
 
 **The three "next steps" skills (your D-layered planner)** map to: `plan-project` (project layer), `pick-next-slice` (slice layer), `next-task-in-slice` (task layer). All three exist, each is triggered by different language, each produces a different artifact.
 
-### Example: `pick-next-slice/SKILL.md`
+### The skill files themselves
 
-```markdown
----
-name: pick-next-slice
-description: |
-  Picks the next vertical slice to work on for Adeptus by reading
-  docs/slices/PROJECT_PLAN.md, finding the next slice whose Status is todo
-  and whose dependencies are all done, and delegating spec-writing to the
-  slice-planner subagent. Use when the user asks "what's next", "pick next
-  slice", or seems unsure what to work on after finishing a slice.
-allowed-tools: Read, Grep
----
-
-# Pick the next slice
-
-## Steps
-
-1. Read `docs/slices/PROJECT_PLAN.md`.
-2. Find the first slice where:
-   - `Status: todo`
-   - Every entry in its `Depends on:` list has `Status: done`
-3. If none found, summarize what's blocked and ask the user.
-4. If found, output:
-   - The slice number, name, and one-line goal.
-   - The current PROJECT_PLAN entry verbatim.
-5. Ask the user: "Plan it? (delegates to slice-planner subagent)"
-6. On yes, delegate to the `slice-planner` subagent with the slice number.
-
-## Do not
-- Write the spec yourself (that's the subagent's job).
-- Mark anything done or in-progress.
-- Modify PROJECT_PLAN.md.
-```
-
-### Example: `start-slice/SKILL.md` — the per-slice ritual
-
-```markdown
----
-name: start-slice
-description: |
-  Starts work on an approved slice for Adeptus. Loads the slice spec,
-  resets context, creates the git branch, opens a tracking GitHub Issue,
-  and asks for human approval of the plan before any code is written.
-  Use when the user says "start slice N", "let's do slice X", or after
-  pick-next-slice has produced an approved spec.
-allowed-tools: Read, Bash
----
-
-# Start a slice (plan-gated)
-
-## Steps
-
-1. Confirm the slice spec exists at `docs/slices/slice-NN-*.md`.
-2. Run `/clear` to drop accumulated context from the previous slice.
-3. After clear, re-load: CLAUDE.md (auto), the slice spec, the PROJECT_PLAN entry.
-4. Create the branch: `git checkout -b slice-NN-<kebab>`.
-5. Open a GitHub Issue mirroring the slice spec
-   (`gh issue create --title "Slice NN: ..." --body-file docs/slices/slice-NN-*.md`).
-6. Print the slice's PLAN section to the user. Stop. Ask:
-   "Approve this plan? (y/N/edit)"
-7. Only on `y`, delegate the first task to the `implementer` subagent.
-8. On `edit`, surface the changes to the spec file and re-confirm.
-9. On `N` or no answer, do not write any code.
-
-## Never
-- Write code before the human types `y`.
-- Skip the /clear (this is the whole point of plan-gated workflow).
-- Combine multiple slices in one branch.
-```
+Every skill's full body lives at `.claude/skills/<name>/SKILL.md` — read those for the
+authoritative, current steps and hard rules. They are not reproduced here: inlined copies
+drift (the previous copies of `pick-next-slice` and `start-slice` in this doc had already
+fallen behind their live files). The table above is a navigational summary; the live
+`.claude/skills/` directory is the source of truth.
 
 ---
 
 ## 7. Hooks — the deterministic gates
 
-These do not depend on Claude understanding anything. They run shell scripts and exit-code their way to blocking or allowing actions. Defined in `.claude/settings.json`.
+These do not depend on Claude understanding anything. They run shell scripts and exit-code their way to blocking or allowing actions.
 
-### The settings.json
+The authoritative definition lives in `.claude/settings.json` — this section
+explains intent and rationale, not a copy (an earlier inlined copy of it had already
+drifted from the live file, which is exactly the failure mode we're removing). Read
+the live files for exact behavior:
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(make:*)",
-      "Bash(uv:*)",
-      "Bash(pytest:*)",
-      "Bash(npm:*)",
-      "Bash(pnpm:*)",
-      "Bash(git diff:*)",
-      "Bash(git status)",
-      "Bash(git log:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git checkout:*)",
-      "Bash(gh:*)",
-      "Bash(alembic:*)",
-      "Bash(ruff:*)",
-      "Bash(mypy:*)",
-      "Bash(docker compose:*)"
-    ],
-    "deny": [
-      "Bash(rm -rf /:*)",
-      "Bash(git push --force:*)",
-      "Bash(git reset --hard HEAD~:*)"
-    ]
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          { "type": "command", "command": ".claude/hooks/session-start.sh" }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          { "type": "command", "command": ".claude/hooks/pre-bash-guard.sh" }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          { "type": "command", "command": ".claude/hooks/post-edit-format.sh" }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": ".claude/hooks/stop-checkpoint.sh" }
-        ]
-      }
-    ]
-  }
-}
-```
+- `.claude/settings.json` — permissions + the hook wiring described below
+- `.claude/hooks/*.sh` — the scripts themselves (each carries a header comment)
 
-### `pre-bash-guard.sh` — block pentest tools against non-sandbox targets, plus dangerous commands
+### Wired hooks (what settings.json actually registers)
 
-Reads the pending tool call as JSON on stdin. Exits `2` to block with a message Claude will see on stderr.
+- **SessionStart → `session-start.sh`** — prints branch + active slice + top of
+  PROJECT_PLAN for orientation, and bootstraps the problem-log scaffold
+  (`docs/logs/details/` + `docs/logs/problems.log`) so the loggers below are never
+  silently off on a fresh clone.
 
-```bash
-#!/usr/bin/env bash
-# .claude/hooks/pre-bash-guard.sh
-set -euo pipefail
+- **PreToolUse `Bash` → `pre-bash-guard-with-logging.sh`** — a thin wrapper that runs
+  `pre-bash-guard.sh` and, when it blocks (exit 2), appends a `[BLOCKED]` entry to
+  `docs/logs/problems.log` before re-emitting the guard's message. The guard itself is
+  **defense-in-depth, not a security boundary**: it tokenizes the command, extracts the
+  actual target arguments, and blocks pentest tools (and unknown network-capable tools)
+  aimed at anything outside the sandbox allowlist (localhost / 127.0.0.1 / ::1 /
+  juice-shop / host.docker.internal). It also blocks destructive git, `rm -rf` outside
+  scratch paths, and piping `curl`/`wget` downloads into a shell. It is trivially
+  bypassable by design — real authorization and network isolation live elsewhere.
 
-payload="$(cat)"
-cmd="$(echo "$payload" | jq -r '.tool_input.command // ""')"
+- **PostToolUse `Write|Edit|str_replace_based_edit` → `post-edit-format.sh` +
+  `post-tool-problem-logger.sh`** — the formatter runs only fast, file-local checks
+  (ruff format + `ruff check` for Python; prettier for web/docs). The logger records
+  failures and auto-resolves open entries when a later test/lint run passes.
 
-# 1. Block destructive git
-if echo "$cmd" | grep -qE '(git\s+push\s+--force|git\s+reset\s+--hard\s+HEAD~|git\s+clean\s+-fdx)'; then
-  echo "Blocked: destructive git operation. Ask the user before retrying." >&2
-  exit 2
-fi
+- **PostToolUse `Bash` → `post-tool-problem-logger.sh`** — failure logging only. The
+  formatter is deliberately NOT on the Bash matcher: there is no `file_path` there to
+  act on.
 
-# 2. Block pentest tools unless target is localhost / juice-shop / 127.0.0.1
-if echo "$cmd" | grep -qE '^(nmap|gobuster|ffuf|sqlmap|nikto|hydra|wpscan)\b'; then
-  if ! echo "$cmd" | grep -qE '(localhost|127\.0\.0\.1|juice-shop|host\.docker\.internal:3000)'; then
-    echo "Blocked: pentest tool against non-sandbox target. Run against the Juice Shop sandbox only (\`make sandbox\` then target localhost:3000)." >&2
-    exit 2
-  fi
-fi
+- **Stop → `stop-checkpoint.sh` + `stop-typecheck.sh`** — the checkpoint appends a
+  one-line progress entry to the active slice spec; the typecheck runs the slow,
+  import-graph-aware checks once per turn (mypy over the backend package, eslint +
+  `tsc --noEmit` over the frontend) and writes a concise summary to stderr so Claude
+  self-corrects next turn. Both are non-blocking (always exit 0).
 
-# 3. Block bare `rm -rf` outside /tmp or node_modules
-if echo "$cmd" | grep -qE 'rm\s+-rf\s+/' && ! echo "$cmd" | grep -qE 'rm\s+-rf\s+(/tmp|node_modules|\./node_modules|dist|\.venv)'; then
-  echo "Blocked: rm -rf outside known scratch paths. If intentional, run manually." >&2
-  exit 2
-fi
+**Why the per-edit / per-turn split:** mypy and tsc need the whole import graph, so
+running them per single file is both slow and inaccurate (it produces spurious errors
+Claude may then chase). Fast formatting stays on every edit; the heavy typecheck runs
+once at Stop.
 
-exit 0
-```
+### Secret scanning is NOT a Claude hook
 
-### `post-edit-format.sh` — format + lint + typecheck on every edit
-
-Best-effort; non-blocking unless lint fails. Claude reads the stderr summary on failure and self-corrects on the next turn.
-
-```bash
-#!/usr/bin/env bash
-# .claude/hooks/post-edit-format.sh
-set -uo pipefail
-cd "$CLAUDE_PROJECT_DIR" || exit 0
-
-payload="$(cat)"
-file="$(echo "$payload" | jq -r '.tool_input.file_path // .tool_input.path // ""')"
-
-case "$file" in
-  *.py)
-    ruff format "$file" 2>/dev/null || true
-    if ! ruff check "$file" 2>&1; then
-      echo "Ruff lint failed on $file. Fix before continuing." >&2
-    fi
-    ;;
-  *.ts|*.tsx|*.js|*.jsx)
-    (cd frontend && npx prettier --write "../$file" 2>/dev/null) || true
-    (cd frontend && npx eslint "../$file" 2>&1) || \
-      echo "ESLint failed on $file. Fix before continuing." >&2
-    ;;
-  *.md|*.json|*.yml|*.yaml)
-    npx prettier --write "$file" 2>/dev/null || true
-    ;;
-esac
-
-# Always non-blocking — Claude reads stderr and fixes on next turn
-exit 0
-```
-
-### `stop-checkpoint.sh` — write progress to the slice doc
-
-Whenever Claude finishes a turn (Stop event), this appends a one-line "what just happened" summary to the current slice's `## Progress` section. Combined with `compact-handoff` skill, this means a `/clear` or `/compact` never loses where you are.
-
-```bash
-#!/usr/bin/env bash
-# .claude/hooks/stop-checkpoint.sh
-set -uo pipefail
-cd "$CLAUDE_PROJECT_DIR" || exit 0
-
-branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
-slice_num="$(echo "$branch" | grep -oE '^slice-[0-9]+' | grep -oE '[0-9]+' || true)"
-[ -z "$slice_num" ] && exit 0
-
-slice_file="$(ls docs/slices/slice-${slice_num}-*.md 2>/dev/null | head -1)"
-[ -z "$slice_file" ] && exit 0
-
-last_commit="$(git log -1 --format='%h %s' 2>/dev/null || echo 'no commits yet')"
-ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-# Append to ## Progress section if it exists
-if grep -q '^## Progress' "$slice_file"; then
-  printf -- '- %s — %s\n' "$ts" "$last_commit" >> "$slice_file"
-fi
-exit 0
-```
-
-### `session-start.sh` — print orientation on every new session
-
-```bash
-#!/usr/bin/env bash
-# .claude/hooks/session-start.sh
-set -uo pipefail
-cd "$CLAUDE_PROJECT_DIR" || exit 0
-
-branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
-echo "== Adeptus session =="
-echo "Branch: $branch"
-
-if echo "$branch" | grep -qE '^slice-[0-9]+'; then
-  slice_num="$(echo "$branch" | grep -oE '[0-9]+' | head -1)"
-  slice_file="$(ls docs/slices/slice-${slice_num}-*.md 2>/dev/null | head -1)"
-  [ -n "$slice_file" ] && echo "Active slice spec: $slice_file"
-fi
-
-# Top of project plan
-if [ -f docs/slices/PROJECT_PLAN.md ]; then
-  echo "--- Project status (top of PROJECT_PLAN.md) ---"
-  head -40 docs/slices/PROJECT_PLAN.md
-fi
-exit 0
-```
+There is no Claude PreToolUse secret-scan hook (and no `pre-commit-secrets.sh` — despite
+older drafts of this doc). Secret scanning lives in the **pre-commit framework**, in
+`.pre-commit-config.yaml`: `gitleaks` (id `gitleaks`, shown as "Detect hardcoded
+secrets") plus the `detect-private-key` hook. A `secret-scan.yml` GitHub Action runs
+gitleaks on push as the CI backstop. Don't look for secret scanning among the Claude
+hooks above.
 
 ### Pre-commit (separate from Claude Code hooks)
 
-Same checks at the git layer with `pre-commit` framework. This catches anything Claude bypasses or anything you write manually. Config in `.pre-commit-config.yaml`:
+The same classes of check also run at the git layer via the `pre-commit` framework,
+catching anything Claude bypasses or anything written manually. The authoritative list
+is `.pre-commit-config.yaml`; at time of writing it covers:
 
-- Ruff format + check
-- mypy on `backend/app/`
-- ESLint + Prettier on frontend
-- `gitleaks` for secret scanning
-- `pytest --collect-only` to catch broken imports
+- Ruff format + check (backend + mcp-servers)
+- mypy — two passes: `backend/app/` and `mcp-servers/`
+- ESLint + `tsc --noEmit` (frontend)
+- gitleaks + detect-private-key (secret scanning)
 - Conventional Commits message check
 
 ---
