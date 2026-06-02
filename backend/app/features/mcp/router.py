@@ -30,7 +30,7 @@ from app.features.auth.models import User
 from app.features.mcp import service
 from app.features.mcp.schemas import McpServerInfo, ToolRunCreate, ToolRunResult
 from app.features.mcp.service import EngagementNotFound, NotMember
-from app.features.mcp.subprocess_manager import McpServerDown, McpServerNotFound
+from app.features.mcp.subprocess_manager import McpServerDown, McpServerNotFound, McpToolNotFound
 
 router = APIRouter(tags=["mcp"])
 
@@ -101,6 +101,11 @@ async def execute_tool_run(
             content={"error": {"code": "forbidden", "message": exc.message}},
         )
     except McpServerNotFound as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "bad_request", "message": exc.message}},
+        )
+    except McpToolNotFound as exc:
         return JSONResponse(
             status_code=400,
             content={"error": {"code": "bad_request", "message": exc.message}},

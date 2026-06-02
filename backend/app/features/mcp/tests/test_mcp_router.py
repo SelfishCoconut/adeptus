@@ -43,7 +43,7 @@ from app.features.mcp import models as mcp_models  # noqa: F401 — registers OR
 from app.features.mcp.router import router as mcp_router
 from app.features.mcp.schemas import McpServerInfo, McpToolDeclaration, ToolRunResult
 from app.features.mcp.service import EngagementNotFound, NotMember
-from app.features.mcp.subprocess_manager import McpServerDown, McpServerNotFound
+from app.features.mcp.subprocess_manager import McpServerDown, McpServerNotFound, McpToolNotFound
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -312,6 +312,31 @@ async def test_execute_tool_run_returns_400_for_unknown_server(
     assert resp.status_code == 400
     body = resp.json()
     assert body["error"]["code"] == "bad_request"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_run_returns_400_for_unknown_tool_name(
+    regular_client: AsyncClient,
+) -> None:
+    """McpToolNotFound (JSON-RPC -32601) from subprocess → 400 Bad Request.
+
+    Unknown tool name is a client error; it must NOT return 503.
+    """
+    with patch(
+        "app.features.mcp.router.service.execute_tool_run",
+        new=AsyncMock(
+            side_effect=McpToolNotFound(
+                "MCP server 'shell-exec' tool 'bad_tool' not found: "
+                "{'code': -32601, 'message': 'Tool not found: bad_tool'}"
+            )
+        ),
+    ):
+        body = {**_TOOL_RUN_BODY, "tool_name": "bad_tool"}
+        resp = await regular_client.post("/api/v1/tool-runs", json=body)
+
+    assert resp.status_code == 400
+    data = resp.json()
+    assert data["error"]["code"] == "bad_request"
 
 
 @pytest.mark.asyncio

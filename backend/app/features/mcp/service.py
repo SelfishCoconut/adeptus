@@ -38,7 +38,10 @@ from app.features.mcp.schemas import (
     McpToolDeclaration,
     ToolRunResult,
 )
-from app.features.mcp.subprocess_manager import McpServerNotFound  # re-export for router
+from app.features.mcp.subprocess_manager import (
+    McpServerNotFound,  # re-export for router
+    McpToolNotFound,  # re-export for router  # noqa: F401
+)
 
 logger = logging.getLogger(__name__)
 
