@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import sys
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -102,6 +103,7 @@ class TestRunCommand:
             "echo hello",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
 
     @pytest.mark.asyncio
@@ -156,13 +158,15 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_timeout_seconds_override_honoured(self) -> None:
         """timeout_seconds is forwarded to asyncio.wait_for; when it fires,
-        exit_code 124 is returned with a timeout message in stderr."""
+        exit_code 124 is returned with a timeout message in stderr.
+        The entire process group is killed via os.killpg."""
 
         async def _slow_communicate() -> tuple[bytes, bytes]:
             await asyncio.sleep(9999)
             return b"", b""
 
         mock_proc = MagicMock()
+        mock_proc.pid = 42000
         mock_proc.returncode = None
         mock_proc.communicate = _slow_communicate
         mock_proc.kill = MagicMock()
@@ -182,13 +186,19 @@ class TestRunCommand:
                 return await original_wait_for(coro, timeout)
 
             mock_shell.return_value = mock_proc
-            with patch("server.asyncio.wait_for", side_effect=_patched_wait_for):
+            with (
+                patch("server.asyncio.wait_for", side_effect=_patched_wait_for),
+                patch("server.os.getpgid", return_value=42000) as mock_getpgid,
+                patch("server.os.killpg") as mock_killpg,
+            ):
                 result = await _run_command({"command": "sleep 9999", "timeout_seconds": 1})
 
         assert result["exit_code"] == 124
         assert "timed out" in result["stderr"]
         assert result["stdout"] == ""
-        mock_proc.kill.assert_called_once()
+        # Verify process group kill was attempted.
+        mock_getpgid.assert_called_once_with(42000)
+        mock_killpg.assert_called_once_with(42000, signal.SIGKILL)
 
     @pytest.mark.asyncio
     async def test_default_timeout_is_30_seconds(self) -> None:
@@ -378,8 +388,8 @@ class TestRunCommandErrorPaths:
         assert "Failed to start subprocess" in result["stderr"]
 
     @pytest.mark.asyncio
-    async def test_processlookuperror_on_kill_is_swallowed(self) -> None:
-        """If process.kill() raises ProcessLookupError (process already gone),
+    async def test_processlookuperror_on_killpg_is_swallowed(self) -> None:
+        """If os.getpgid raises ProcessLookupError (process already gone),
         the timeout path still returns exit_code 124."""
 
         async def _never_finishes() -> tuple[bytes, bytes]:
@@ -387,9 +397,10 @@ class TestRunCommandErrorPaths:
             return b"", b""
 
         mock_proc = MagicMock()
+        mock_proc.pid = 99999
         mock_proc.returncode = None
         mock_proc.communicate = _never_finishes
-        mock_proc.kill = MagicMock(side_effect=ProcessLookupError)
+        mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock(return_value=None)
 
         original_wait_for = asyncio.wait_for
@@ -402,7 +413,46 @@ class TestRunCommandErrorPaths:
 
         with patch("server.asyncio.create_subprocess_shell", new_callable=AsyncMock) as mock_shell:
             mock_shell.return_value = mock_proc
-            with patch("server.asyncio.wait_for", side_effect=_patched_wait_for):
+            with (
+                patch("server.asyncio.wait_for", side_effect=_patched_wait_for),
+                patch("server.os.getpgid", side_effect=ProcessLookupError),
+            ):
+                result = await _run_command({"command": "sleep 9999", "timeout_seconds": 1})
+
+        assert result["exit_code"] == 124
+        assert "timed out" in result["stderr"]
+
+    @pytest.mark.asyncio
+    async def test_fallback_kill_called_when_killpg_raises_generic_oserror(self) -> None:
+        """If os.killpg raises a generic OSError (e.g. unsupported platform),
+        process.kill() is called as a fallback and exit_code 124 is returned."""
+
+        async def _never_finishes() -> tuple[bytes, bytes]:
+            await asyncio.sleep(9999)
+            return b"", b""
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 99998
+        mock_proc.returncode = None
+        mock_proc.communicate = _never_finishes
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = AsyncMock(return_value=None)
+
+        original_wait_for = asyncio.wait_for
+
+        async def _patched_wait_for(coro: Any, timeout: float) -> Any:  # noqa: ASYNC109
+            if timeout <= 1:
+                coro.close()
+                raise TimeoutError
+            return await original_wait_for(coro, timeout)
+
+        with patch("server.asyncio.create_subprocess_shell", new_callable=AsyncMock) as mock_shell:
+            mock_shell.return_value = mock_proc
+            with (
+                patch("server.asyncio.wait_for", side_effect=_patched_wait_for),
+                patch("server.os.getpgid", return_value=99998),
+                patch("server.os.killpg", side_effect=OSError("operation not permitted")),
+            ):
                 result = await _run_command({"command": "sleep 9999", "timeout_seconds": 1})
 
         assert result["exit_code"] == 124
@@ -419,6 +469,7 @@ class TestRunCommandErrorPaths:
             return b"", b""
 
         mock_proc = MagicMock()
+        mock_proc.pid = 99997
         mock_proc.returncode = None
         mock_proc.communicate = _never_finishes
         mock_proc.kill = MagicMock()
@@ -434,7 +485,11 @@ class TestRunCommandErrorPaths:
 
         with patch("server.asyncio.create_subprocess_shell", new_callable=AsyncMock) as mock_shell:
             mock_shell.return_value = mock_proc
-            with patch("server.asyncio.wait_for", side_effect=_patched_wait_for):
+            with (
+                patch("server.asyncio.wait_for", side_effect=_patched_wait_for),
+                patch("server.os.getpgid", return_value=99997),
+                patch("server.os.killpg"),
+            ):
                 result = await _run_command({"command": "sleep 9999", "timeout_seconds": 1})
 
         assert result["exit_code"] == 124

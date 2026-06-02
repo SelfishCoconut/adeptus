@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import sys
 from typing import Any
 
@@ -70,6 +72,7 @@ async def _run_command(arguments: dict[str, Any]) -> dict[str, Any]:
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
     except OSError as exc:
         return {
@@ -84,10 +87,19 @@ async def _run_command(arguments: dict[str, Any]) -> dict[str, Any]:
             timeout=timeout_seconds,
         )
     except TimeoutError:
+        # Kill the entire process group to reap any children spawned by the shell.
         try:
-            process.kill()
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except Exception:  # noqa: BLE001
+            # Fallback: kill just the shell process if killpg is unavailable
+            # (e.g. unsupported platform or process already gone).
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
         try:
             await process.wait()
         except Exception:  # noqa: BLE001
