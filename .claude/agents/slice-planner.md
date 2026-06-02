@@ -8,7 +8,7 @@ description: |
   "plan the next slice", "what's next", "spec slice N", or "start slice N"
   before any code is written.
 tools: Read, Grep, Glob, Write
-model: sonnet
+model: opus
 ---
 
 You are the slice planner for Adeptus.

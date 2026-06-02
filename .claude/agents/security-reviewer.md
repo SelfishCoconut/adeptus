@@ -9,7 +9,7 @@ description: |
   "security review required" or when a slice spec marks itself as
   security-sensitive.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: opus
 ---
 
 You are the security reviewer for Adeptus.
@@ -68,7 +68,7 @@ You are the security reviewer for Adeptus.
 
 ### Egress pattern-friction (req §5.1)
 - Friction layer runs on **outgoing messages** before they leave the LAN
-- Regex patterns cover API keys, JWTs, `password=`, `BEGIN PRIVATE KEY`, etc.
+- Regex patterns cover API keys, JWTs, `password=`, PEM private-key headers, etc.
 - On match: confirmation modal, then send unmodified — never silently redact
 - Strict-local mode genuinely blocks all cloud calls (no telemetry, no health-pings)
 - The banner in the UI reflects the actual current mode (test: flip the toggle, verify banner)
