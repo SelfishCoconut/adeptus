@@ -22,13 +22,25 @@ Functions:
 - find_live_edge       — duplicate-triple lookup for the uniqueness guard.
 """
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, desc, or_, select, update
+from sqlalchemy import and_, delete, desc, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.features.graph.models import GraphEdge, GraphEdgeHistory, GraphNode, GraphNodeHistory
+from app.features.graph.models import (
+    GraphEdge,
+    GraphEdgeHistory,
+    GraphNode,
+    GraphNodeHistory,
+    GraphUserUndoStack,
+)
+
+# Personal undo stack is capped to the most recent N active writes per owner
+# (§8.2 "their own last ~20 graph writes"). Enforced at push time in application
+# logic (not a DB constraint), per the Slice 09 data-model spec.
+UNDO_STACK_CAP = 20
 
 # ---------------------------------------------------------------------------
 # Nodes
@@ -325,6 +337,117 @@ async def get_edge(
     """Return the GraphEdge with the given id, or None if not found."""
     result = await db.execute(select(GraphEdge).where(GraphEdge.id == edge_id))
     return result.scalar_one_or_none()
+
+
+# ---------------------------------------------------------------------------
+# Personal undo stack (Slice 09)
+# ---------------------------------------------------------------------------
+
+
+async def list_active_undo_stack(
+    db: AsyncSession,
+    engagement_id: UUID,
+    user_id: UUID,
+) -> list[GraphUserUndoStack]:
+    """Return the owner's active undo-stack rows (undone=false), newest-first.
+
+    Ordered by (recorded_at DESC, id DESC) — the id tiebreaker makes ordering
+    deterministic on low-resolution clocks, mirroring the history-walk pattern.
+    """
+    result = await db.execute(
+        select(GraphUserUndoStack)
+        .where(
+            GraphUserUndoStack.engagement_id == engagement_id,
+            GraphUserUndoStack.user_id == user_id,
+            GraphUserUndoStack.undone.is_(False),
+        )
+        .order_by(desc(GraphUserUndoStack.recorded_at), desc(GraphUserUndoStack.id))
+    )
+    return list(result.scalars().all())
+
+
+async def get_top_active_undo_entry(
+    db: AsyncSession,
+    engagement_id: UUID,
+    user_id: UUID,
+) -> GraphUserUndoStack | None:
+    """Return the owner's most recent active undo-stack row, or None if empty."""
+    result = await db.execute(
+        select(GraphUserUndoStack)
+        .where(
+            GraphUserUndoStack.engagement_id == engagement_id,
+            GraphUserUndoStack.user_id == user_id,
+            GraphUserUndoStack.undone.is_(False),
+        )
+        .order_by(desc(GraphUserUndoStack.recorded_at), desc(GraphUserUndoStack.id))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def push_undo_entry(
+    db: AsyncSession,
+    *,
+    engagement_id: UUID,
+    user_id: UUID,
+    op_type: str,
+    entity_kind: str,
+    entity_id: UUID,
+    target_updated_at: datetime,
+    summary: str,
+) -> GraphUserUndoStack:
+    """Append one entry to the owner's personal undo stack and trim to the cap.
+
+    ``recorded_at`` is set from the application clock (microsecond precision on
+    every backend) so newest-first ordering is reliable even where the DB clock
+    is coarse (SQLite tests). After inserting, active rows for this owner beyond
+    UNDO_STACK_CAP (oldest-first) are hard-deleted so the personal stack holds
+    only the most recent ~20 writes (§8.2). The caller commits the transaction.
+
+    This touches ONLY graph_user_undo_stack — never a graph entity — so it cannot
+    violate the single-writer invariant (ADR-0001) and does NOT go through the
+    writer queue. Together with pop, this is one of the two chokepoints where
+    Slice 10 will attach audit emission (Decision 4); no audit module is imported.
+    """
+    entry = GraphUserUndoStack(
+        engagement_id=engagement_id,
+        user_id=user_id,
+        op_type=op_type,
+        entity_kind=entity_kind,
+        entity_id=entity_id,
+        target_updated_at=target_updated_at,
+        summary=summary,
+        recorded_at=datetime.now(UTC),
+    )
+    db.add(entry)
+    await db.flush()
+    await db.refresh(entry)
+
+    # Trim: hard-delete active rows beyond the cap (oldest fall off the bottom).
+    active = await list_active_undo_stack(db, engagement_id, user_id)
+    overflow = active[UNDO_STACK_CAP:]
+    if overflow:
+        await db.execute(
+            delete(GraphUserUndoStack).where(
+                GraphUserUndoStack.id.in_([row.id for row in overflow])
+            )
+        )
+        await db.flush()
+
+    return entry
+
+
+async def mark_undo_entry_undone(
+    db: AsyncSession,
+    entry: GraphUserUndoStack,
+) -> None:
+    """Mark a stack entry as undone so it leaves the active stack.
+
+    Used both when an entry is popped (its inverse applied) and when it is dropped
+    as stale. The row is retained (undone=true), not deleted. The caller commits.
+    """
+    entry.undone = True
+    await db.flush()
 
 
 async def find_live_edge(
