@@ -104,8 +104,8 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Goal**: Each user has 20-deep undo of their own writes; never reverts teammate work
 - **Requirements**: §8.2 (personal undo)
 - **Depends on**: 07
-- **Risky**: no
-- **Status**: todo
+- **Risky**: yes (single-writer + authorship surface — see slice-09 spec Decision 3)
+- **Status**: in-progress
 
 ### Slice 10: Audit log + hash-chain
 - **Goal**: Every action recorded; verify-chain CLI detects tampering; includes self_approved boolean
@@ -336,7 +336,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 
 These slices REQUIRE security-reviewer at finish-slice time:
 
-00, 03, 07, 10, 14, 16, 23, 24, 25, 29, 40
+00, 03, 07, 09, 10, 14, 16, 23, 24, 25, 29, 40
 
 ---
 
