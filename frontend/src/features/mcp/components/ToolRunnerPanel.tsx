@@ -59,7 +59,7 @@ export function ToolRunnerPanel({ engagementId }: ToolRunnerPanelProps) {
         <div role="tabpanel" className="flex flex-col gap-4">
           <ToolQueueStrip engagementId={engagementId} />
           <ToolRunnerForm engagementId={engagementId} onRunStarted={setActiveRunId} />
-          <ToolOutputConsole toolRunId={activeRunId} />
+          <ToolOutputConsole engagementId={engagementId} toolRunId={activeRunId} />
         </div>
       ) : (
         <div role="tabpanel">

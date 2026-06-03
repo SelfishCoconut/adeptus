@@ -29,9 +29,12 @@ vi.mock('./ToolRunnerForm', () => ({
 }))
 
 vi.mock('./ToolOutputConsole', () => ({
-  ToolOutputConsole: ({ toolRunId }: { toolRunId: string | null }) => (
-    <div>console:{toolRunId ?? 'none'}</div>
-  ),
+  ToolOutputConsole: ({
+    toolRunId,
+  }: {
+    engagementId: string
+    toolRunId: string | null
+  }) => <div>console:{toolRunId ?? 'none'}</div>,
 }))
 
 vi.mock('./ToolRunHistory', () => ({
