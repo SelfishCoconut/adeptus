@@ -32,6 +32,7 @@ const ENGAGEMENT_A: EngagementSummary = {
   created_at: '2026-01-01T00:00:00Z',
   member_role: 'owner',
   privacy_mode: 'local_only',
+  paused: false,
 }
 
 const ENGAGEMENT_B: EngagementSummary = {
@@ -41,6 +42,7 @@ const ENGAGEMENT_B: EngagementSummary = {
   created_at: '2026-02-01T00:00:00Z',
   member_role: 'member',
   privacy_mode: 'local_only',
+  paused: false,
 }
 
 const TOOL_RUN_RESULT: ToolRunResult = {

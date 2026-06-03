@@ -447,6 +447,60 @@
         }
       }
     },
+    "/api/v1/engagements/{engagement_id}/pause": {
+      "post": {
+        "tags": [
+          "engagements"
+        ],
+        "summary": "Set Engagement Paused",
+        "description": "Set or clear the engagement-wide tool pause.\n\nWhen ``paused=true``, every in-flight tool run for the engagement is killed,\nevery queued run is de-queued, and all subsequent POST /tool-runs are\nrejected 409 until resumed.  When ``paused=false``, new runs are allowed\nagain (already-killed runs are NOT resumed).  Membership-gated (\u00a717.1).\nIdempotent: setting the same state twice is a no-op success.",
+        "operationId": "set_engagement_paused",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngagementPauseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngagementPauseState"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/admin/mcp-servers": {
       "get": {
         "tags": [
@@ -655,6 +709,106 @@
         }
       }
     },
+    "/api/v1/tool-runs/{tool_run_id}/kill": {
+      "post": {
+        "tags": [
+          "mcp",
+          "tools"
+        ],
+        "summary": "Kill Tool Run",
+        "description": "Stop a single tool run.\n\nMembership-gated via the same ``get_tool_run`` + ``get_engagement_for_member``\nchokepoint used by the other tool-run endpoints \u2014 both a missing run and a\nnon-member caller return 404 to avoid existence disclosure (\u00a717.1).\n\nIdempotent: killing an already-terminal run returns 200 with the current state.\n\nReturns:\n    ``ToolRunResult`` \u2014 current state of the run after the kill signal is sent.\n\nRaises (translated to HTTP by the registered error handlers):\n    EngagementNotFound (NotFoundError \u2192 404): run not found or caller is not\n        a member of its engagement (no existence disclosure).",
+        "operationId": "kill_tool_run",
+        "parameters": [
+          {
+            "name": "tool_run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Tool Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolRunResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tool-runs/{tool_run_id}/timeout-decision": {
+      "post": {
+        "tags": [
+          "mcp",
+          "tools"
+        ],
+        "summary": "Submit Timeout Decision",
+        "description": "Answer a pending timeout prompt for a run in state ``awaiting_decision``.\n\nMembership-gated via the same chokepoint as kill_tool_run (\u00a717.1/\u00a74).\n\nReturns 409 when the run is not currently awaiting a decision \u2014 covers:\n- Already resolved (another member answered first).\n- Run is in a different state (running, completed, killed, etc.).\n- Unknown run ID (past the membership gate; unreachable in practice since\n  the membership gate returns 404 for unknown runs \u2014 listed for completeness).\n\nReturns:\n    ``ToolRunResult`` \u2014 current state after the decision is forwarded.\n\nRaises (translated to HTTP by registered handlers):\n    EngagementNotFound (NotFoundError \u2192 404): run not found or non-member.\n\nReturns inline:\n    409 when no run is awaiting a decision (TimeoutDecisionConflict).",
+        "operationId": "submit_timeout_decision",
+        "parameters": [
+          {
+            "name": "tool_run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Tool Run Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TimeoutDecision"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolRunResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/engagements/{engagement_id}/tool-queue": {
       "get": {
         "tags": [
@@ -821,6 +975,11 @@
           "concurrency_slot_limit": {
             "type": "integer",
             "title": "Concurrency Slot Limit"
+          },
+          "paused": {
+            "type": "boolean",
+            "title": "Paused",
+            "default": false
           }
         },
         "type": "object",
@@ -837,6 +996,50 @@
           "concurrency_slot_limit"
         ],
         "title": "EngagementDetail"
+      },
+      "EngagementPauseRequest": {
+        "properties": {
+          "paused": {
+            "type": "boolean",
+            "title": "Paused"
+          }
+        },
+        "type": "object",
+        "required": [
+          "paused"
+        ],
+        "title": "EngagementPauseRequest",
+        "description": "Request body for POST /api/v1/engagements/{id}/pause."
+      },
+      "EngagementPauseState": {
+        "properties": {
+          "engagement_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Engagement Id"
+          },
+          "paused": {
+            "type": "boolean",
+            "title": "Paused"
+          },
+          "killed_running": {
+            "type": "integer",
+            "title": "Killed Running"
+          },
+          "dequeued": {
+            "type": "integer",
+            "title": "Dequeued"
+          }
+        },
+        "type": "object",
+        "required": [
+          "engagement_id",
+          "paused",
+          "killed_running",
+          "dequeued"
+        ],
+        "title": "EngagementPauseState",
+        "description": "Response body for POST /api/v1/engagements/{id}/pause.\n\n``killed_running`` \u2014 number of in-flight runs (including runs awaiting a\ntimeout decision) that were killed by this pause action; 0 when resuming or\nwhen the engagement was already paused.\n``dequeued`` \u2014 number of queued runs removed by this pause action."
       },
       "EngagementSummary": {
         "properties": {
@@ -877,6 +1080,11 @@
               "cloud_enabled"
             ],
             "title": "Privacy Mode"
+          },
+          "paused": {
+            "type": "boolean",
+            "title": "Paused",
+            "default": false
           }
         },
         "type": "object",
@@ -1107,6 +1315,33 @@
         ],
         "title": "QueuedRun",
         "description": "A single run waiting for admission in the FIFO queue.\n\nReturned as part of ``ToolQueueSnapshot``; the ``position`` field is\n1-based (1 = next to admit).  ``target_host`` is ``None`` for tools that\ntake no ``target`` arg (they acquire only a slot, no host lock).\n``enqueued_at`` is the wall-clock time the ticket was created \u2014 it lives\nin the in-process queue only and is NOT persisted to the DB."
+      },
+      "TimeoutDecision": {
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": [
+              "kill",
+              "extend",
+              "wait"
+            ],
+            "title": "Decision"
+          },
+          "extend_seconds": {
+            "type": "integer",
+            "maximum": 300.0,
+            "minimum": 1.0,
+            "title": "Extend Seconds",
+            "description": "Additional seconds granted when decision == 'extend'. Default 30 s.",
+            "default": 30
+          }
+        },
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "title": "TimeoutDecision",
+        "description": "Request body for POST /api/v1/tool-runs/{id}/timeout-decision.\n\n``decision`` is required; ``extend_seconds`` is used only when\n``decision == \"extend\"`` and defaults to 30 s (range 1\u2013300)."
       },
       "ToolDescriptor": {
         "properties": {
@@ -1367,7 +1602,9 @@
             "enum": [
               "queued",
               "running",
+              "awaiting_decision",
               "completed",
+              "killed",
               "failed",
               "timed_out"
             ],
@@ -1394,6 +1631,18 @@
               }
             ],
             "title": "Queue Position"
+          },
+          "awaiting_since": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting Since"
           }
         },
         "type": "object",
@@ -1410,7 +1659,7 @@
           "status"
         ],
         "title": "ToolRunResult",
-        "description": "Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}.\n\nSlice 05 additions:\n- ``status`` gains the ``\"queued\"`` member (via ``ToolRunStatus``).\n- ``queue_position`` is the 1-based FIFO position while ``status == \"queued\"``;\n  ``None`` once running or terminal, and always ``None`` for light runs."
+        "description": "Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}.\n\nSlice 05 additions:\n- ``status`` gains the ``\"queued\"`` member (via ``ToolRunStatus``).\n- ``queue_position`` is the 1-based FIFO position while ``status == \"queued\"``;\n  ``None`` once running or terminal, and always ``None`` for light runs.\n\nSlice 06 additions:\n- ``status`` gains ``\"killed\"`` and ``\"awaiting_decision\"`` members.\n- ``awaiting_since`` is set (non-null) while ``status == \"awaiting_decision\"``\n  to let the UI show how long the timeout prompt has been open.  Cleared when\n  the run resolves.  Derived in-process; NOT persisted as a DB column."
       },
       "UserMe": {
         "properties": {

@@ -193,6 +193,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/engagements/{engagement_id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set Engagement Paused
+         * @description Set or clear the engagement-wide tool pause.
+         *
+         *     When ``paused=true``, every in-flight tool run for the engagement is killed,
+         *     every queued run is de-queued, and all subsequent POST /tool-runs are
+         *     rejected 409 until resumed.  When ``paused=false``, new runs are allowed
+         *     again (already-killed runs are NOT resumed).  Membership-gated (§17.1).
+         *     Idempotent: setting the same state twice is a no-op success.
+         */
+        post: operations["set_engagement_paused"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/mcp-servers": {
         parameters: {
             query?: never;
@@ -292,6 +318,76 @@ export interface paths {
         get: operations["get_tool_run"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tool-runs/{tool_run_id}/kill": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Kill Tool Run
+         * @description Stop a single tool run.
+         *
+         *     Membership-gated via the same ``get_tool_run`` + ``get_engagement_for_member``
+         *     chokepoint used by the other tool-run endpoints — both a missing run and a
+         *     non-member caller return 404 to avoid existence disclosure (§17.1).
+         *
+         *     Idempotent: killing an already-terminal run returns 200 with the current state.
+         *
+         *     Returns:
+         *         ``ToolRunResult`` — current state of the run after the kill signal is sent.
+         *
+         *     Raises (translated to HTTP by the registered error handlers):
+         *         EngagementNotFound (NotFoundError → 404): run not found or caller is not
+         *             a member of its engagement (no existence disclosure).
+         */
+        post: operations["kill_tool_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tool-runs/{tool_run_id}/timeout-decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit Timeout Decision
+         * @description Answer a pending timeout prompt for a run in state ``awaiting_decision``.
+         *
+         *     Membership-gated via the same chokepoint as kill_tool_run (§17.1/§4).
+         *
+         *     Returns 409 when the run is not currently awaiting a decision — covers:
+         *     - Already resolved (another member answered first).
+         *     - Run is in a different state (running, completed, killed, etc.).
+         *     - Unknown run ID (past the membership gate; unreachable in practice since
+         *       the membership gate returns 404 for unknown runs — listed for completeness).
+         *
+         *     Returns:
+         *         ``ToolRunResult`` — current state after the decision is forwarded.
+         *
+         *     Raises (translated to HTTP by registered handlers):
+         *         EngagementNotFound (NotFoundError → 404): run not found or non-member.
+         *
+         *     Returns inline:
+         *         409 when no run is awaiting a decision (TimeoutDecisionConflict).
+         */
+        post: operations["submit_timeout_decision"];
         delete?: never;
         options?: never;
         head?: never;
@@ -399,6 +495,41 @@ export interface components {
             privacy_mode: "local_only" | "cloud_enabled";
             /** Concurrency Slot Limit */
             concurrency_slot_limit: number;
+            /**
+             * Paused
+             * @default false
+             */
+            paused: boolean;
+        };
+        /**
+         * EngagementPauseRequest
+         * @description Request body for POST /api/v1/engagements/{id}/pause.
+         */
+        EngagementPauseRequest: {
+            /** Paused */
+            paused: boolean;
+        };
+        /**
+         * EngagementPauseState
+         * @description Response body for POST /api/v1/engagements/{id}/pause.
+         *
+         *     ``killed_running`` — number of in-flight runs (including runs awaiting a
+         *     timeout decision) that were killed by this pause action; 0 when resuming or
+         *     when the engagement was already paused.
+         *     ``dequeued`` — number of queued runs removed by this pause action.
+         */
+        EngagementPauseState: {
+            /**
+             * Engagement Id
+             * Format: uuid
+             */
+            engagement_id: string;
+            /** Paused */
+            paused: boolean;
+            /** Killed Running */
+            killed_running: number;
+            /** Dequeued */
+            dequeued: number;
         };
         /** EngagementSummary */
         EngagementSummary: {
@@ -429,6 +560,11 @@ export interface components {
              * @enum {string}
              */
             privacy_mode: "local_only" | "cloud_enabled";
+            /**
+             * Paused
+             * @default false
+             */
+            paused: boolean;
         };
         /** EngagementUpdate */
         EngagementUpdate: {
@@ -533,6 +669,26 @@ export interface components {
              * Format: date-time
              */
             enqueued_at: string;
+        };
+        /**
+         * TimeoutDecision
+         * @description Request body for POST /api/v1/tool-runs/{id}/timeout-decision.
+         *
+         *     ``decision`` is required; ``extend_seconds`` is used only when
+         *     ``decision == "extend"`` and defaults to 30 s (range 1–300).
+         */
+        TimeoutDecision: {
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "kill" | "extend" | "wait";
+            /**
+             * Extend Seconds
+             * @description Additional seconds granted when decision == 'extend'. Default 30 s.
+             * @default 30
+             */
+            extend_seconds: number;
         };
         /**
          * ToolDescriptor
@@ -643,6 +799,12 @@ export interface components {
          *     - ``status`` gains the ``"queued"`` member (via ``ToolRunStatus``).
          *     - ``queue_position`` is the 1-based FIFO position while ``status == "queued"``;
          *       ``None`` once running or terminal, and always ``None`` for light runs.
+         *
+         *     Slice 06 additions:
+         *     - ``status`` gains ``"killed"`` and ``"awaiting_decision"`` members.
+         *     - ``awaiting_since`` is set (non-null) while ``status == "awaiting_decision"``
+         *       to let the UI show how long the timeout prompt has been open.  Cleared when
+         *       the run resolves.  Derived in-process; NOT persisted as a DB column.
          */
         ToolRunResult: {
             /**
@@ -676,11 +838,13 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "queued" | "running" | "completed" | "failed" | "timed_out";
+            status: "queued" | "running" | "awaiting_decision" | "completed" | "killed" | "failed" | "timed_out";
             /** Preset Name */
             preset_name?: string | null;
             /** Queue Position */
             queue_position?: number | null;
+            /** Awaiting Since */
+            awaiting_since?: string | null;
         };
         /** UserMe */
         UserMe: {
@@ -1070,6 +1234,41 @@ export interface operations {
             };
         };
     };
+    set_engagement_paused: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EngagementPauseRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EngagementPauseState"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_mcp_servers: {
         parameters: {
             query?: never;
@@ -1186,6 +1385,72 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolRunResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    kill_tool_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tool_run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolRunResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_timeout_decision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tool_run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimeoutDecision"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
