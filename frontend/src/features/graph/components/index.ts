@@ -1,4 +1,8 @@
 // Barrel for graph feature components.
+export { GraphCanvas } from './GraphCanvas'
+export type { GraphCanvasProps } from './GraphCanvas'
+export { SelectedNodePanel } from './SelectedNodePanel'
+export type { SelectedNodePanelProps } from './SelectedNodePanel'
 export { GraphNodeList } from './GraphNodeList'
 export type { GraphNodeListProps } from './GraphNodeList'
 export { NodeEditDialog } from './NodeEditDialog'
