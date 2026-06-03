@@ -13,6 +13,7 @@ from app.features.auth import service as auth_service
 from app.features.auth.router import router as auth_router
 from app.features.engagements import events as engagement_events
 from app.features.engagements.router import router as engagements_router
+from app.features.graph import writer as graph_writer
 from app.features.graph.router import router as graph_router
 from app.features.health.router import router as health_router
 from app.features.mcp import concurrency as mcp_concurrency
@@ -93,6 +94,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shut down MCP subprocesses on app shutdown.
     await subprocess_manager.shutdown()
     logger.info("MCP subprocess manager stopped")
+
+    # Cancel all per-engagement single-writer consumer tasks and clear the
+    # registry (graph feature, Slice 07 / ADR-0001).  In-process state only —
+    # nothing to persist; warm-start rebuilds from Postgres on next access.
+    graph_writer.shutdown()
+    logger.info("Graph single-writer registry shut down")
 
 
 def create_app() -> FastAPI:
