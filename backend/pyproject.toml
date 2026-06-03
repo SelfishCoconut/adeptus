@@ -8,6 +8,8 @@ dependencies = [
     "argon2-cffi",
     "asyncpg",
     "fastapi>=0.111",
+    "httpx>=0.28.1",
+    "networkx>=3.0",
     "pydantic-settings>=2.0",
     "python-multipart",
     "pyyaml>=6.0",
@@ -56,6 +58,13 @@ warn_unused_ignores = true
 warn_return_any = true
 strict = false
 plugins = ["pydantic.mypy"]
+
+# networkx ships no type information (no py.typed, no bundled stubs); the
+# single-writer graph (app/features/graph/writer.py) uses it as an in-memory
+# store. Treat its imports as untyped rather than vendoring types-networkx.
+[[tool.mypy.overrides]]
+module = "networkx.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["app"]

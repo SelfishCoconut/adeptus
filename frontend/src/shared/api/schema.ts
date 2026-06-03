@@ -431,6 +431,199 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/engagements/{engagement_id}/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Graph
+         * @description Return the full live graph (non-deleted nodes + edges) for an engagement.
+         *
+         *     Served from the in-memory single writer (warm-starts from Postgres on first
+         *     access after a restart).  Membership-gated (§17.1 — non-member returns 404).
+         *     Read-only path: archived engagements are accessible.
+         */
+        get: operations["get_graph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/graph/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Graph History
+         * @description Return soft-deleted nodes and the per-entity node history.
+         *
+         *     Membership-gated.  Read-only path: archived engagements are accessible.
+         *     ``include_deleted`` defaults to true (matching the contract).
+         */
+        get: operations["get_graph_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/graph/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Node
+         * @description Create a graph node (serialized through the single writer).
+         *
+         *     Membership-gated.  Returns 409 for archived engagements; 422 for bad type
+         *     or invalid body (automatic Pydantic validation).
+         */
+        post: operations["create_node"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/graph/nodes/{node_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Node
+         * @description Soft-delete a node and cascade to its incident edges (serialized).
+         *
+         *     Returns 204 on success (no body).  Returns 404 when not found or already
+         *     deleted; 409 when the engagement is archived.
+         */
+        delete: operations["delete_node"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Node
+         * @description Update a node's label and/or properties (serialized; records a history entry).
+         *
+         *     Membership-gated.  Returns 404 when the node is not found or deleted.
+         *     Returns 409 for archived engagements.
+         */
+        patch: operations["update_node"];
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/graph/nodes/{node_id}/undo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Undo Node
+         * @description Revert a node to its immediately-prior state from history (serialized).
+         *
+         *     Returns 404 when no prior state exists (NoHistory).
+         *     Returns 409 for archived engagements.
+         */
+        post: operations["undo_node"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/graph/edges": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Edge
+         * @description Create a directed edge between two existing non-deleted nodes (serialized).
+         *
+         *     Duplicate live (source, target, relation) triples are rejected with 409
+         *     (DuplicateEdge — checked race-free inside the writer consumer).
+         *     Missing or deleted endpoints return 404.
+         */
+        post: operations["create_edge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/graph/edges/{edge_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Edge
+         * @description Soft-delete an edge (serialized).
+         *
+         *     Returns 204 on success (no body).  Returns 404 when not found or already
+         *     deleted; 409 when the engagement is archived.
+         */
+        delete: operations["delete_edge"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/graph/edges/{edge_id}/undo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Undo Edge
+         * @description Revert an edge to its prior state from history (serialized).
+         *
+         *     Returns 404 when no prior state exists (NoHistory) or edge not found.
+         *     Returns 409 for archived engagements.
+         */
+        post: operations["undo_edge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -439,6 +632,72 @@ export interface components {
         AddMemberRequest: {
             /** Username */
             username: string;
+        };
+        /**
+         * Edge
+         * @description Response model for a graph edge.
+         */
+        Edge: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Engagement Id
+             * Format: uuid
+             */
+            engagement_id: string;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            source_id: string;
+            /**
+             * Target Id
+             * Format: uuid
+             */
+            target_id: string;
+            /** Relation */
+            relation: string;
+            /** Properties */
+            properties: {
+                [key: string]: unknown;
+            };
+            /** Deleted */
+            deleted: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * EdgeCreate
+         * @description Request body for POST .../graph/edges.
+         */
+        EdgeCreate: {
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            source_id: string;
+            /**
+             * Target Id
+             * Format: uuid
+             */
+            target_id: string;
+            /** Relation */
+            relation: string;
+            /** Properties */
+            properties?: {
+                [key: string]: unknown;
+            };
         };
         /** EngagementCreate */
         EngagementCreate: {
@@ -573,6 +832,26 @@ export interface components {
             /** Concurrency Slot Limit */
             concurrency_slot_limit?: number | null;
         };
+        /**
+         * GraphHistory
+         * @description History view: soft-deleted nodes and the per-entity edit history.
+         */
+        GraphHistory: {
+            /** Deleted Nodes */
+            deleted_nodes: components["schemas"]["Node"][];
+            /** Node History */
+            node_history: components["schemas"]["NodeHistoryEntry"][];
+        };
+        /**
+         * GraphSnapshot
+         * @description Full live graph (non-deleted nodes + edges) for one engagement.
+         */
+        GraphSnapshot: {
+            /** Nodes */
+            nodes: components["schemas"]["Node"][];
+            /** Edges */
+            edges: components["schemas"]["Edge"][];
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -634,6 +913,104 @@ export interface components {
              * Format: date-time
              */
             joined_at: string;
+        };
+        /**
+         * Node
+         * @description Response model for a graph node.
+         */
+        Node: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Engagement Id
+             * Format: uuid
+             */
+            engagement_id: string;
+            type: components["schemas"]["NodeType"];
+            /** Label */
+            label: string;
+            /** Properties */
+            properties: {
+                [key: string]: unknown;
+            };
+            /** Deleted */
+            deleted: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * NodeCreate
+         * @description Request body for POST .../graph/nodes.
+         */
+        NodeCreate: {
+            type: components["schemas"]["NodeType"];
+            /** Label */
+            label: string;
+            /** Properties */
+            properties?: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * NodeHistoryEntry
+         * @description A single pre-mutation snapshot row from ``graph_node_history``.
+         */
+        NodeHistoryEntry: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Entity Id
+             * Format: uuid
+             */
+            entity_id: string;
+            /** Label */
+            label: string;
+            /** Properties */
+            properties: {
+                [key: string]: unknown;
+            };
+            /** Deleted */
+            deleted: boolean;
+            /**
+             * Recorded At
+             * Format: date-time
+             */
+            recorded_at: string;
+        };
+        /**
+         * NodeType
+         * @description Allowed graph node types (§8.1 entity list).
+         * @enum {string}
+         */
+        NodeType: "host" | "port" | "service" | "url" | "endpoint" | "vulnerability" | "credential" | "note" | "attack_path";
+        /**
+         * NodeUpdate
+         * @description Request body for PATCH .../graph/nodes/{node_id}.
+         *
+         *     At least one of ``label`` or ``properties`` must be present.
+         *     ``properties`` fully replaces the prior blob when provided.
+         */
+        NodeUpdate: {
+            /** Label */
+            label?: string | null;
+            /** Properties */
+            properties?: {
+                [key: string]: unknown;
+            } | null;
         };
         /**
          * QueuedRun
@@ -1490,6 +1867,300 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ToolQueueSnapshot"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_graph: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphSnapshot"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_graph_history: {
+        parameters: {
+            query?: {
+                include_deleted?: boolean;
+            };
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphHistory"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NodeCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Node"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NodeUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Node"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    undo_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Node"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_edge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EdgeCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Edge"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_edge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                edge_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    undo_edge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                edge_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Edge"];
                 };
             };
             /** @description Validation Error */
