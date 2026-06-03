@@ -23,6 +23,12 @@ vi.mock('@/features/mcp/components/ToolRunnerPanel', () => ({
   ),
 }))
 
+vi.mock('@/features/graph/components', () => ({
+  GraphPane: ({ engagementId }: { engagementId: string }) => (
+    <div data-testid="graph-pane" data-engagement-id={engagementId} />
+  ),
+}))
+
 describe('WorkspaceShell', () => {
   it('renders the top bar (username, role, logout, health) and three panes', () => {
     render(
@@ -88,6 +94,43 @@ describe('WorkspaceShell', () => {
     const banner = screen.getByTestId('privacy-mode-banner')
     expect(banner).toBeInTheDocument()
     expect(banner).toHaveAttribute('data-privacy-mode', 'cloud_enabled')
+  })
+
+  describe('Graph pane — GraphPane visibility', () => {
+    it('shows GraphPane for the engagement when an engagementId is provided', () => {
+      render(
+        <WorkspaceShell
+          username="alice"
+          role="admin"
+          onLogout={vi.fn()}
+          privacyMode="local_only"
+          engagementId="aaaaaaaa-0000-0000-0000-000000000001"
+        />,
+      )
+
+      const pane = screen.getByTestId('graph-pane')
+      expect(pane).toBeInTheDocument()
+      expect(pane).toHaveAttribute('data-engagement-id', 'aaaaaaaa-0000-0000-0000-000000000001')
+      expect(
+        screen.queryByText(/select an engagement to view the graph/i),
+      ).not.toBeInTheDocument()
+    })
+
+    it('shows the "select an engagement" placeholder when no engagementId is provided', () => {
+      render(
+        <WorkspaceShell
+          username="alice"
+          role="admin"
+          onLogout={vi.fn()}
+          privacyMode="local_only"
+        />,
+      )
+
+      expect(screen.queryByTestId('graph-pane')).not.toBeInTheDocument()
+      expect(
+        screen.getByText(/select an engagement to view the graph/i),
+      ).toBeInTheDocument()
+    })
   })
 
   describe('Console pane — ToolRunnerPanel visibility', () => {

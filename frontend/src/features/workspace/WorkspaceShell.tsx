@@ -4,6 +4,7 @@ import type { PrivacyMode } from '@/shared/api'
 import { PrivacyModeBanner } from './components/PrivacyModeBanner'
 import { HealthIndicator } from './HealthIndicator'
 import { ToolRunnerPanel } from '@/features/mcp/components/ToolRunnerPanel'
+import { GraphPane } from '@/features/graph/components'
 
 interface WorkspaceShellProps {
   username: string
@@ -46,8 +47,15 @@ export function WorkspaceShell({
         <section aria-label="AI chat" className="bg-background p-4">
           <h2 className="text-sm font-medium text-muted-foreground">AI chat</h2>
         </section>
-        <section aria-label="Graph" className="bg-background p-4">
-          <h2 className="text-sm font-medium text-muted-foreground">Graph</h2>
+        <section aria-label="Graph" className="overflow-y-auto bg-background p-4">
+          <h2 className="mb-3 text-sm font-medium text-muted-foreground">Graph</h2>
+          {engagementId ? (
+            <GraphPane engagementId={engagementId} />
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Select an engagement to view the graph.
+            </p>
+          )}
         </section>
         <section aria-label="Console" className="col-span-2 overflow-y-auto bg-background p-4">
           <h2 className="mb-3 text-sm font-medium text-muted-foreground">Console</h2>
