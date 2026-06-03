@@ -10,7 +10,17 @@ vi.mock('../hooks/useToolRunStream', () => ({
 const mockedUseToolRunStream = vi.mocked(useToolRunStream)
 
 function streamResult(overrides: Partial<ToolRunStream>): ToolRunStream {
-  return { lines: [], isDone: false, exitCode: null, queued: false, queuePosition: null, queueReason: null, ...overrides }
+  return {
+    lines: [],
+    isDone: false,
+    exitCode: null,
+    queued: false,
+    queuePosition: null,
+    queueReason: null,
+    awaitingTimeout: false,
+    killed: false,
+    ...overrides,
+  }
 }
 
 const TOOL_RUN_ID = '00000000-0000-0000-0000-000000000001'

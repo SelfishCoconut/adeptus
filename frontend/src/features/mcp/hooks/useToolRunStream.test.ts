@@ -49,7 +49,16 @@ describe('useToolRunStream', () => {
   it('does not open a socket when toolRunId is null', () => {
     const { result } = renderHook(() => useToolRunStream(null))
     expect(FakeWebSocket.instances).toHaveLength(0)
-    expect(result.current).toEqual({ lines: [], isDone: false, exitCode: null, queued: false, queuePosition: null, queueReason: null })
+    expect(result.current).toEqual({
+      lines: [],
+      isDone: false,
+      exitCode: null,
+      queued: false,
+      queuePosition: null,
+      queueReason: null,
+      awaitingTimeout: false,
+      killed: false,
+    })
   })
 
   it('opens a ws:// socket targeting the run id', () => {
@@ -228,5 +237,142 @@ describe('useToolRunStream', () => {
     expect(result.current.queued).toBe(true)
     expect(result.current.queuePosition).toBe(3)
     expect(result.current.queueReason).toBe('target_locked')
+  })
+
+  // ---------------------------------------------------------------------------
+  // Timeout / killed chunk handling (Slice 06 Task 10)
+  // ---------------------------------------------------------------------------
+
+  it('stdout→timeout→killed sequence transitions state correctly', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    // Step 1: some output arrives normally
+    act(() => {
+      socket.emit({ type: 'stdout', data: 'scanning…' })
+    })
+    expect(result.current.lines).toEqual([{ stream: 'stdout', text: 'scanning…' }])
+    expect(result.current.awaitingTimeout).toBe(false)
+    expect(result.current.killed).toBe(false)
+    expect(result.current.isDone).toBe(false)
+
+    // Step 2: timeout chunk — run parks, slot released
+    act(() => {
+      socket.emit({ type: 'timeout', message: 'Slot released — queue is free to advance' })
+    })
+    expect(result.current.awaitingTimeout).toBe(true)
+    expect(result.current.isDone).toBe(false)
+    expect(result.current.killed).toBe(false)
+    // timeout message is surfaced as a stderr line
+    expect(result.current.lines).toContainEqual({
+      stream: 'stderr',
+      text: 'Slot released — queue is free to advance',
+    })
+
+    // Step 3: killed chunk — run is stopped
+    act(() => {
+      socket.emit({ type: 'killed', message: 'killed by user' })
+    })
+    expect(result.current.killed).toBe(true)
+    expect(result.current.isDone).toBe(true)
+    expect(result.current.awaitingTimeout).toBe(false)
+    expect(result.current.lines).toContainEqual({ stream: 'stderr', text: 'killed by user' })
+    expect(socket.close).toHaveBeenCalled()
+  })
+
+  it('timeout→started→stdout→done continuation clears the prompt and resumes streaming', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    // Run hits timeout, parks
+    act(() => {
+      socket.emit({ type: 'timeout', message: 'awaiting decision' })
+    })
+    expect(result.current.awaitingTimeout).toBe(true)
+    expect(result.current.isDone).toBe(false)
+
+    // Human chooses extend/wait; backend re-acquires a slot and sends started
+    act(() => {
+      socket.emit({ type: 'started' })
+    })
+    // The prompt must be cleared as soon as started arrives
+    expect(result.current.awaitingTimeout).toBe(false)
+    expect(result.current.isDone).toBe(false)
+    expect(result.current.killed).toBe(false)
+    expect(result.current.queued).toBe(false)
+
+    // Streaming resumes normally after the re-started run
+    act(() => {
+      socket.emit({ type: 'stdout', data: 'resumed output' })
+    })
+    expect(result.current.lines).toContainEqual({ stream: 'stdout', text: 'resumed output' })
+    expect(result.current.awaitingTimeout).toBe(false)
+
+    // Run completes
+    act(() => {
+      socket.emit({ type: 'done', exit_code: 0 })
+    })
+    expect(result.current.isDone).toBe(true)
+    expect(result.current.exitCode).toBe(0)
+    expect(result.current.awaitingTimeout).toBe(false)
+    expect(result.current.killed).toBe(false)
+    expect(socket.close).toHaveBeenCalled()
+  })
+
+  it('timeout state exposes no countdown or timer field', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit({ type: 'timeout', message: 'slot released' })
+    })
+
+    // The only timeout-related field is the boolean awaitingTimeout — no numeric
+    // countdown, no timer reference, no gracePeriod or similar.
+    const stream = result.current
+    expect(stream.awaitingTimeout).toBe(true)
+    expect('countdown' in stream).toBe(false)
+    expect('gracePeriod' in stream).toBe(false)
+    expect('timeoutAt' in stream).toBe(false)
+    expect('autoKillAt' in stream).toBe(false)
+    // isDone must NOT be set — the run is parked, not finished
+    expect(stream.isDone).toBe(false)
+  })
+
+  it('initial state has awaitingTimeout=false and killed=false', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    expect(result.current.awaitingTimeout).toBe(false)
+    expect(result.current.killed).toBe(false)
+  })
+
+  it('killed chunk sets killed=true and isDone=true and closes the socket', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit({ type: 'killed', message: 'engagement paused' })
+    })
+
+    expect(result.current.killed).toBe(true)
+    expect(result.current.isDone).toBe(true)
+    expect(result.current.lines).toEqual([{ stream: 'stderr', text: 'engagement paused' }])
+    expect(socket.close).toHaveBeenCalled()
+  })
+
+  it('a normal first started (not after timeout) still clears queue fields without setting awaitingTimeout', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit({ type: 'queued', queue_position: 1, reason: 'slot_full' })
+    })
+    expect(result.current.queued).toBe(true)
+
+    act(() => {
+      socket.emit({ type: 'started' })
+    })
+    expect(result.current.queued).toBe(false)
+    expect(result.current.awaitingTimeout).toBe(false)
+    expect(result.current.killed).toBe(false)
   })
 })
