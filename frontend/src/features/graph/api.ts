@@ -126,6 +126,8 @@ export function useCreateNode(engagementId: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
+      // A successful write pushes onto the caller's personal undo stack.
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }
@@ -151,6 +153,7 @@ export function useUpdateNode(engagementId: string) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
       void queryClient.invalidateQueries({ queryKey: graphKeys.history(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }
@@ -175,6 +178,7 @@ export function useDeleteNode(engagementId: string) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
       void queryClient.invalidateQueries({ queryKey: graphKeys.history(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }
@@ -229,6 +233,7 @@ export function useCreateEdge(engagementId: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }
@@ -253,6 +258,7 @@ export function useDeleteEdge(engagementId: string) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
       void queryClient.invalidateQueries({ queryKey: graphKeys.history(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }
