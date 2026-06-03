@@ -38,7 +38,7 @@ from app.features.auth import repository as auth_repo
 from app.features.engagements import repository as eng_repo
 from app.features.mcp import concurrency, subprocess_manager
 from app.features.mcp import repository as mcp_repo
-from app.features.mcp.concurrency import AdmissionHandle
+from app.features.mcp.concurrency import AdmissionHandle, EngagementPaused
 from app.features.mcp.models import ToolRun
 from app.features.mcp.registry import get_registry
 from app.features.mcp.schemas import (
@@ -412,12 +412,25 @@ async def execute_tool_run(
         ToolRunResult — fully populated for sync; partial (running) for async.
 
     Raises:
+        EngagementPaused:    The engagement is currently paused (§6.3).  No DB row
+                             is created and no task is spawned (→ HTTP 409 in router,
+                             task 6).  Checked before the membership gate so the
+                             response is fast and free of DB round-trips (Slice 06 Task 4).
         EngagementNotFound:  engagement_id does not exist OR user_id is not an
                              explicit member (even if admin — §4/§17.1).
         McpServerNotFound:   server_name not in the registry.
         McpServerDown:       Subprocess not running / timed out (sync path only;
                              async path surfaces failures via WS error chunk).
     """
+    # Step 0 (Slice 06, Task 4): engagement-wide pause gate.
+    # Must run BEFORE any DB row is created and BEFORE the heavy/light branch so that
+    # the pause blocks ALL new runs (light, heavy-sync, heavy-async) — Risk 5.
+    # Mirrors the placement of check_queue_capacity: it is a pure pre-flight guard
+    # with no side-effects, no DB write, and no task spawn on the unhappy path.
+    # EngagementPaused is translated to HTTP 409 in the router (task 6).
+    if concurrency.is_paused(engagement_id):
+        raise EngagementPaused(f"Engagement {engagement_id} is currently paused")
+
     # Step 1: fused existence + membership check (§17.1 isolation chokepoint).
     # get_engagement_for_member returns None when the engagement is missing OR the
     # caller has no explicit member row; both collapse to 404 so a non-member
@@ -493,8 +506,16 @@ async def execute_tool_run(
                 target_host=target_host,
             )
         )
+        # Slice 06 Task 4: register the task in the cancellation registry so that
+        # kill_run / set_paused can find and cancel it by tool_run_id.  The registry
+        # holds a strong reference to the task (same guarantee as _background_tasks).
+        # _background_tasks is retained as an additional strong-ref set until Task 5
+        # fully rewrites _stream_to_channel with kill/timeout awareness; at that point
+        # the registry alone provides the strong-ref guarantee and _background_tasks
+        # can be removed.
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
+        concurrency.register_run(engagement_id, tool_run_id, task)
 
         return ToolRunResult(
             tool_run_id=tool_run_id,
@@ -774,6 +795,11 @@ async def _stream_to_channel(
             # Risk 3: a leaked slot would permanently block the engagement.
             if admission_handle is not None:
                 concurrency.release(admission_handle)
+            # Slice 06 Task 4: unregister from the cancellation registry so the map
+            # does not grow without bound.  Task 5 will replace this minimal
+            # unregister with full kill/timeout-aware cleanup; for now this call
+            # ensures the registry is clean after any completion or error path.
+            concurrency.unregister_run(tool_run_id)
             _discard_channel(tool_run_id)
 
 
