@@ -296,7 +296,9 @@ async def acquire(
         state.in_use += 1
         if target_host is not None:
             state.locked_hosts.add(target_host)
-        _maybe_await(on_started())
+        result = on_started()
+        if asyncio.iscoroutine(result):
+            await result
         return AdmissionHandle(
             engagement_id=engagement_id,
             tool_run_id=tool_run_id,

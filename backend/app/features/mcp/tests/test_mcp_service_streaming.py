@@ -56,6 +56,7 @@ _SERVER_NAME = "httpx"
 _TOOL_NAME = "run_httpx"
 _ARGS: dict[str, Any] = {"target": "http://localhost:3000"}
 _TIMEOUT = 30
+_ENGAGEMENT_ID = uuid4()
 
 
 def _make_tool_config(name: str = _TOOL_NAME) -> McpToolConfig:
@@ -407,6 +408,7 @@ async def test_stream_to_channel_completed() -> None:
     ):
         await _stream_to_channel(
             tool_run_id=tool_run_id,
+            engagement_id=_ENGAGEMENT_ID,
             server_name=_SERVER_NAME,
             tool_name=_TOOL_NAME,
             args=_ARGS,
@@ -475,6 +477,7 @@ async def test_stream_to_channel_replay_buffer_accumulates() -> None:
 
         await _stream_to_channel(
             tool_run_id=tool_run_id,
+            engagement_id=_ENGAGEMENT_ID,
             server_name=_SERVER_NAME,
             tool_name=_TOOL_NAME,
             args=_ARGS,
@@ -522,6 +525,7 @@ async def test_stream_to_channel_timed_out() -> None:
     ):
         await _stream_to_channel(
             tool_run_id=tool_run_id,
+            engagement_id=_ENGAGEMENT_ID,
             server_name=_SERVER_NAME,
             tool_name=_TOOL_NAME,
             args=_ARGS,
@@ -571,6 +575,7 @@ async def test_stream_to_channel_server_down_sets_failed() -> None:
     ):
         await _stream_to_channel(
             tool_run_id=tool_run_id,
+            engagement_id=_ENGAGEMENT_ID,
             server_name=_SERVER_NAME,
             tool_name=_TOOL_NAME,
             args=_ARGS,
@@ -624,6 +629,7 @@ async def test_stream_to_channel_generic_exception_sets_failed() -> None:
     ):
         await _stream_to_channel(
             tool_run_id=tool_run_id,
+            engagement_id=_ENGAGEMENT_ID,
             server_name=_SERVER_NAME,
             tool_name=_TOOL_NAME,
             args=_ARGS,
@@ -674,6 +680,7 @@ async def test_stream_to_channel_discards_channel_on_completion() -> None:
     ):
         await _stream_to_channel(
             tool_run_id=tool_run_id,
+            engagement_id=_ENGAGEMENT_ID,
             server_name=_SERVER_NAME,
             tool_name=_TOOL_NAME,
             args=_ARGS,

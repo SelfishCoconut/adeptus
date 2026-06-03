@@ -89,6 +89,27 @@ async def update_tool_run_result(
     return result.scalar_one()
 
 
+async def update_tool_run_status(
+    db: AsyncSession,
+    tool_run_id: UUID,
+    *,
+    status: str,
+    started_at: datetime | None = None,
+) -> None:
+    """Update only the status (and optionally started_at) of a ToolRun row.
+
+    Used by the admission manager callbacks to transition a row from 'queued'
+    to 'running' (setting started_at = admission time per Decision 6) without
+    touching exit_code / stdout / stderr / finished_at.
+
+    The caller is responsible for committing the transaction.
+    """
+    values: dict[str, object] = {"status": status}
+    if started_at is not None:
+        values["started_at"] = started_at
+    await db.execute(update(ToolRun).where(ToolRun.id == tool_run_id).values(**values))
+
+
 async def list_tool_runs_for_engagement(
     db: AsyncSession,
     engagement_id: UUID,

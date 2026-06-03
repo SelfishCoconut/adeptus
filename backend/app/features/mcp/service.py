@@ -37,13 +37,15 @@ from app.core.db import get_sessionmaker
 from app.core.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.features.auth import repository as auth_repo
 from app.features.engagements import repository as eng_repo
+from app.features.mcp import concurrency, subprocess_manager
 from app.features.mcp import repository as mcp_repo
-from app.features.mcp import subprocess_manager
+from app.features.mcp.concurrency import AdmissionHandle
 from app.features.mcp.models import ToolRun
 from app.features.mcp.registry import get_registry
 from app.features.mcp.schemas import (
     McpServerInfo,
     McpToolDeclaration,
+    QueueReason,
     ToolDescriptor,
     ToolPreset,
     ToolRunPage,
@@ -438,8 +440,11 @@ async def execute_tool_run(
     # get_engagement_for_member returns None when the engagement is missing OR the
     # caller has no explicit member row; both collapse to 404 so a non-member
     # cannot infer the engagement exists. Role is never consulted (§4 no-bypass).
-    if await eng_repo.get_engagement_for_member(db, engagement_id, user_id) is None:
+    member_pair = await eng_repo.get_engagement_for_member(db, engagement_id, user_id)
+    if member_pair is None:
         raise EngagementNotFound(f"Engagement {engagement_id} not found")
+    engagement_obj, _ = member_pair
+    slot_limit: int = cast(int, engagement_obj.concurrency_slot_limit)
 
     # Step 2: server name validation.
     registry = get_registry()
@@ -452,15 +457,30 @@ async def execute_tool_run(
     # See ``_enforce_sandbox_guard`` docstring for the Risk-5 reconciliation note.
     _enforce_sandbox_guard(args)
 
+    # Step 2c: resolve tool weight.  Admission control is weight-gated: light tools
+    # bypass the concurrency pool entirely; heavy tools acquire a slot + host lock.
+    # Branch on weight BEFORE any DB write so a light run is never charged a slot.
+    server_config = registry[server_name]
+    tool_config = next((t for t in server_config.tools if t.name == tool_name), None)
+    weight: str = tool_config.weight if tool_config is not None else "light"
+    is_heavy: bool = weight == "heavy"
+    target_host: str | None = (
+        concurrency.resolve_target_host(server_name, tool_name, args) if is_heavy else None
+    )
+
     if async_mode:
-        # Async path: insert running row, commit, launch background task, return partial.
+        # Async path: insert row, commit, launch background task, return 202.
+        # Heavy runs begin as 'queued'; the background task flips to 'running' on
+        # admission (Decision 6: started_at = admission time, not insert time).
+        # Light runs insert as 'running' — no admission step needed.
+        initial_status: ToolRunStatus = "queued" if is_heavy else "running"
         tool_run = await mcp_repo.create_tool_run(
             db,
             engagement_id=engagement_id,
             server_name=server_name,
             tool_name=tool_name,
             args=args,
-            status="running",
+            status=initial_status,
             preset_name=preset_name,
         )
         # Commit so the row is durable before we return 202 and hand off to the task.
@@ -471,10 +491,14 @@ async def execute_tool_run(
         task = asyncio.create_task(
             _stream_to_channel(
                 tool_run_id=tool_run_id,
+                engagement_id=engagement_id,
                 server_name=server_name,
                 tool_name=tool_name,
                 args=args,
                 timeout_seconds=float(timeout_seconds),
+                is_heavy=is_heavy,
+                slot_limit=slot_limit,
+                target_host=target_host,
             )
         )
         _background_tasks.add(task)
@@ -490,7 +514,7 @@ async def execute_tool_run(
             stderr="",
             started_at=tool_run.started_at,
             finished_at=None,
-            status="running",
+            status=initial_status,
             preset_name=preset_name,
         )
 
@@ -505,13 +529,47 @@ async def execute_tool_run(
     )
 
     # Step 4: call the MCP subprocess.
+    # For heavy sync runs: wrap in acquire/release so concurrent sync heavy runs
+    # against the same engagement also serialize (Decision 4).  The HTTP request
+    # simply blocks until admitted; no queue-position payload is returned (the
+    # response only ever reflects the terminal state).
     # McpServerDown propagates to the router; the row is left with exit_code NULL.
-    raw = await subprocess_manager.send_tool_call(
-        server_name=server_name,
-        tool_name=tool_name,
-        args=args,
-        timeout_seconds=float(timeout_seconds),
-    )
+    if is_heavy:
+        handle: AdmissionHandle | None = None
+        try:
+            # Sync callbacks are no-ops: the HTTP response only shows the final state.
+            def _sync_on_queued(position: int, reason: QueueReason) -> None:
+                pass
+
+            def _sync_on_started() -> None:
+                pass
+
+            handle = await concurrency.acquire(
+                engagement_id=engagement_id,
+                slot_limit=slot_limit,
+                tool_run_id=cast(UUID, tool_run.id),
+                target_host=target_host,
+                server_name=server_name,
+                tool_name=tool_name,
+                on_queued=_sync_on_queued,
+                on_started=_sync_on_started,
+            )
+            raw = await subprocess_manager.send_tool_call(
+                server_name=server_name,
+                tool_name=tool_name,
+                args=args,
+                timeout_seconds=float(timeout_seconds),
+            )
+        finally:
+            if handle is not None:
+                concurrency.release(handle)
+    else:
+        raw = await subprocess_manager.send_tool_call(
+            server_name=server_name,
+            tool_name=tool_name,
+            args=args,
+            timeout_seconds=float(timeout_seconds),
+        )
 
     # Step 5: update the row with the final result.
     finished_at = datetime.now(tz=UTC)
@@ -547,26 +605,105 @@ async def execute_tool_run(
 async def _stream_to_channel(
     *,
     tool_run_id: UUID,
+    engagement_id: UUID,
     server_name: str,
     tool_name: str,
     args: dict[str, Any],
     timeout_seconds: float,
+    is_heavy: bool = False,
+    slot_limit: int = 3,
+    target_host: str | None = None,
 ) -> None:
     """Background task: stream MCP output to the pub/sub channel and persist the result.
 
     Opens a FRESH database session (independent of the request session) so it can
     safely commit after the request has returned 202.
 
+    For heavy tools: calls ``concurrency.acquire`` before streaming, which blocks
+    (suspends the coroutine, not the thread) until a slot + host lock are available.
+    The ``on_queued`` callback broadcasts a ``queued`` WebSocketOutputChunk and
+    updates the DB row to ``status='queued'``; the ``on_started`` callback broadcasts
+    a ``started`` chunk and updates the row to ``status='running'`` with
+    ``started_at=now`` (Decision 6: started_at = admission time, not insert time).
+    The admission handle is ALWAYS released in the ``finally`` block (Risk 3).
+
+    For light tools: admission is skipped entirely; the existing streaming loop runs
+    unchanged.
+
     On StreamDone → updates the DB row to completed/timed_out status, broadcasts
     a 'done' chunk, and returns.
 
     On any exception → updates the DB row to 'failed', broadcasts an 'error' chunk.
 
-    In all cases the channel is discarded in the finally block so late WebSocket
-    subscribers fall back to the persisted row.
+    In all cases the channel is discarded and the admission handle (if any) is
+    released in the finally block.
     """
     async with get_sessionmaker()() as session:
+        # Admission handle for heavy runs.  Initialised to None so the finally
+        # block can guard against releasing a handle that was never acquired
+        # (e.g. if acquire() itself raised before returning).  Risk 3.
+        admission_handle: AdmissionHandle | None = None
+
         try:
+            if is_heavy:
+                # --- Async-path admission callbacks ---
+
+                async def _on_queued(position: int, reason: QueueReason) -> None:
+                    """Called when the run is enqueued and cannot be admitted yet."""
+                    broadcast_tool_run_output(
+                        tool_run_id,
+                        WebSocketOutputChunk(
+                            type="queued",
+                            queue_position=position,
+                            reason=reason,
+                        ),
+                    )
+                    try:
+                        await mcp_repo.update_tool_run_status(
+                            session,
+                            tool_run_id,
+                            status="queued",
+                        )
+                        await session.commit()
+                    except Exception:  # noqa: BLE001 — best-effort; don't break the waiter
+                        logger.exception(
+                            "Failed to persist 'queued' status for tool_run_id=%s",
+                            tool_run_id,
+                        )
+
+                async def _on_started() -> None:
+                    """Called when the run is admitted (slot + host lock acquired)."""
+                    now = datetime.now(tz=UTC)
+                    broadcast_tool_run_output(
+                        tool_run_id,
+                        WebSocketOutputChunk(type="started"),
+                    )
+                    try:
+                        await mcp_repo.update_tool_run_status(
+                            session,
+                            tool_run_id,
+                            status="running",
+                            started_at=now,
+                        )
+                        await session.commit()
+                    except Exception:  # noqa: BLE001 — best-effort; streaming still proceeds
+                        logger.exception(
+                            "Failed to persist 'running' status for tool_run_id=%s",
+                            tool_run_id,
+                        )
+
+                admission_handle = await concurrency.acquire(
+                    engagement_id=engagement_id,
+                    slot_limit=slot_limit,
+                    tool_run_id=tool_run_id,
+                    target_host=target_host,
+                    server_name=server_name,
+                    tool_name=tool_name,
+                    on_queued=_on_queued,
+                    on_started=_on_started,
+                )
+
+            # --- Streaming loop (identical for light and heavy) ---
             async for ev in subprocess_manager.stream_tool_call(
                 server_name=server_name,
                 tool_name=tool_name,
@@ -629,6 +766,13 @@ async def _stream_to_channel(
             )
 
         finally:
+            # Release the admission handle FIRST so the next queued run can be
+            # admitted before the channel is discarded.  Guard against double-release
+            # (handle.released flag) and against a handle that was never acquired
+            # (admission_handle is None when acquire() raised or tool is light).
+            # Risk 3: a leaked slot would permanently block the engagement.
+            if admission_handle is not None:
+                concurrency.release(admission_handle)
             _discard_channel(tool_run_id)
 
 
