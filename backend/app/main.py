@@ -13,6 +13,7 @@ from app.features.auth import service as auth_service
 from app.features.auth.router import router as auth_router
 from app.features.engagements import events as engagement_events
 from app.features.engagements.router import router as engagements_router
+from app.features.graph.router import router as graph_router
 from app.features.health.router import router as health_router
 from app.features.mcp import concurrency as mcp_concurrency
 from app.features.mcp import listeners as mcp_listeners
@@ -113,6 +114,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(engagements_router)
     app.include_router(mcp_router)
+    app.include_router(graph_router)
     return app
 
 
