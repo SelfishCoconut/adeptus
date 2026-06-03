@@ -14,6 +14,7 @@ import { SelectedNodePanel } from './SelectedNodePanel'
 import { GraphNodeList } from './GraphNodeList'
 import { NodeEditDialog } from './NodeEditDialog'
 import { GraphHistoryPanel } from './GraphHistoryPanel'
+import { UndoButton } from './UndoButton'
 import { useGraphPaneState } from '../hooks/useGraphPaneState'
 
 // ---------------------------------------------------------------------------
@@ -66,11 +67,17 @@ export function GraphPane({ engagementId }: GraphPaneProps) {
             List
           </Button>
         </div>
-        {view === 'graph' && (
-          <Button size="sm" onClick={handleAddNode}>
-            Add node
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {/* Personal undo stack (Slice 09): pop my last write. The Ctrl/Cmd+Z
+              shortcut is suppressed while the node dialog is open so it doesn't
+              hijack text editing. */}
+          <UndoButton engagementId={engagementId} shortcutDisabled={dialogOpen} />
+          {view === 'graph' && (
+            <Button size="sm" onClick={handleAddNode}>
+              Add node
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Primary surface */}

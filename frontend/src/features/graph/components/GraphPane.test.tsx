@@ -93,6 +93,22 @@ vi.mock('./GraphHistoryPanel', () => ({
   ),
 }))
 
+vi.mock('./UndoButton', () => ({
+  UndoButton: ({
+    engagementId,
+    shortcutDisabled,
+  }: {
+    engagementId: string
+    shortcutDisabled?: boolean
+  }) => (
+    <div
+      data-testid="undo-button"
+      data-engagement-id={engagementId}
+      data-shortcut-disabled={shortcutDisabled ? 'true' : 'false'}
+    />
+  ),
+}))
+
 vi.mock('../api', () => ({
   useGraph: vi.fn(),
 }))
@@ -134,6 +150,15 @@ describe('GraphPane', () => {
     renderPane()
     expect(screen.getByTestId('graph-canvas')).toBeInTheDocument()
     expect(screen.queryByTestId('graph-node-list')).not.toBeInTheDocument()
+  })
+
+  it('test_renders_undo_button_in_toolbar', () => {
+    renderPane()
+    const undo = screen.getByTestId('undo-button')
+    expect(undo).toBeInTheDocument()
+    expect(undo).toHaveAttribute('data-engagement-id', ENGAGEMENT_ID)
+    // Shortcut enabled while no dialog is open.
+    expect(undo).toHaveAttribute('data-shortcut-disabled', 'false')
   })
 
   it('test_list_graph_view_toggle', async () => {
