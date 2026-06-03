@@ -9,6 +9,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -77,7 +78,10 @@ def test_node_type_is_str() -> None:
 
 def test_node_type_rejects_bad_value() -> None:
     with pytest.raises(ValidationError):
-        NodeCreate(type="router", label="10.0.0.1")  # type: ignore[arg-type]
+        # cast() (not a `type: ignore`) feeds the invalid value past the type
+        # checker so the runtime validation is what's under test — and it keeps
+        # both mypy configs happy (make-lint's warn_unused_ignores vs pre-commit).
+        NodeCreate(type=cast(NodeType, "router"), label="10.0.0.1")
 
 
 # ---------------------------------------------------------------------------
