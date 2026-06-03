@@ -91,7 +91,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §8.1, §8.2 (writer + soft-delete + per-entity undo)
 - **Depends on**: 01
 - **Risky**: yes (single-writer is critical invariant)
-- **Status**: todo
+- **Status**: in-progress
 
 ### Slice 08: Graph visualization (Cytoscape)
 - **Goal**: Right pane shows force-directed graph; pinning works; pinned nodes act as implicit @-mentions
