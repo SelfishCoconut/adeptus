@@ -100,6 +100,9 @@ def _apply_sqlite_patches() -> None:
     edge_hist_id_col: Column = graph_models.GraphEdgeHistory.__table__.c.id  # type: ignore[assignment]
     edge_hist_id_col.default = ColumnDefault(uuid4)
 
+    undo_id_col: Column = graph_models.GraphUserUndoStack.__table__.c.id  # type: ignore[assignment]
+    undo_id_col.default = ColumnDefault(uuid4)
+
 
 async def _build_engine_and_factory() -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
     """Build a fresh in-memory SQLite engine with the full schema."""
@@ -608,3 +611,189 @@ async def test_create_node_bad_type_422(
         json={"type": "invalid_type_xyz", "label": "x"},
     )
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Personal undo stack (Slice 09)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_undo_stack_200(
+    member_client_and_ids: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """GET .../graph/undo-stack returns the caller's stack newest-first."""
+    client, engagement_id, _ = member_client_and_ids
+
+    await client.post(
+        f"/api/v1/engagements/{engagement_id}/graph/nodes",
+        json={"type": "host", "label": "first"},
+    )
+    await client.post(
+        f"/api/v1/engagements/{engagement_id}/graph/nodes",
+        json={"type": "host", "label": "second"},
+    )
+
+    resp = await client.get(f"/api/v1/engagements/{engagement_id}/graph/undo-stack")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["depth"] == 2
+    summaries = [e["summary"] for e in body["entries"]]
+    assert summaries == ["Created host second", "Created host first"]
+    assert all(e["op_type"] == "create_node" for e in body["entries"])
+    assert all(e["stale"] is False for e in body["entries"])
+
+
+@pytest.mark.asyncio
+async def test_pop_undo_stack_200(
+    member_client_and_ids: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """POST .../graph/undo-stack/pop undoes the top write and reflects it in the graph."""
+    client, engagement_id, _ = member_client_and_ids
+
+    create = await client.post(
+        f"/api/v1/engagements/{engagement_id}/graph/nodes",
+        json={"type": "host", "label": "popme"},
+    )
+    node_id = create.json()["id"]
+
+    resp = await client.post(f"/api/v1/engagements/{engagement_id}/graph/undo-stack/pop")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["undone"] is not None
+    assert body["undone"]["op_type"] == "create_node"
+    assert body["skipped_stale"] == []
+    assert body["stack"]["depth"] == 0
+
+    graph = await client.get(f"/api/v1/engagements/{engagement_id}/graph")
+    live_ids = [n["id"] for n in graph.json()["nodes"]]
+    assert node_id not in live_ids
+
+
+@pytest.mark.asyncio
+async def test_pop_empty_returns_200_undone_null(
+    member_client_and_ids: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Decision 2: popping an empty stack returns 200 with undone=null."""
+    client, engagement_id, _ = member_client_and_ids
+
+    resp = await client.post(f"/api/v1/engagements/{engagement_id}/graph/undo-stack/pop")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["undone"] is None
+    assert body["stack"]["depth"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pop_archived_409(
+    error_client_and_app: tuple[AsyncClient, FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    """pop against an archived engagement returns 409."""
+    client, _, _ = error_client_and_app
+    eid = uuid4()
+
+    with patch(
+        "app.features.graph.router.service.pop_undo_stack",
+        new=AsyncMock(side_effect=EngagementArchived("Engagement is archived")),
+    ):
+        resp = await client.post(f"/api/v1/engagements/{eid}/graph/undo-stack/pop")
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "conflict"
+
+
+@pytest.mark.asyncio
+async def test_undo_stack_non_member_404(
+    error_client_and_app: tuple[AsyncClient, FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    """A non-member receives 404 on the undo-stack endpoints (§17.1)."""
+    client, _, _ = error_client_and_app
+    eid = uuid4()
+
+    with patch(
+        "app.features.graph.router.service.get_undo_stack",
+        new=AsyncMock(side_effect=EngagementNotFound("Engagement not found")),
+    ):
+        resp = await client.get(f"/api/v1/engagements/{eid}/graph/undo-stack")
+
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_undo_stack_unauthenticated_401(anon_app: FastAPI) -> None:
+    """GET .../graph/undo-stack without a session cookie returns 401."""
+    eid = uuid4()
+    async with AsyncClient(
+        transport=ASGITransport(app=anon_app), base_url="https://test"
+    ) as client:
+        resp = await client.get(f"/api/v1/engagements/{eid}/graph/undo-stack")
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_pop_is_user_scoped(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    """User A's pop never touches user B's writes, and vice versa (§8.2 scoping)."""
+    app, factory = app_and_factory
+
+    async with factory() as session:
+        alice = await auth_repo.create_user(
+            session, username="alice", password_hash=_hasher.hash("pw"), role="user"
+        )
+        bob = await auth_repo.create_user(
+            session, username="bob", password_hash=_hasher.hash("pw"), role="user"
+        )
+        await session.commit()
+        await session.refresh(alice)
+        await session.refresh(bob)
+        alice_id: UUID = alice.id  # type: ignore[assignment]
+        bob_id: UUID = bob.id  # type: ignore[assignment]
+
+    async with factory() as session:
+        engagement = await eng_repo.create_engagement(
+            session, name="Shared", scope="x", client_info=None, owner_id=alice_id
+        )
+        await session.commit()
+        await session.refresh(engagement)
+        eid: UUID = engagement.id  # type: ignore[assignment]
+
+    async with factory() as session:
+        await eng_repo.add_member(session, eid, bob_id)
+        await session.commit()
+
+    async with (
+        AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as ca,
+        AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as cb,
+    ):
+        assert (
+            await ca.post("/api/v1/auth/login", json={"username": "alice", "password": "pw"})
+        ).status_code == 200
+        assert (
+            await cb.post("/api/v1/auth/login", json={"username": "bob", "password": "pw"})
+        ).status_code == 200
+
+        # Alice creates a node.
+        create = await ca.post(
+            f"/api/v1/engagements/{eid}/graph/nodes",
+            json={"type": "host", "label": "alice-host"},
+        )
+        assert create.status_code == 201
+        node_id = create.json()["id"]
+
+        # Bob's stack is empty; his pop undoes nothing and leaves Alice's node intact.
+        bob_stack = await cb.get(f"/api/v1/engagements/{eid}/graph/undo-stack")
+        assert bob_stack.json()["depth"] == 0
+        bob_pop = await cb.post(f"/api/v1/engagements/{eid}/graph/undo-stack/pop")
+        assert bob_pop.status_code == 200
+        assert bob_pop.json()["undone"] is None
+
+        graph = await ca.get(f"/api/v1/engagements/{eid}/graph")
+        assert node_id in [n["id"] for n in graph.json()["nodes"]]
+
+        # Alice's pop undoes her own write.
+        alice_pop = await ca.post(f"/api/v1/engagements/{eid}/graph/undo-stack/pop")
+        assert alice_pop.json()["undone"] is not None
+        graph2 = await ca.get(f"/api/v1/engagements/{eid}/graph")
+        assert node_id not in [n["id"] for n in graph2.json()["nodes"]]
