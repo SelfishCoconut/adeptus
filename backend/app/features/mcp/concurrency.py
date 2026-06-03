@@ -603,7 +603,16 @@ async def acquire(
         await result
 
     # Wait until the admission scan wakes us.
-    await ticket.admitted.wait()
+    # Use try/finally so that if the waiting task is cancelled (e.g. by kill_run
+    # via task.cancel()), the ticket is removed from the queue before re-raising.
+    # Without this, a cancelled task would leave a ghost ticket in the queue,
+    # blocking the FIFO forever (Risk 3 / Slice 06 Task 5).
+    try:
+        await ticket.admitted.wait()
+    except asyncio.CancelledError:
+        # Remove our ticket from the queue (if still there) so we don't block it.
+        state.queue.pop(tool_run_id, None)
+        raise  # Re-raise so the caller's CancelledError handling runs.
 
     # Slice 06: if the ticket was killed before admission, raise RunKilled.
     if ticket.killed:
@@ -915,7 +924,7 @@ def set_paused(engagement_id: UUID, paused: bool) -> tuple[int, int]:
 def release_for_decision(
     engagement_id: UUID,
     tool_run_id: UUID,
-    handle: AdmissionHandle,
+    handle: AdmissionHandle | None,
 ) -> None:
     """Release the admission slot + host lock immediately and park the run.
 
@@ -923,7 +932,9 @@ def release_for_decision(
     After this call:
     - The concurrency slot and host lock are returned to the FIFO queue (via the
       normal ``release`` path) so other waiters can be admitted while the human
-      decides what to do with the timed-out run.
+      decides what to do with the timed-out run.  If ``handle`` is ``None`` (e.g.
+      for a light tool that never acquired a slot), the slot-release step is skipped
+      and only the rendezvous is created.
     - The run is marked ``holds_slot=False`` in the registry (awaiting-decision).
     - A fresh ``_DecisionRendezvous`` is created for this run.
 
@@ -937,7 +948,9 @@ def release_for_decision(
     ``await_timeout_decision(tool_run_id)`` to wait for the human's choice.
     """
     # Release the slot + host lock back to the queue so the FIFO can advance.
-    release(handle)  # Idempotent — sets handle.released = True.
+    # For light runs (handle=None) there is no slot to release.
+    if handle is not None:
+        release(handle)  # Idempotent — sets handle.released = True.
 
     # Mark the run as awaiting-decision (slotless) in the registry.
     entry = _registry.get(tool_run_id)

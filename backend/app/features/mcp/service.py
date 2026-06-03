@@ -25,6 +25,8 @@ import asyncio
 import base64
 import logging
 import os
+import time as _time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -81,10 +83,6 @@ class _RunChannel:
 # committed (Task 6 / Decision 3).  In-process only — not multi-worker safe
 # (documented in Risk 3: acceptable for v1 single-process Compose deployment).
 _channels: dict[UUID, _RunChannel] = {}
-
-# Keep a strong reference to background tasks so the GC does not collect them
-# before they complete.  (asyncio.create_task() returns a weak-referenced task.)
-_background_tasks: set[asyncio.Task[None]] = set()
 
 
 def broadcast_tool_run_output(tool_run_id: UUID, chunk: WebSocketOutputChunk) -> None:
@@ -164,7 +162,6 @@ def _discard_channel(tool_run_id: UUID) -> None:
 def _reset_channels() -> None:
     """Clear all channels.  For use in tests only."""
     _channels.clear()
-    _background_tasks.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -506,15 +503,10 @@ async def execute_tool_run(
                 target_host=target_host,
             )
         )
-        # Slice 06 Task 4: register the task in the cancellation registry so that
-        # kill_run / set_paused can find and cancel it by tool_run_id.  The registry
-        # holds a strong reference to the task (same guarantee as _background_tasks).
-        # _background_tasks is retained as an additional strong-ref set until Task 5
-        # fully rewrites _stream_to_channel with kill/timeout awareness; at that point
-        # the registry alone provides the strong-ref guarantee and _background_tasks
-        # can be removed.
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
+        # Slice 06 Task 5: the cancellation registry holds a strong reference to
+        # the task (preventing GC from collecting it before it finishes), replacing
+        # the former _background_tasks set.  The task is unregistered in the
+        # _stream_to_channel finally block.
         concurrency.register_run(engagement_id, tool_run_id, task)
 
         return ToolRunResult(
@@ -624,7 +616,7 @@ async def execute_tool_run(
     )
 
 
-async def _stream_to_channel(
+async def _stream_to_channel(  # noqa: C901 — intentionally complex; split would obscure invariants
     *,
     tool_run_id: UUID,
     engagement_id: UUID,
@@ -641,32 +633,112 @@ async def _stream_to_channel(
     Opens a FRESH database session (independent of the request session) so it can
     safely commit after the request has returned 202.
 
-    For heavy tools: calls ``concurrency.acquire`` before streaming, which blocks
-    (suspends the coroutine, not the thread) until a slot + host lock are available.
-    The ``on_queued`` callback broadcasts a ``queued`` WebSocketOutputChunk and
-    updates the DB row to ``status='queued'``; the ``on_started`` callback broadcasts
-    a ``started`` chunk and updates the row to ``status='running'`` with
-    ``started_at=now`` (Decision 6: started_at = admission time, not insert time).
-    The admission handle is ALWAYS released in the ``finally`` block (Risk 3).
+    DEADLINE MECHANISM (Decision 1 / Risk 3)
+    -----------------------------------------
+    The user-facing deadline is enforced at this layer, NOT in subprocess_manager.
+    Each event is fetched by iterating the generator manually and wrapping the
+    ``__anext__`` call in ``asyncio.wait_for(gen.__anext__(), timeout=remaining_seconds)``.
+    The remaining budget is tracked as a monotonic wall-clock deadline so the budget
+    survives across awaits (e.g. DB commits).
 
-    For light tools: admission is skipped entirely; the existing streaming loop runs
-    unchanged.
+    To prevent subprocess_manager's own ``outer_timeout`` from pre-empting this layer's
+    prompt, ``stream_tool_call`` is called with a transport timeout of
+    ``_LARGE_TRANSPORT_TIMEOUT`` (1 hour) — effectively unbounded for any real workload.
+    The actual wall-clock limit comes from the service-layer wait_for wrapper.
 
-    On StreamDone → updates the DB row to completed/timed_out status, broadcasts
-    a 'done' chunk, and returns.
+    KILL WHILE RUNNING (Risk 1 / Risk 2)
+    --------------------------------------
+    ``task.cancel()`` raises ``asyncio.CancelledError`` inside the
+    ``asyncio.wait_for(gen.__anext__(), ...)`` call.  Closing the async generator
+    (which happens on CancelledError propagation through the ``async for`` /
+    manual iteration) triggers the generator's ``finally`` block and exits
+    ``async with handle.lock`` — the per-server subprocess lock is released.
+    The underlying MCP subprocess itself is NOT killed (Decision 2 / Risk 2):
+    we stop reading its output and release our locks, but the scan process may
+    continue running inside the MCP server.  This is documented and accepted.
 
-    On any exception → updates the DB row to 'failed', broadcasts an 'error' chunk.
+    A ``CancelledError`` is caught, the row is persisted as ``killed``, a ``killed``
+    WS chunk is broadcast, and the exception is SWALLOWED (not re-raised).
+    Rationale: ``_stream_to_channel`` is a detached background task.  Re-raising
+    would propagate the CancelledError to asyncio's task machinery, which logs an
+    unhandled exception and discards it anyway.  Swallowing after persisting is
+    cleaner, avoids spurious log noise, and matches the ``except Exception`` pattern
+    already used for all other failures in this function.  This is safe because the
+    task is already being abandoned by its canceller — there is no caller awaiting
+    the return value.
 
-    In all cases the channel is discarded and the admission handle (if any) is
-    released in the finally block.
+    KILL WHILE QUEUED
+    ------------------
+    ``concurrency.acquire`` raises ``RunKilled`` when the run's FIFO ticket is
+    cancelled before admission.  This is caught before streaming starts; the row
+    is persisted as ``killed`` and no subprocess is ever touched.
+
+    TIMEOUT-CONFIRM WITH SLOT RELEASE (Decision 1 / Decision 6 / Risk 3 / Risk 7)
+    -------------------------------------------------------------------------------
+    When the service-layer deadline fires (``asyncio.TimeoutError`` from ``wait_for``):
+    1. The generator is closed (abandons the current subprocess call, releases
+       the per-server lock — same mechanism as kill).
+    2. ``concurrency.release_for_decision`` releases the admission slot + host lock
+       so waiting runs can be admitted immediately.  The original handle is marked
+       ``released=True`` by the underlying ``concurrency.release`` call.
+    3. The row is persisted as ``awaiting_decision``; a ``timeout`` WS chunk is
+       broadcast.  ``concurrency.await_timeout_decision`` is called with NO timeout —
+       the prompt stays open indefinitely (Decision 6 / Risk 8).
+    4. On the decision:
+       - ``kill`` → persist ``killed``, broadcast ``killed``, return (no re-acquire).
+       - ``extend`` / ``wait`` → re-``acquire(...)`` through the normal FIFO admission
+         path (respects the queue, host lock, and pause flag); emit a fresh ``started``
+         chunk once admitted; reset the deadline (extend) or disable it (wait);
+         open a fresh ``stream_tool_call`` and resume reading.
+    5. A ``kill``/pause arriving while parked resolves the rendezvous as ``kill``
+       (handled by the concurrency module — task 3).
+
+    SLOT ACCOUNTING INVARIANT (Risk 7)
+    -----------------------------------
+    ``_current_handle`` is a mutable list cell so the ``finally`` block always
+    releases the CURRENTLY HELD handle, not the one already released by
+    ``release_for_decision``.  At any instant there is exactly one outstanding handle
+    (or None).  The flow is:
+    - After ``acquire``: ``_current_handle[0]`` = new handle (``released=False``).
+    - After ``release_for_decision``: original handle is marked ``released=True``
+      (idempotent guard), ``_current_handle[0]`` = ``None``.
+    - After re-``acquire`` on extend/wait: ``_current_handle[0]`` = new handle.
+    - ``finally`` calls ``concurrency.release(_current_handle[0])`` only when it is
+      not None — the ``released`` guard makes it a no-op if already released.
+
+    RE-OPEN SEMANTICS ON EXTEND/WAIT
+    ----------------------------------
+    Because the original generator was closed, resuming means starting a fresh
+    ``stream_tool_call`` for the same tool args.  For the demo ``sleep_probe`` /
+    ``run_httpx_heavy`` tool this restarts the call (acceptable — Decision 1 /
+    Risk 3).  True checkpoint/resume is out of scope.
+
+    CANCELLATION SAFETY ON RE-ACQUIRE
+    -----------------------------------
+    A ``kill``/pause arriving during the re-``acquire`` (which may block on the host
+    lock / FIFO queue) raises either ``CancelledError`` or ``RunKilled`` /
+    ``EngagementPaused``.  All of these are caught and the slot is NOT acquired —
+    no dangling slot is left behind (Risk 7 hazard b).
     """
+    # Very large transport timeout so subprocess_manager's outer_timeout never
+    # pre-empts the service-layer deadline prompt (Decision 1 / Risk 3).
+    _LARGE_TRANSPORT_TIMEOUT: float = 3600.0
+
     async with get_sessionmaker()() as session:
-        # Admission handle for heavy runs.  Initialised to None so the finally
-        # block can guard against releasing a handle that was never acquired
-        # (e.g. if acquire() itself raised before returning).  Risk 3.
-        admission_handle: AdmissionHandle | None = None
+        # Mutable cell for the currently-held admission handle.  One entry only.
+        # ``None`` when the tool is light (no slot held), or after release_for_decision
+        # has been called (the original handle is already released and a new one has
+        # not yet been acquired).  Updated on every acquire / release_for_decision.
+        _current_handle: list[AdmissionHandle | None] = [None]
+
+        # Flag: True when the run has entered awaiting_decision and concurrency
+        # cleanup_decision must be called in the finally block.
+        _has_decision_rendezvous: bool = False
 
         try:
+            # ---------------------------------------------------------------
+            # KILL WHILE QUEUED path: RunKilled from acquire (step 1 of heavy path)
+            # ---------------------------------------------------------------
             if is_heavy:
                 # --- Async-path admission callbacks ---
 
@@ -714,53 +786,397 @@ async def _stream_to_channel(
                             tool_run_id,
                         )
 
-                admission_handle = await concurrency.acquire(
-                    engagement_id=engagement_id,
-                    slot_limit=slot_limit,
-                    tool_run_id=tool_run_id,
-                    target_host=target_host,
-                    server_name=server_name,
-                    tool_name=tool_name,
-                    on_queued=_on_queued,
-                    on_started=_on_started,
-                )
-
-            # --- Streaming loop (identical for light and heavy) ---
-            async for ev in subprocess_manager.stream_tool_call(
-                server_name=server_name,
-                tool_name=tool_name,
-                args=args,
-                timeout_seconds=timeout_seconds,
-            ):
-                if isinstance(ev, StreamChunk):
+                try:
+                    _current_handle[0] = await concurrency.acquire(
+                        engagement_id=engagement_id,
+                        slot_limit=slot_limit,
+                        tool_run_id=tool_run_id,
+                        target_host=target_host,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        on_queued=_on_queued,
+                        on_started=_on_started,
+                    )
+                except concurrency.RunKilled:
+                    # The run's FIFO ticket was killed before it was ever admitted.
+                    # No subprocess was touched.  Persist killed status and return.
+                    logger.info(
+                        "tool_run_id=%s killed while queued (before admission)", tool_run_id
+                    )
+                    now = datetime.now(tz=UTC)
+                    try:
+                        await mcp_repo.update_tool_run_result(
+                            session,
+                            tool_run_id,
+                            exit_code=1,
+                            stdout="",
+                            stderr="killed before start",
+                            finished_at=now,
+                            status="killed",
+                        )
+                        await session.commit()
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Failed to persist 'killed' (queued) for tool_run_id=%s",
+                            tool_run_id,
+                        )
                     broadcast_tool_run_output(
                         tool_run_id,
-                        WebSocketOutputChunk(type=ev.type, data=ev.data),
+                        WebSocketOutputChunk(type="killed", message="killed by user"),
                     )
-                elif isinstance(ev, StreamDone):
+                    return  # No subprocess was called; finally still runs for cleanup.
+                except concurrency.EngagementPaused:
+                    # Engagement was paused before the run could be admitted.
+                    logger.info(
+                        "tool_run_id=%s rejected: engagement %s paused", tool_run_id, engagement_id
+                    )
                     now = datetime.now(tz=UTC)
-                    final_status: ToolRunStatus = (
-                        "timed_out" if ev.exit_code == 124 else "completed"
-                    )
-                    await mcp_repo.update_tool_run_result(
-                        session,
+                    try:
+                        await mcp_repo.update_tool_run_result(
+                            session,
+                            tool_run_id,
+                            exit_code=1,
+                            stdout="",
+                            stderr="engagement paused",
+                            finished_at=now,
+                            status="killed",
+                        )
+                        await session.commit()
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Failed to persist 'killed' (paused) for tool_run_id=%s",
+                            tool_run_id,
+                        )
+                    broadcast_tool_run_output(
                         tool_run_id,
-                        exit_code=ev.exit_code,
-                        stdout=ev.stdout,
-                        stderr=ev.stderr,
-                        finished_at=now,
-                        status=final_status,
+                        WebSocketOutputChunk(type="killed", message="engagement paused"),
                     )
-                    await session.commit()
+                    return
+
+            # ---------------------------------------------------------------
+            # Compute the service-layer deadline (mutable wall-clock deadline).
+            # ``None`` means "no deadline" (used after a 'wait' decision).
+            # ---------------------------------------------------------------
+            deadline: float | None = (
+                _time.monotonic() + timeout_seconds if timeout_seconds > 0 else None
+            )
+
+            # ---------------------------------------------------------------
+            # Streaming loop — may loop multiple times on extend/wait.
+            # ---------------------------------------------------------------
+            while True:
+                # Open a fresh generator.  Transport timeout is effectively unbounded
+                # so the subprocess_manager's outer_timeout never fires before the
+                # service-layer deadline (Decision 1 / Risk 3).
+                # Cast to AsyncGenerator so mypy knows aclose() is available
+                # (stream_tool_call is annotated AsyncIterator but is really an
+                # async generator; AsyncGenerator is a subtype of AsyncIterator).
+                gen = cast(
+                    AsyncGenerator[StreamChunk | StreamDone, None],
+                    subprocess_manager.stream_tool_call(
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        args=args,
+                        timeout_seconds=_LARGE_TRANSPORT_TIMEOUT,
+                    ),
+                )
+
+                timed_out = False
+                try:
+                    while True:
+                        # Compute remaining budget.
+                        if deadline is not None:
+                            remaining = deadline - _time.monotonic()
+                            if remaining <= 0:
+                                timed_out = True
+                                break
+                        else:
+                            remaining = None  # no deadline
+
+                        # Fetch next event with service-layer deadline.
+                        try:
+                            if remaining is not None:
+                                ev = await asyncio.wait_for(gen.__anext__(), timeout=remaining)
+                            else:
+                                ev = await gen.__anext__()
+                        except TimeoutError:
+                            # Service-layer deadline fired.
+                            timed_out = True
+                            break
+                        except StopAsyncIteration:
+                            # Generator exhausted normally.
+                            break
+
+                        if isinstance(ev, StreamChunk):
+                            broadcast_tool_run_output(
+                                tool_run_id,
+                                WebSocketOutputChunk(type=ev.type, data=ev.data),
+                            )
+                        elif isinstance(ev, StreamDone):
+                            now = datetime.now(tz=UTC)
+                            final_status: ToolRunStatus = (
+                                "timed_out" if ev.exit_code == 124 else "completed"
+                            )
+                            await mcp_repo.update_tool_run_result(
+                                session,
+                                tool_run_id,
+                                exit_code=ev.exit_code,
+                                stdout=ev.stdout,
+                                stderr=ev.stderr,
+                                finished_at=now,
+                                status=final_status,
+                            )
+                            await session.commit()
+                            broadcast_tool_run_output(
+                                tool_run_id,
+                                WebSocketOutputChunk(
+                                    type="done",
+                                    exit_code=ev.exit_code,
+                                    finished_at=now,
+                                ),
+                            )
+                            return  # Completed normally; finally block does cleanup.
+                finally:
+                    # Always close the generator so the per-server subprocess lock
+                    # is released (Risk 1 / Risk 2).  aclose() is idempotent.
+                    await gen.aclose()
+
+                # ---------------------------------------------------------------
+                # TIMEOUT path — service-layer deadline fired.
+                # ---------------------------------------------------------------
+                if timed_out:
+                    # Step 1: Generator is already closed (aclose() called above).
+                    #         Per-server lock is released.
+
+                    # Step 2: Release the admission slot + host lock back to the
+                    #         queue so the FIFO can advance (Decision 6).
+                    # For light tools (_current_handle[0] is None), release_for_decision
+                    # still creates the rendezvous and marks the registry entry as
+                    # slotless — just without releasing a (non-existent) slot.
+                    concurrency.release_for_decision(engagement_id, tool_run_id, _current_handle[0])
+                    _current_handle[0] = None  # slot is now released; guard against double-release
+
+                    _has_decision_rendezvous = True
+
+                    # Step 3: Persist awaiting_decision and broadcast the timeout prompt.
+                    try:
+                        await mcp_repo.update_tool_run_status(
+                            session,
+                            tool_run_id,
+                            status="awaiting_decision",
+                        )
+                        await session.commit()
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Failed to persist 'awaiting_decision' for tool_run_id=%s",
+                            tool_run_id,
+                        )
                     broadcast_tool_run_output(
                         tool_run_id,
                         WebSocketOutputChunk(
-                            type="done",
-                            exit_code=ev.exit_code,
-                            finished_at=now,
+                            type="timeout",
+                            message=(
+                                "Timeout reached. Concurrency slot released — queued runs "
+                                "can now advance. Waiting for your decision: kill / extend / wait."
+                            ),
                         ),
                     )
-                    break
+
+                    # Step 4: Wait indefinitely for the human's decision (Risk 8).
+                    decision = await concurrency.await_timeout_decision(tool_run_id)
+                    concurrency.cleanup_decision(tool_run_id)
+                    _has_decision_rendezvous = False
+
+                    if decision == "kill":
+                        # Human chose kill — persist and broadcast, then return.
+                        logger.info("tool_run_id=%s timeout decision: kill", tool_run_id)
+                        now = datetime.now(tz=UTC)
+                        try:
+                            await mcp_repo.update_tool_run_result(
+                                session,
+                                tool_run_id,
+                                exit_code=1,
+                                stdout="",
+                                stderr="killed after timeout",
+                                finished_at=now,
+                                status="killed",
+                            )
+                            await session.commit()
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "Failed to persist 'killed' (timeout-kill) for tool_run_id=%s",
+                                tool_run_id,
+                            )
+                        broadcast_tool_run_output(
+                            tool_run_id,
+                            WebSocketOutputChunk(
+                                type="killed",
+                                message="killed by user",
+                            ),
+                        )
+                        return  # finally does cleanup.
+
+                    # extend or wait — re-acquire a slot through the normal path.
+                    # (This re-acquire respects FIFO, host lock, and pause flag.)
+                    if decision == "extend":
+                        extend_seconds: float = 30.0  # default; caller may override via REST
+                        new_deadline: float | None = _time.monotonic() + extend_seconds
+                    else:
+                        # decision == "wait" — disable the deadline entirely.
+                        new_deadline = None
+
+                    logger.info(
+                        "tool_run_id=%s timeout decision: %s, re-acquiring slot",
+                        tool_run_id,
+                        decision,
+                    )
+
+                    # Callbacks for re-acquire.  on_queued re-uses the heavy callback
+                    # (if defined) so queue-position updates are still broadcast.
+                    # on_started is a no-op here; we broadcast the 'started' chunk
+                    # inline immediately after acquire returns (so we can close over
+                    # session and tool_run_id correctly).
+                    # cast: pre-commit mypy (no backend config) needs explicit typing.
+                    from app.features.mcp.concurrency import OnQueuedCallback
+
+                    _reacquire_on_queued: OnQueuedCallback = (
+                        cast(OnQueuedCallback, _on_queued)
+                        if is_heavy
+                        else cast(OnQueuedCallback, lambda p, r: None)
+                    )
+
+                    # Re-acquire — cancellation-aware (Risk 7 hazard b).
+                    _reacquire_killed_msg: str = "killed by user"
+                    try:
+                        _current_handle[0] = await concurrency.acquire(
+                            engagement_id=engagement_id,
+                            slot_limit=slot_limit,
+                            tool_run_id=tool_run_id,
+                            target_host=target_host,
+                            server_name=server_name,
+                            tool_name=tool_name,
+                            on_queued=_reacquire_on_queued,
+                            on_started=lambda: None,
+                        )
+                    except concurrency.EngagementPaused:
+                        _reacquire_killed_msg = "engagement paused"
+                        _current_handle[0] = None
+                        logger.info(
+                            "tool_run_id=%s killed during re-acquire (engagement paused)",
+                            tool_run_id,
+                        )
+                        now = datetime.now(tz=UTC)
+                        try:
+                            await mcp_repo.update_tool_run_result(
+                                session,
+                                tool_run_id,
+                                exit_code=1,
+                                stdout="",
+                                stderr="killed during re-acquire",
+                                finished_at=now,
+                                status="killed",
+                            )
+                            await session.commit()
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "Failed to persist 'killed' (re-acquire paused) for tool_run_id=%s",
+                                tool_run_id,
+                            )
+                        broadcast_tool_run_output(
+                            tool_run_id,
+                            WebSocketOutputChunk(type="killed", message=_reacquire_killed_msg),
+                        )
+                        return  # finally does cleanup.
+                    except concurrency.RunKilled:
+                        _current_handle[0] = None
+                        logger.info(
+                            "tool_run_id=%s killed during re-acquire (run killed)", tool_run_id
+                        )
+                        now = datetime.now(tz=UTC)
+                        try:
+                            await mcp_repo.update_tool_run_result(
+                                session,
+                                tool_run_id,
+                                exit_code=1,
+                                stdout="",
+                                stderr="killed during re-acquire",
+                                finished_at=now,
+                                status="killed",
+                            )
+                            await session.commit()
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "Failed to persist 'killed' (re-acquire killed) for tool_run_id=%s",
+                                tool_run_id,
+                            )
+                        broadcast_tool_run_output(
+                            tool_run_id,
+                            WebSocketOutputChunk(type="killed", message="killed by user"),
+                        )
+                        return  # finally does cleanup.
+
+                    # Re-acquire succeeded.  Broadcast a fresh 'started' chunk and
+                    # update the DB row to 'running' with a fresh started_at so the
+                    # UI shows the run resuming (Decision 6).
+                    reacquire_now = datetime.now(tz=UTC)
+                    broadcast_tool_run_output(
+                        tool_run_id,
+                        WebSocketOutputChunk(type="started"),
+                    )
+                    try:
+                        await mcp_repo.update_tool_run_status(
+                            session,
+                            tool_run_id,
+                            status="running",
+                            started_at=reacquire_now,
+                        )
+                        await session.commit()
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Failed to persist 'running' (re-acquire) for tool_run_id=%s",
+                            tool_run_id,
+                        )
+
+                    # Update deadline and loop back to start a fresh stream.
+                    deadline = new_deadline
+                    continue  # Back to top of while True — opens a fresh generator.
+
+                # Should not be reached (timed_out=False and no return above means
+                # the generator exhausted without a StreamDone — treat as error).
+                break  # Falls through to the error path below.
+
+        except asyncio.CancelledError:
+            # KILL WHILE RUNNING (or during awaiting-decision's await_timeout_decision).
+            # The task was cancelled by kill_run / set_paused.
+            # Per-server lock is released by the generator's aclose() in the inner
+            # finally block above (which ran before the CancelledError propagated here).
+            # Persist killed status and broadcast; SWALLOW the CancelledError.
+            # (See docstring for the rationale for swallowing vs re-raising.)
+            logger.info(
+                "tool_run_id=%s cancelled (kill while running or kill-during-await)",
+                tool_run_id,
+            )
+            now = datetime.now(tz=UTC)
+            try:
+                await mcp_repo.update_tool_run_result(
+                    session,
+                    tool_run_id,
+                    exit_code=1,
+                    stdout="",
+                    stderr="killed by user",
+                    finished_at=now,
+                    status="killed",
+                )
+                await session.commit()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Failed to persist 'killed' (cancelled) for tool_run_id=%s", tool_run_id
+                )
+            broadcast_tool_run_output(
+                tool_run_id,
+                WebSocketOutputChunk(type="killed", message="killed by user"),
+            )
+            # CancelledError is swallowed — detached task must not crash the loop.
 
         except Exception as exc:  # noqa: BLE001 — catch all; detached task must not raise
             logger.exception(
@@ -788,17 +1204,24 @@ async def _stream_to_channel(
             )
 
         finally:
-            # Release the admission handle FIRST so the next queued run can be
-            # admitted before the channel is discarded.  Guard against double-release
-            # (handle.released flag) and against a handle that was never acquired
-            # (admission_handle is None when acquire() raised or tool is light).
-            # Risk 3: a leaked slot would permanently block the engagement.
-            if admission_handle is not None:
-                concurrency.release(admission_handle)
-            # Slice 06 Task 4: unregister from the cancellation registry so the map
-            # does not grow without bound.  Task 5 will replace this minimal
-            # unregister with full kill/timeout-aware cleanup; for now this call
-            # ensures the registry is clean after any completion or error path.
+            # Release the CURRENTLY HELD admission handle (Risk 3 / Risk 7).
+            # The ``released`` idempotency guard on AdmissionHandle ensures that a
+            # handle already released by ``release_for_decision`` is a no-op here.
+            # ``_current_handle[0]`` is None when:
+            #   (a) the tool is light (no slot was ever acquired), or
+            #   (b) the slot was already released by ``release_for_decision`` and
+            #       no re-acquire followed (e.g. decision=kill, or we are in the
+            #       awaiting-decision state when the task is cancelled).
+            h = _current_handle[0]
+            if h is not None:
+                concurrency.release(h)
+
+            # Clean up the decision rendezvous if we never finished resolving it
+            # (e.g. CancelledError arrived while awaiting the decision).
+            if _has_decision_rendezvous:
+                concurrency.cleanup_decision(tool_run_id)
+
+            # Unregister from the cancellation registry so the map does not grow.
             concurrency.unregister_run(tool_run_id)
             _discard_channel(tool_run_id)
 
