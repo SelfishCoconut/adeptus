@@ -538,6 +538,11 @@ async def undo_edge(
 
 # ---------------------------------------------------------------------------
 # Personal undo stack (Slice 09) — get + pop
+#
+# No lifespan/warm-start hook is needed (task 7): unlike the in-memory writer,
+# the personal stack is fully persisted in Postgres (graph_user_undo_stack), so
+# it survives a process restart with no rebuild. The staleness baseline
+# (target_updated_at) is captured at push time and stored — never recomputed.
 # ---------------------------------------------------------------------------
 
 
