@@ -24,6 +24,10 @@ from app.features.graph.schemas import (
     NodeHistoryEntry,
     NodeType,
     NodeUpdate,
+    UndoOpType,
+    UndoResult,
+    UndoStack,
+    UndoStackEntry,
 )
 
 # ---------------------------------------------------------------------------
@@ -304,3 +308,30 @@ def test_graph_history_empty() -> None:
     gh = GraphHistory(deleted_nodes=[], node_history=[])
     assert gh.deleted_nodes == []
     assert gh.node_history == []
+
+
+# ---------------------------------------------------------------------------
+# Personal undo-stack schemas (Slice 09)
+# ---------------------------------------------------------------------------
+
+
+def test_undo_stack_entry_from_attributes_defaults_not_stale() -> None:
+    """UndoStackEntry maps from an ORM-like row; stale defaults to False."""
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        op_type="create_node",
+        entity_kind="node",
+        entity_id=uuid.uuid4(),
+        summary="Created host 10.0.0.5",
+        recorded_at=datetime.now(UTC),
+    )
+    entry = UndoStackEntry.model_validate(row)
+    assert entry.op_type is UndoOpType.create_node
+    assert entry.stale is False
+
+
+def test_undo_result_undone_null_is_allowed() -> None:
+    """A pop with nothing to undo carries undone=None (Decision 2, not an error)."""
+    result = UndoResult(undone=None, skipped_stale=[], stack=UndoStack(depth=0, entries=[]))
+    assert result.undone is None
+    assert result.stack.depth == 0
