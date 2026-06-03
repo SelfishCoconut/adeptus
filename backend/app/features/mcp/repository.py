@@ -173,21 +173,38 @@ async def get_tool_run_by_id(db: AsyncSession, tool_run_id: UUID) -> ToolRun | N
 
 
 async def reconcile_stale_tool_runs(db: AsyncSession) -> int:
-    """Mark any phantom-queued or in-flight rows as failed on startup.
+    """Mark any phantom-queued, in-flight, or awaiting-decision rows as failed on startup.
 
-    After a backend restart the in-process admission queue and slot pool are
-    empty, so any ``tool_runs`` row still in ``status='queued'`` or
-    ``status='running'`` is a phantom — its background task no longer exists.
-    This function performs a single idempotent UPDATE that:
+    After a backend restart the in-process admission queue, slot pool, and
+    timeout-decision rendezvous are all gone, so any ``tool_runs`` row still in
+    a non-terminal transient state is a phantom — its background task no longer
+    exists.  This function performs a single idempotent UPDATE that:
 
     - Sets ``status='failed'`` for all rows where
-      ``status IN ('queued', 'running')``.
+      ``status IN ('queued', 'running', 'awaiting_decision')``.
     - Sets ``finished_at`` to the current wall-clock time (UTC) for those
       rows, keeping terminal rows consistent (every failed row has a
       ``finished_at``).
 
-    Terminal rows (``completed``, ``failed``, ``timed_out``) are never touched
-    because the WHERE clause matches only the two non-terminal phantom states.
+    Why ``awaiting_decision`` is reconciled (Decision 6 / Risk 8 / Slice 06
+    task 8):  a run in ``awaiting_decision`` has already released its
+    concurrency slot and is waiting for a human's kill/extend/wait answer via
+    an in-process ``asyncio.Event`` rendezvous.  That rendezvous does not
+    survive a backend restart, so the parked task is gone and the row must be
+    marked ``failed`` to prevent it sitting in a zombie state indefinitely.
+    Because the slot was already released before the run parked, no slot
+    accounting correction is needed here — just the status flip.
+
+    Note on the ``paused`` flag:  the engagement-wide pause is persisted as a
+    DB column (``engagements.paused``), so it survives a restart correctly.
+    After a restart no tool runs are in flight, but if an engagement was paused
+    before the crash its ``paused=true`` flag is still set.  This is the
+    correct, intended behaviour: the engagement simply continues to reject new
+    tool runs until a member explicitly resumes it.  No action is needed here.
+
+    Terminal rows (``completed``, ``failed``, ``timed_out``, ``killed``) are
+    never touched because the WHERE clause matches only the three non-terminal
+    phantom states.
 
     The caller is responsible for committing the transaction.
 
@@ -201,7 +218,7 @@ async def reconcile_stale_tool_runs(db: AsyncSession) -> int:
     now = datetime.now(tz=UTC)
     result = await db.execute(
         update(ToolRun)
-        .where(ToolRun.status.in_(["queued", "running"]))
+        .where(ToolRun.status.in_(["queued", "running", "awaiting_decision"]))
         .values(status="failed", finished_at=now)
     )
     return cast(int, result.rowcount)  # type: ignore[attr-defined]
