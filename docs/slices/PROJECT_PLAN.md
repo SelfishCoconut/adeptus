@@ -98,7 +98,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §8.3, §5.4 (pinning)
 - **Depends on**: 07
 - **Risky**: no
-- **Status**: todo
+- **Status**: in-progress
 
 ### Slice 09: Personal undo stack
 - **Goal**: Each user has 20-deep undo of their own writes; never reverts teammate work
