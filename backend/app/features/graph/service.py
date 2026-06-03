@@ -31,6 +31,7 @@ Single-writer delegation (ADR-0001):
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import cast
 from uuid import UUID
 
@@ -40,12 +41,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import NotFoundError
 from app.features.engagements import repository as eng_repo
 from app.features.engagements.models import Engagement
+from app.features.graph import repository as repo
 from app.features.graph import writer
 from app.features.graph.errors import (
     EngagementArchived,
     NodeNotFound,
 )
-from app.features.graph.models import GraphNode, GraphNodeHistory
+from app.features.graph.models import (
+    GraphEdge,
+    GraphNode,
+    GraphNodeHistory,
+    GraphUserUndoStack,
+)
 from app.features.graph.schemas import (
     Edge,
     EdgeCreate,
@@ -116,6 +123,94 @@ def _require_writable(engagement: Engagement) -> None:
     """
     if engagement.status == "archived":
         raise EngagementArchived(f"Engagement {engagement.id} is archived; writes are not allowed")
+
+
+# ---------------------------------------------------------------------------
+# Personal undo stack (Slice 09) — staleness, summaries, push
+# ---------------------------------------------------------------------------
+
+
+def _is_entry_stale(
+    entry: GraphUserUndoStack,
+    current_entity: GraphNode | GraphEdge | None,
+) -> bool:
+    """Pure staleness predicate for a personal-undo entry (Decision 1).
+
+    An entry is stale if its target entity changed AT ALL after the entry was
+    recorded — ANY later write, by anyone, including the entry's own owner. A
+    missing / hard-deleted entity is also stale. We compare the entity's current
+    ``updated_at`` to the baseline captured immediately after the user's write.
+
+    The writer sets ``updated_at`` via ``onupdate=func.now()`` on every mutation,
+    and all writes are serialized through the single writer (ADR-0001), so any
+    later mutation strictly follows and bumps ``updated_at`` past the baseline.
+    A stale entry is never silently applied — it is dropped and surfaced (§8.2).
+    """
+    if current_entity is None:
+        return True
+    return current_entity.updated_at != entry.target_updated_at
+
+
+def _node_op_summary(op_type: str, node_type: str, label: str) -> str:
+    """Human-readable label for a node undo entry, e.g. 'Created host 10.0.0.5'."""
+    verb = {"create_node": "Created", "update_node": "Updated", "delete_node": "Deleted"}[op_type]
+    return f"{verb} {node_type} {label}"[:256]
+
+
+def _edge_op_summary(op_type: str, relation: str) -> str:
+    """Human-readable label for an edge undo entry, e.g. 'Created runs edge'."""
+    verb = {"create_edge": "Created", "delete_edge": "Deleted"}[op_type]
+    return f"{verb} {relation} edge"[:256]
+
+
+async def _read_current_node(db: AsyncSession, node_id: UUID) -> GraphNode | None:
+    """Read the authoritative GraphNode row for a staleness check.
+
+    We read from Postgres directly (like get_graph_history) rather than the
+    writer's in-memory snapshot: the in-memory Node's ``updated_at`` is NOT
+    re-stamped on soft-delete, so the DB row is the only reliable staleness
+    baseline. This is a READ — it never mutates a graph entity, so the
+    single-writer invariant (ADR-0001) is untouched.
+    """
+    return await repo.get_node(db, node_id)
+
+
+async def _read_current_edge(db: AsyncSession, edge_id: UUID) -> GraphEdge | None:
+    """Read the authoritative GraphEdge row for a staleness check (see _read_current_node)."""
+    return await repo.get_edge(db, edge_id)
+
+
+async def _push_undo(
+    db: AsyncSession,
+    *,
+    engagement_id: UUID,
+    user_id: UUID,
+    op_type: str,
+    entity_kind: str,
+    entity_id: UUID,
+    target_updated_at: datetime,
+    summary: str,
+) -> None:
+    """Record one personal-undo entry for a human write and commit it.
+
+    Called AFTER the writer has committed the graph mutation in its own session.
+    This touches ONLY graph_user_undo_stack via the request's db session — never a
+    graph entity — so it does NOT go through the writer queue and cannot violate
+    the single-writer invariant (ADR-0001). Together with pop_undo_stack this is
+    one of the two chokepoints where Slice 10 will attach audit emission
+    (Decision 4); no audit module is imported here.
+    """
+    await repo.push_undo_entry(
+        db,
+        engagement_id=engagement_id,
+        user_id=user_id,
+        op_type=op_type,
+        entity_kind=entity_kind,
+        entity_id=entity_id,
+        target_updated_at=target_updated_at,
+        summary=summary,
+    )
+    await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -213,12 +308,23 @@ async def create_node(
     """
     engagement = await _require_member(db, engagement_id, user_id)
     _require_writable(engagement)
-    return await writer.submit_create_node(
+    node = await writer.submit_create_node(
         engagement_id,
         node_type=payload.type.value,
         label=payload.label,
         properties=payload.properties,
     )
+    await _push_undo(
+        db,
+        engagement_id=engagement_id,
+        user_id=user_id,
+        op_type="create_node",
+        entity_kind="node",
+        entity_id=node.id,
+        target_updated_at=node.updated_at,
+        summary=_node_op_summary("create_node", node.type.value, node.label),
+    )
+    return node
 
 
 async def update_node(
@@ -238,12 +344,23 @@ async def update_node(
     """
     engagement = await _require_member(db, engagement_id, user_id)
     _require_writable(engagement)
-    return await writer.submit_update_node(
+    node = await writer.submit_update_node(
         engagement_id,
         node_id,
         label=payload.label,
         properties=payload.properties,
     )
+    await _push_undo(
+        db,
+        engagement_id=engagement_id,
+        user_id=user_id,
+        op_type="update_node",
+        entity_kind="node",
+        entity_id=node.id,
+        target_updated_at=node.updated_at,
+        summary=_node_op_summary("update_node", node.type.value, node.label),
+    )
+    return node
 
 
 async def delete_node(
@@ -262,6 +379,20 @@ async def delete_node(
     engagement = await _require_member(db, engagement_id, user_id)
     _require_writable(engagement)
     await writer.submit_soft_delete_node(engagement_id, node_id)
+    # Re-read the now soft-deleted row for the staleness baseline (updated_at was
+    # re-stamped by the delete) and the summary fields. submit returns None.
+    deleted = await _read_current_node(db, node_id)
+    if deleted is not None:
+        await _push_undo(
+            db,
+            engagement_id=engagement_id,
+            user_id=user_id,
+            op_type="delete_node",
+            entity_kind="node",
+            entity_id=node_id,
+            target_updated_at=cast(datetime, deleted.updated_at),
+            summary=_node_op_summary("delete_node", deleted.type, deleted.label),
+        )
 
 
 async def undo_node(
@@ -328,13 +459,24 @@ async def create_edge(
     if payload.target_id not in live_node_ids:
         raise NodeNotFound(f"Target node {payload.target_id} not found or deleted")
 
-    return await writer.submit_create_edge(
+    edge = await writer.submit_create_edge(
         engagement_id,
         source_id=payload.source_id,
         target_id=payload.target_id,
         relation=payload.relation,
         properties=payload.properties,
     )
+    await _push_undo(
+        db,
+        engagement_id=engagement_id,
+        user_id=user_id,
+        op_type="create_edge",
+        entity_kind="edge",
+        entity_id=edge.id,
+        target_updated_at=edge.updated_at,
+        summary=_edge_op_summary("create_edge", edge.relation),
+    )
+    return edge
 
 
 async def delete_edge(
@@ -353,6 +495,19 @@ async def delete_edge(
     engagement = await _require_member(db, engagement_id, user_id)
     _require_writable(engagement)
     await writer.submit_soft_delete_edge(engagement_id, edge_id)
+    # Re-read the now soft-deleted edge for the staleness baseline + summary.
+    deleted = await _read_current_edge(db, edge_id)
+    if deleted is not None:
+        await _push_undo(
+            db,
+            engagement_id=engagement_id,
+            user_id=user_id,
+            op_type="delete_edge",
+            entity_kind="edge",
+            entity_id=edge_id,
+            target_updated_at=cast(datetime, deleted.updated_at),
+            summary=_edge_op_summary("delete_edge", deleted.relation),
+        )
 
 
 async def undo_edge(

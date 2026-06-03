@@ -19,7 +19,8 @@ Mocking strategy (mirrors engagements/tests/test_service.py):
   - ``graph.writer.*``: patched to return schema objects or raise domain errors.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -393,6 +394,10 @@ async def test_create_node_delegates_to_writer(db: AsyncMock) -> None:
             "app.features.graph.service.writer.submit_create_node",
             new=AsyncMock(return_value=expected_node),
         ) as mock_submit,
+        patch(
+            "app.features.graph.service.repo.push_undo_entry",
+            new=AsyncMock(),
+        ),
     ):
         result = await service.create_node(db, engagement_id, user_id, payload)
 
@@ -456,6 +461,10 @@ async def test_create_edge_succeeds_with_live_nodes(db: AsyncMock) -> None:
             "app.features.graph.service.writer.submit_create_edge",
             new=AsyncMock(return_value=expected_edge),
         ) as mock_submit,
+        patch(
+            "app.features.graph.service.repo.push_undo_entry",
+            new=AsyncMock(),
+        ),
     ):
         result = await service.create_edge(db, engagement_id, user_id, payload)
 
@@ -501,3 +510,208 @@ async def test_duplicate_edge_409_propagates(db: AsyncMock) -> None:
     ):
         with pytest.raises(DuplicateEdge):
             await service.create_edge(db, engagement_id, user_id, payload)
+
+
+# ---------------------------------------------------------------------------
+# Personal undo stack (Slice 09) — staleness helper (pure)
+# ---------------------------------------------------------------------------
+
+
+def _entry(*, target_updated_at: datetime, op_type: str = "create_node") -> SimpleNamespace:
+    """A minimal stand-in for a GraphUserUndoStack row for the pure helper."""
+    return SimpleNamespace(
+        id=uuid4(),
+        op_type=op_type,
+        entity_kind="node",
+        entity_id=uuid4(),
+        summary="Created host x",
+        recorded_at=NOW,
+        target_updated_at=target_updated_at,
+        undone=False,
+    )
+
+
+def test_is_entry_stale_when_updated_at_differs() -> None:
+    """A later write bumps updated_at past the baseline → stale."""
+    entry = _entry(target_updated_at=NOW)
+    current = SimpleNamespace(updated_at=NOW + timedelta(seconds=1))
+    assert service._is_entry_stale(entry, current) is True  # type: ignore[arg-type]
+
+
+def test_is_entry_fresh_when_unchanged() -> None:
+    """No mutation since the write (updated_at == baseline) → fresh."""
+    entry = _entry(target_updated_at=NOW)
+    current = SimpleNamespace(updated_at=NOW)
+    assert service._is_entry_stale(entry, current) is False  # type: ignore[arg-type]
+
+
+def test_missing_entity_is_stale() -> None:
+    """A hard-deleted / missing entity is treated as stale."""
+    entry = _entry(target_updated_at=NOW)
+    assert service._is_entry_stale(entry, None) is True  # type: ignore[arg-type]
+
+
+def test_same_user_later_edit_makes_entry_stale() -> None:
+    """Decision 1: ANY later write — including the owner's own — makes it stale."""
+    entry = _entry(target_updated_at=NOW)
+    # The owner edited the same entity again later: updated_at advanced.
+    current = SimpleNamespace(updated_at=NOW + timedelta(microseconds=5))
+    assert service._is_entry_stale(entry, current) is True  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Personal undo stack (Slice 09) — push on write
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_node_pushes_undo_entry(db: AsyncMock) -> None:
+    """A successful create_node pushes one create_node entry for the caller."""
+    engagement_id, user_id = uuid4(), uuid4()
+    eng = _make_engagement(engagement_id=engagement_id, status="active")
+    member = _make_member(engagement_id=engagement_id, user_id=user_id)
+    node = _make_node(engagement_id=engagement_id)
+    payload = NodeCreate(type=NodeType.host, label="10.0.0.5")
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch(
+            "app.features.graph.service.writer.submit_create_node",
+            new=AsyncMock(return_value=node),
+        ),
+        patch("app.features.graph.service.repo.push_undo_entry", new=AsyncMock()) as mock_push,
+    ):
+        await service.create_node(db, engagement_id, user_id, payload)
+
+    mock_push.assert_awaited_once()
+    assert mock_push.await_args is not None
+    kwargs = mock_push.await_args.kwargs
+    assert kwargs["op_type"] == "create_node"
+    assert kwargs["entity_kind"] == "node"
+    assert kwargs["entity_id"] == node.id
+    assert kwargs["user_id"] == user_id
+    assert kwargs["target_updated_at"] == node.updated_at
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_node_pushes_undo_entry(db: AsyncMock) -> None:
+    """A successful update_node pushes one update_node entry."""
+    engagement_id, user_id, node_id = uuid4(), uuid4(), uuid4()
+    eng = _make_engagement(engagement_id=engagement_id, status="active")
+    member = _make_member(engagement_id=engagement_id, user_id=user_id)
+    node = _make_node(node_id=node_id, engagement_id=engagement_id)
+    payload = NodeUpdate(label="new-label")
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch(
+            "app.features.graph.service.writer.submit_update_node",
+            new=AsyncMock(return_value=node),
+        ),
+        patch("app.features.graph.service.repo.push_undo_entry", new=AsyncMock()) as mock_push,
+    ):
+        await service.update_node(db, engagement_id, node_id, user_id, payload)
+
+    assert mock_push.await_args is not None
+    kwargs = mock_push.await_args.kwargs
+    assert kwargs["op_type"] == "update_node"
+    assert kwargs["entity_id"] == node_id
+
+
+@pytest.mark.asyncio
+async def test_delete_node_pushes_undo_entry(db: AsyncMock) -> None:
+    """delete_node re-reads the soft-deleted row and pushes a delete_node entry."""
+    engagement_id, user_id, node_id = uuid4(), uuid4(), uuid4()
+    eng = _make_engagement(engagement_id=engagement_id, status="active")
+    member = _make_member(engagement_id=engagement_id, user_id=user_id)
+    deleted_row = SimpleNamespace(
+        id=node_id, type="host", label="10.0.0.9", updated_at=NOW + timedelta(seconds=2)
+    )
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch("app.features.graph.service.writer.submit_soft_delete_node", new=AsyncMock()),
+        patch(
+            "app.features.graph.service.repo.get_node",
+            new=AsyncMock(return_value=deleted_row),
+        ),
+        patch("app.features.graph.service.repo.push_undo_entry", new=AsyncMock()) as mock_push,
+    ):
+        await service.delete_node(db, engagement_id, node_id, user_id)
+
+    assert mock_push.await_args is not None
+    kwargs = mock_push.await_args.kwargs
+    assert kwargs["op_type"] == "delete_node"
+    assert kwargs["entity_id"] == node_id
+    assert kwargs["target_updated_at"] == deleted_row.updated_at
+
+
+@pytest.mark.asyncio
+async def test_create_edge_pushes_undo_entry(db: AsyncMock) -> None:
+    """A successful create_edge pushes one create_edge entry."""
+    engagement_id, user_id = uuid4(), uuid4()
+    eng = _make_engagement(engagement_id=engagement_id, status="active")
+    member = _make_member(engagement_id=engagement_id, user_id=user_id)
+    source, target = (
+        _make_node(engagement_id=engagement_id),
+        _make_node(engagement_id=engagement_id),
+    )
+    edge = _make_edge(engagement_id=engagement_id, source_id=source.id, target_id=target.id)
+    payload = EdgeCreate(source_id=source.id, target_id=target.id, relation="runs")
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch(
+            "app.features.graph.service.writer.read_full",
+            new=AsyncMock(return_value=GraphSnapshot(nodes=[source, target], edges=[])),
+        ),
+        patch(
+            "app.features.graph.service.writer.submit_create_edge",
+            new=AsyncMock(return_value=edge),
+        ),
+        patch("app.features.graph.service.repo.push_undo_entry", new=AsyncMock()) as mock_push,
+    ):
+        await service.create_edge(db, engagement_id, user_id, payload)
+
+    assert mock_push.await_args is not None
+    kwargs = mock_push.await_args.kwargs
+    assert kwargs["op_type"] == "create_edge"
+    assert kwargs["entity_kind"] == "edge"
+    assert kwargs["entity_id"] == edge.id
+
+
+@pytest.mark.asyncio
+async def test_per_entity_undo_does_not_push(db: AsyncMock) -> None:
+    """Slice 07 per-entity undo (undo_node) must NOT push onto the personal stack."""
+    engagement_id, user_id, node_id = uuid4(), uuid4(), uuid4()
+    eng = _make_engagement(engagement_id=engagement_id, status="active")
+    member = _make_member(engagement_id=engagement_id, user_id=user_id)
+    node = _make_node(node_id=node_id, engagement_id=engagement_id)
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch(
+            "app.features.graph.service.writer.submit_undo_node",
+            new=AsyncMock(return_value=node),
+        ),
+        patch("app.features.graph.service.repo.push_undo_entry", new=AsyncMock()) as mock_push,
+    ):
+        await service.undo_node(db, engagement_id, node_id, user_id)
+
+    mock_push.assert_not_awaited()
