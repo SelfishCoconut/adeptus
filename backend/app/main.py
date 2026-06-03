@@ -13,6 +13,7 @@ from app.features.auth import service as auth_service
 from app.features.auth.router import router as auth_router
 from app.features.engagements.router import router as engagements_router
 from app.features.health.router import router as health_router
+from app.features.mcp import repository as mcp_repo
 from app.features.mcp import subprocess_manager
 from app.features.mcp.registry import ConfigError, load_registry
 from app.features.mcp.router import router as mcp_router
@@ -67,10 +68,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "Unexpected error starting MCP subprocess manager — continuing without MCP"
         )
 
-    # TODO (Slice 38): on startup, sweep tool_runs rows with finished_at IS NULL
-    # and mark them exit_code=-1, stderr='Backend restarted before completion'
-    # (Risk 3 in slice-03 spec).  Deferred because it requires a DB session at
-    # startup and full crash-recovery semantics are formalised in Slice 38.
+    # Startup reconciliation (Slice 05 Task 8 / Slice 03 Risk 3).
+    # After a restart the in-process queue is empty, so any row still in
+    # 'queued' or 'running' is a phantom — mark it 'failed' immediately.
+    # Full crash-recovery (stdout/stderr preservation, etc.) is Slice 38.
+    try:
+        factory2 = get_sessionmaker()
+        async with factory2() as db:
+            stale = await mcp_repo.reconcile_stale_tool_runs(db)
+            await db.commit()
+            if stale:
+                logger.warning("Reconciled %d stale tool_run(s) to 'failed' on startup", stale)
+            else:
+                logger.debug("Startup reconciliation: no stale tool_runs found")
+    except Exception:
+        logger.exception("Failed to reconcile stale tool_runs on startup — continuing")
 
     yield
 

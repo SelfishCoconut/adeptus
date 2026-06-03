@@ -1,14 +1,14 @@
 """Database access for MCP tool runs.
 
 Provides create_tool_run, update_tool_run_result, list_tool_runs_for_engagement,
-and get_tool_run_by_id.
+get_tool_run_by_id, and reconcile_stale_tool_runs.
 All functions accept an AsyncSession and follow the same patterns used across
 the rest of the features — module-level async functions, flush/refresh for
 server-generated defaults, select() + execute() for reads.
 """
 
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, desc, or_, select, update
@@ -168,3 +168,38 @@ async def get_tool_run_by_id(db: AsyncSession, tool_run_id: UUID) -> ToolRun | N
     """Return the ToolRun row with the given id, or None if not found."""
     result = await db.execute(select(ToolRun).where(ToolRun.id == tool_run_id))
     return result.scalar_one_or_none()
+
+
+async def reconcile_stale_tool_runs(db: AsyncSession) -> int:
+    """Mark any phantom-queued or in-flight rows as failed on startup.
+
+    After a backend restart the in-process admission queue and slot pool are
+    empty, so any ``tool_runs`` row still in ``status='queued'`` or
+    ``status='running'`` is a phantom — its background task no longer exists.
+    This function performs a single idempotent UPDATE that:
+
+    - Sets ``status='failed'`` for all rows where
+      ``status IN ('queued', 'running')``.
+    - Sets ``finished_at`` to the current wall-clock time (UTC) for those
+      rows, keeping terminal rows consistent (every failed row has a
+      ``finished_at``).
+
+    Terminal rows (``completed``, ``failed``, ``timed_out``) are never touched
+    because the WHERE clause matches only the two non-terminal phantom states.
+
+    The caller is responsible for committing the transaction.
+
+    Returns the number of rows updated (0 when there are no stale rows, which
+    is the normal steady-state case).
+
+    Note: full crash-recovery semantics (preserving stdout/stderr fragments,
+    re-attaching WS clients, etc.) are deferred to Slice 38.  This function
+    is intentionally minimal — phantom-status cleanup only.
+    """
+    now = datetime.now(tz=UTC)
+    result = await db.execute(
+        update(ToolRun)
+        .where(ToolRun.status.in_(["queued", "running"]))
+        .values(status="failed", finished_at=now)
+    )
+    return cast(int, result.rowcount)  # type: ignore[attr-defined]
