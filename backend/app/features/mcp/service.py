@@ -28,7 +28,6 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
-from urllib.parse import urlparse
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -239,9 +238,9 @@ def _enforce_sandbox_guard(args: dict[str, Any]) -> None:
       string: no-op (tools without a ``target`` field, e.g. run_command, are not
       guarded at this layer; run_command guarding is deferred to Slice 16 via the
       approval-gating mechanism — Risk 5).
-    - Otherwise extract the hostname from ``target`` (handles full URLs such as
-      ``http://localhost:3000`` and bare host[:port] strings such as ``localhost``),
-      strip any port suffix, lowercase, and check against ``_SANDBOX_HOSTS``.
+    - Otherwise extract the hostname from ``target`` using ``concurrency._parse_host``
+      (the same URL-parsing logic used by the per-target lock so that the guard host
+      and the lock host can never drift — Risk 5 deduplication).
 
     Reconciliation note: the slice task text mentions guarding both ``target``
     (run_httpx) and ``command`` (run_command).  Risk 5 in the same spec clarifies
@@ -265,27 +264,9 @@ def _enforce_sandbox_guard(args: dict[str, Any]) -> None:
     if not isinstance(target, str) or not target:
         return  # Nothing to guard for tools without a target.
 
-    # Extract the hostname from the target value.
-    # urlparse handles full URLs: ``http://localhost:3000`` → netloc ``localhost:3000``.
-    # For bare strings like ``localhost`` or ``juice-shop:3000``, urlparse treats
-    # them as ``scheme:path`` (scheme="localhost", path="3000") so netloc is empty.
-    # In that case parse the raw target string directly: split on ``:`` and take the
-    # first component to strip any port, then strip any path suffix.
-    parsed = urlparse(target)
-    if parsed.netloc:
-        # Full URL with scheme: use parsed.hostname which already strips the port
-        # AND any ``user:pass@`` userinfo (so ``http://localhost@evil.com`` → evil.com).
-        host = parsed.hostname or ""
-    else:
-        # Bare host[:port][/path] — urlparse gives no netloc. Re-parse with a
-        # synthetic ``//`` so the stdlib parser extracts the true authority. This
-        # is what defeats userinfo smuggling: a naive ``split(':')[0]`` reads
-        # ``localhost:3000@evil.com`` as the sandbox host ``localhost``, but the
-        # httpx binary would actually scan ``evil.com``. urlparse('//...').hostname
-        # correctly returns ``evil.com`` here, so the guard blocks it.
-        host = urlparse(f"//{target}").hostname or ""
-
-    host = host.lower()
+    # Delegate host extraction to the canonical concurrency._parse_host so that
+    # the guard host and the per-target lock host are always identical (Risk 5).
+    host = concurrency._parse_host(target)
 
     if host not in _SANDBOX_HOSTS:
         raise SandboxGuardViolation(

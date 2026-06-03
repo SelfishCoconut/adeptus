@@ -488,7 +488,7 @@ describe('EngagementWorkspacePage', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('changing the slot limit input calls updateEngagement mutation with the new value', async () => {
+  it('changing the slot limit input and blurring calls updateEngagement mutation once with the new value', async () => {
     const user = userEvent.setup()
     const mutate = vi.fn()
     mockedUseMe.mockReturnValue({
@@ -503,11 +503,13 @@ describe('EngagementWorkspacePage', () => {
     renderPage()
 
     const slotInput = screen.getByRole('spinbutton', { name: /concurrent tool slots/i })
-    // Clear and type a valid value; the onChange fires on each keystroke.
+    // Clear, type a valid value, then blur — mutation fires on blur (not on each keystroke).
     await user.clear(slotInput)
     await user.type(slotInput, '5')
+    await user.tab() // blur the input
 
-    // mutate should have been called with concurrency_slot_limit: 5
+    // mutate should have been called exactly once with concurrency_slot_limit: 5
     expect(mutate).toHaveBeenCalledWith({ concurrency_slot_limit: 5 })
+    expect(mutate).toHaveBeenCalledOnce()
   })
 })

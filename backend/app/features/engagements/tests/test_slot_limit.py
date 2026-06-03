@@ -4,12 +4,15 @@ Tests:
 - Default is 3 on create.
 - Patch within range (1–16) succeeds.
 - Out-of-range (0, 17) rejected with 422 (Pydantic validation error).
+- Raising the limit while runs are queued admits the front-eligible waiter
+  immediately (slot-limit wiring via concurrency.set_slot_limit).
 
 The service layer is tested with mocked repository; the 422 tests exercise
 Pydantic schema validation directly (no HTTP layer needed, since FastAPI
 delegates body validation to Pydantic before the route handler is called).
 """
 
+import asyncio
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -19,6 +22,7 @@ from pydantic import ValidationError
 
 from app.features.engagements import service
 from app.features.engagements.schemas import EngagementCreate, EngagementUpdate
+from app.features.mcp import concurrency as mcp_concurrency
 
 NOW = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
 
@@ -198,3 +202,85 @@ def test_engagement_update_slot_limit_17_rejected() -> None:
         e["loc"] == ("concurrency_slot_limit",) and "less than or equal to 16" in e["msg"]
         for e in errors
     )
+
+
+# ---------------------------------------------------------------------------
+# Slot-limit wiring: raising limit while runs are queued admits waiters (W2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_raise_slot_limit_admits_queued_waiter() -> None:
+    """Raising the slot limit via update_engagement admits a queued waiter immediately.
+
+    Setup:
+    - slot_limit=1; one run holds the slot; a second run queues.
+    - update_engagement raises the limit to 2.
+    - The queued waiter must be admitted (its on_started fires).
+    """
+    mcp_concurrency._reset()
+
+    eng_id = uuid4()
+    db = AsyncMock()
+    caller = _make_user()
+    caller_member = _make_member(engagement_id=eng_id, user_id=caller.id, role="owner")
+
+    started_log: list[str] = []
+
+    # Admit the first run at limit=1.
+    handle = await mcp_concurrency.acquire(
+        engagement_id=eng_id,
+        slot_limit=1,
+        tool_run_id=uuid4(),
+        target_host="localhost",
+        server_name="httpx",
+        tool_name="run_httpx_heavy",
+        on_queued=lambda pos, reason: None,
+        on_started=lambda: None,
+    )
+
+    # Queue a second run against a different host (blocked only by slot pool).
+    waiter_task = asyncio.create_task(
+        mcp_concurrency.acquire(
+            engagement_id=eng_id,
+            slot_limit=1,
+            tool_run_id=uuid4(),
+            target_host="127.0.0.1",
+            server_name="httpx",
+            tool_name="run_httpx_heavy",
+            on_queued=lambda pos, reason: None,
+            on_started=lambda: started_log.append("admitted"),
+        )
+    )
+    await asyncio.sleep(0)  # Let the waiter enqueue.
+    assert not waiter_task.done(), "Waiter should be queued"
+
+    # Simulate update_engagement patching the slot limit to 2.
+    mock_updated = _make_engagement(engagement_id=eng_id, concurrency_slot_limit=2)
+    mock_initial = _make_engagement(engagement_id=eng_id, concurrency_slot_limit=1)
+
+    with (
+        patch(
+            "app.features.engagements.service.repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(mock_initial, caller_member)),
+        ),
+        patch(
+            "app.features.engagements.service.repo.update_engagement",
+            new=AsyncMock(return_value=mock_updated),
+        ),
+    ):
+        await service.update_engagement(
+            db, caller, eng_id, EngagementUpdate(concurrency_slot_limit=2)
+        )
+
+    # The in-process set_slot_limit should have triggered the scan and admitted the waiter.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert waiter_task.done(), "Waiter should be admitted after the limit was raised"
+    assert "admitted" in started_log, "on_started should have been called"
+
+    waiter_handle = await waiter_task
+    mcp_concurrency.release(handle)
+    mcp_concurrency.release(waiter_handle)
+    mcp_concurrency._reset()

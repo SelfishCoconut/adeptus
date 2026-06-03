@@ -16,6 +16,7 @@ Status codes tested:
                            404 (non-member — existence hidden per §17.1),
                            404 (admin but not member — §4 no-bypass, §17.1),
                            404 (engagement not found),
+                           429 (queue full — ToolQueueFullError),
                            503 (server down), 401 (unauthenticated)
 """
 
@@ -42,6 +43,7 @@ from app.features.auth import repository as auth_repo
 from app.features.auth.router import router as auth_router
 from app.features.engagements import models as eng_models  # noqa: F401 — registers ORM tables
 from app.features.mcp import models as mcp_models  # noqa: F401 — registers ORM tables
+from app.features.mcp.concurrency import ToolQueueFullError
 from app.features.mcp.router import router as mcp_router
 from app.features.mcp.schemas import McpServerInfo, McpToolDeclaration, ToolRunResult
 from app.features.mcp.service import EngagementNotFound
@@ -414,6 +416,30 @@ async def test_execute_tool_run_returns_503_for_server_down(
     assert resp.status_code == 503
     body = resp.json()
     assert body["error"]["code"] == "service_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_run_returns_429_for_queue_full(
+    regular_client: AsyncClient,
+) -> None:
+    """ToolQueueFullError from concurrency layer → 429 Too Many Requests.
+
+    The per-engagement admission queue is full; the client must receive an
+    explicit 429 (not a 500) so it can back off and retry.
+    """
+    with patch(
+        "app.features.mcp.router.service.execute_tool_run",
+        new=AsyncMock(
+            side_effect=ToolQueueFullError(
+                "Engagement queue full — retry when a queued run completes"
+            )
+        ),
+    ):
+        resp = await regular_client.post("/api/v1/tool-runs", json=_TOOL_RUN_BODY)
+
+    assert resp.status_code == 429
+    body = resp.json()
+    assert body["error"]["code"] == "too_many_requests"
 
 
 @pytest.mark.asyncio

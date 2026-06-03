@@ -31,6 +31,7 @@ from app.features.engagements.schemas import (
     EngagementUpdate,
     MemberEntry,
 )
+from app.features.mcp import concurrency as mcp_concurrency
 
 
 async def create_engagement(
@@ -133,6 +134,13 @@ async def update_engagement(
         if updated is None:  # extremely unlikely race; handle defensively
             raise NotFoundError("Engagement not found")
         engagement = updated
+        # If the slot limit changed, propagate immediately to the in-process
+        # admission manager so a raise re-scans and promptly admits eligible
+        # waiters (Finding W2: slot-limit wiring).
+        if data.concurrency_slot_limit is not None:
+            mcp_concurrency.set_slot_limit(
+                engagement_id, cast(int, engagement.concurrency_slot_limit)
+            )
 
     return EngagementDetail(
         id=cast(UUID, engagement.id),

@@ -19,13 +19,14 @@ Test matrix (from the Slice 05 spec):
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
 
 from app.features.mcp.concurrency import (
     AdmissionHandle,
+    ToolQueueFullError,
     _reset,
     acquire,
     position_of,
@@ -156,7 +157,8 @@ class TestResolveTargetHost:
         assert result is None
 
     def test_non_string_target_returns_none(self) -> None:
-        result = resolve_target_host("httpx", "run_httpx_heavy", {"target": 42})  # type: ignore[arg-type]
+        args = cast(dict[str, Any], {"target": 42})
+        result = resolve_target_host("httpx", "run_httpx_heavy", args)
         assert result is None
 
 
@@ -509,8 +511,12 @@ async def test_release_admits_next_eligible() -> None:
 async def test_positions_reshift_on_admit() -> None:
     """Queue positions decrement when the front waiter is admitted.
 
-    With 3 queued runs at positions 1, 2, 3:
-    After admitting position-1, the remaining two should be at positions 1, 2.
+    With 3 queued runs (B, C, D) at positions 1, 2, 3:
+    After admitting position-1 (B), the on_queued callbacks for C and D must be
+    re-invoked with their shifted positions (2→1, 3→2).
+
+    This pins Task 4's re-broadcast contract: the still-waiting runs must
+    receive a fresh queued chunk with the updated position after each admission.
     """
     eng = _engagement_id()
     slot_limit = 1
@@ -522,6 +528,17 @@ async def test_positions_reshift_on_admit() -> None:
     c_id = _run_id()
     d_id = _run_id()
 
+    # Spy callbacks: record (position, reason) per invocation.
+    b_queued_calls: list[tuple[int, QueueReason]] = []
+    c_queued_calls: list[tuple[int, QueueReason]] = []
+    d_queued_calls: list[tuple[int, QueueReason]] = []
+
+    def _make_spy(log: list[tuple[int, QueueReason]]) -> Any:
+        def _cb(position: int, reason: QueueReason) -> None:
+            log.append((position, reason))
+
+        return _cb
+
     b_task = asyncio.create_task(
         acquire(
             engagement_id=eng,
@@ -530,7 +547,7 @@ async def test_positions_reshift_on_admit() -> None:
             target_host="hostB",
             server_name="httpx",
             tool_name="run_httpx_heavy",
-            on_queued=_noop_queued,
+            on_queued=_make_spy(b_queued_calls),
             on_started=_noop_started,
         )
     )
@@ -542,7 +559,7 @@ async def test_positions_reshift_on_admit() -> None:
             target_host="hostC",
             server_name="httpx",
             tool_name="run_httpx_heavy",
-            on_queued=_noop_queued,
+            on_queued=_make_spy(c_queued_calls),
             on_started=_noop_started,
         )
     )
@@ -554,26 +571,42 @@ async def test_positions_reshift_on_admit() -> None:
             target_host="hostD",
             server_name="httpx",
             tool_name="run_httpx_heavy",
-            on_queued=_noop_queued,
+            on_queued=_make_spy(d_queued_calls),
             on_started=_noop_started,
         )
     )
 
     await asyncio.sleep(0)  # All three enqueue.
 
-    # Positions before admission.
+    # Positions before admission (initial on_queued calls).
     assert position_of(b_id) == 1
     assert position_of(c_id) == 2
     assert position_of(d_id) == 3
+    assert b_queued_calls == [(1, "slot_full")]
+    assert c_queued_calls == [(2, "slot_full")]
+    assert d_queued_calls == [(3, "slot_full")]
 
     # Admit B (release A, slot_limit=1 so only front waiter admitted).
     release(handle_a)
     handle_b = await b_task
 
-    # B admitted: positions C=1, D=2.
+    # Yield to let the re-broadcast task run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    # B admitted: positions C=1, D=2; on_queued re-invoked with shifted positions.
     assert position_of(b_id) is None  # Now running, not queued.
     assert position_of(c_id) == 1
     assert position_of(d_id) == 2
+
+    # B must NOT have been re-broadcast (it left the queue).
+    assert len(b_queued_calls) == 1, f"B should only have its initial call: {b_queued_calls}"
+
+    # C and D must have been re-broadcast with their shifted positions.
+    assert len(c_queued_calls) >= 2, f"C should have a re-broadcast: {c_queued_calls}"
+    assert len(d_queued_calls) >= 2, f"D should have a re-broadcast: {d_queued_calls}"
+    assert c_queued_calls[-1] == (1, "slot_full"), f"C rebroadcast: {c_queued_calls[-1]}"
+    assert d_queued_calls[-1] == (2, "slot_full"), f"D rebroadcast: {d_queued_calls[-1]}"
 
     release(handle_b)
     handle_c = await c_task
@@ -1034,3 +1067,183 @@ async def test_broadcast_failure_does_not_block_others() -> None:
     release(handle_c)
     handle_d = await d_task
     release(handle_d)
+
+
+# ---------------------------------------------------------------------------
+# Finding W1: snapshot() returns live reason, not stale frozen initial value
+# ---------------------------------------------------------------------------
+
+
+async def test_snapshot_reports_live_reason_after_state_change() -> None:
+    """snapshot() must report the current reason, not the stale initial reason.
+
+    Setup:
+    - slot_limit=2; run A holds slot1+localhost lock, run B holds slot2+otherhost lock.
+    - Run C (target=localhost) queues — initial reason=slot_full (both slots taken).
+    - B releases: slot freed, otherhost unlocked.  C is still waiting because
+      localhost is still locked by A.  The true current reason is now target_locked.
+    - snapshot() must report C's reason as target_locked, not the stale slot_full.
+    """
+    eng = _engagement_id()
+    slot_limit = 2
+
+    handle_a = await _acquire(eng, slot_limit=slot_limit, target_host="localhost")
+    handle_b = await _acquire(eng, slot_limit=slot_limit, target_host="other.host")
+
+    # Both slots taken.
+    assert snapshot(eng).running_count == 2
+
+    c_id = _run_id()
+    c_task = asyncio.create_task(
+        acquire(
+            engagement_id=eng,
+            slot_limit=slot_limit,
+            tool_run_id=c_id,
+            target_host="localhost",  # same as A
+            server_name="httpx",
+            tool_name="run_httpx_heavy",
+            on_queued=_noop_queued,
+            on_started=_noop_started,
+        )
+    )
+    await asyncio.sleep(0)  # C enqueues with initial reason=slot_full (no slots).
+
+    s = snapshot(eng)
+    assert s.queued_count == 1
+    assert s.queued[0].reason == "slot_full", (
+        f"C initial reason should be slot_full, got {s.queued[0].reason}"
+    )
+
+    # Release B: slot freed, other.host unlocked.
+    # Scan: C is front, slot free (available=1), but localhost locked by A → skip C.
+    # No more waiters → no admission.
+    release(handle_b)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)  # Let any rebroadcast task run.
+
+    assert not c_task.done(), "C must still wait (localhost still locked by A)"
+
+    # snapshot() must now show the live reason (target_locked), not the stale slot_full.
+    s2 = snapshot(eng)
+    assert s2.queued_count == 1
+    assert s2.queued[0].reason == "target_locked", (
+        f"snapshot() should report live reason target_locked after slot freed, "
+        f"got {s2.queued[0].reason}"
+    )
+
+    # Cleanup: release A → C can now be admitted.
+    release(handle_a)
+    await asyncio.sleep(0)
+    handle_c = await asyncio.wait_for(c_task, timeout=1.0)
+    release(handle_c)
+
+
+# ---------------------------------------------------------------------------
+# Finding Security Medium-1: queue depth cap
+# ---------------------------------------------------------------------------
+
+
+async def test_queue_depth_cap_rejects_at_ceiling() -> None:
+    """acquire raises ToolQueueFullError when the per-engagement queue is at MAX_QUEUE_DEPTH.
+
+    Uses a small patched ceiling so the test stays fast without thousands of iterations.
+    """
+    import unittest.mock as mock_module
+
+    eng = _engagement_id()
+    slot_limit = 1
+
+    # Hold the single slot so every subsequent acquire enqueues.
+    handle = await _acquire(eng, slot_limit=slot_limit, target_host="hostA")
+
+    cap = 3  # Patch MAX_QUEUE_DEPTH to a tiny value for test speed.
+    tasks: list[asyncio.Task[AdmissionHandle]] = []
+
+    with mock_module.patch("app.features.mcp.concurrency.MAX_QUEUE_DEPTH", cap):
+        for i in range(cap):
+            t = asyncio.create_task(
+                acquire(
+                    engagement_id=eng,
+                    slot_limit=slot_limit,
+                    tool_run_id=_run_id(),
+                    target_host=f"host{i}",
+                    server_name="httpx",
+                    tool_name="run_httpx_heavy",
+                    on_queued=_noop_queued,
+                    on_started=_noop_started,
+                )
+            )
+            tasks.append(t)
+        await asyncio.sleep(0)  # All cap tasks enqueue.
+
+        # One more should be rejected.
+        with pytest.raises(ToolQueueFullError):
+            await acquire(
+                engagement_id=eng,
+                slot_limit=slot_limit,
+                tool_run_id=_run_id(),
+                target_host="overflow.host",
+                server_name="httpx",
+                tool_name="run_httpx_heavy",
+                on_queued=_noop_queued,
+                on_started=_noop_started,
+            )
+
+    assert snapshot(eng).queued_count == cap, "Queue size should be exactly at cap, not over"
+
+    # Drain.
+    release(handle)
+    for t in tasks:
+        h = await t
+        release(h)
+
+
+async def test_queue_depth_cap_allows_exactly_at_ceiling() -> None:
+    """Enqueuing exactly MAX_QUEUE_DEPTH runs succeeds; the (cap+1)-th is rejected."""
+    import unittest.mock as mock_module
+
+    eng = _engagement_id()
+    slot_limit = 1
+
+    handle = await _acquire(eng, slot_limit=slot_limit, target_host="hostRoot")
+
+    cap = 2
+    tasks: list[asyncio.Task[AdmissionHandle]] = []
+
+    with mock_module.patch("app.features.mcp.concurrency.MAX_QUEUE_DEPTH", cap):
+        # Exactly cap enqueues — should all succeed.
+        for i in range(cap):
+            t = asyncio.create_task(
+                acquire(
+                    engagement_id=eng,
+                    slot_limit=slot_limit,
+                    tool_run_id=_run_id(),
+                    target_host=f"host{i}",
+                    server_name="httpx",
+                    tool_name="run_httpx_heavy",
+                    on_queued=_noop_queued,
+                    on_started=_noop_started,
+                )
+            )
+            tasks.append(t)
+        await asyncio.sleep(0)
+
+        assert snapshot(eng).queued_count == cap
+
+        # cap+1 must raise.
+        with pytest.raises(ToolQueueFullError):
+            await acquire(
+                engagement_id=eng,
+                slot_limit=slot_limit,
+                tool_run_id=_run_id(),
+                target_host="overflow.host",
+                server_name="httpx",
+                tool_name="run_httpx_heavy",
+                on_queued=_noop_queued,
+                on_started=_noop_started,
+            )
+
+    release(handle)
+    for t in tasks:
+        h = await t
+        release(h)

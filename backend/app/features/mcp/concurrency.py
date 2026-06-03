@@ -74,9 +74,26 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
 
+from app.core.errors import AdeptusError
 from app.features.mcp.schemas import QueuedRun, QueueReason, ToolQueueSnapshot
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Queue depth cap (Security Medium-1)
+# ---------------------------------------------------------------------------
+
+# Maximum number of tickets that may be waiting in a single engagement's FIFO
+# queue at any time.  A generous but finite ceiling that prevents a single
+# engagement member from growing in-process memory without bound by submitting
+# thousands of queued heavy runs at a locked host.
+#
+# §6.2 states that the concurrency model bounds parallelism; this constant
+# extends that bound to the admission queue.  256 waiters × (slot_limit=16
+# max concurrent) = up to 272 heavy runs in flight or queued per engagement —
+# more than any realistic workload.  Chosen to be large enough that legitimate
+# use never hits it while being small enough to bound runaway memory growth.
+MAX_QUEUE_DEPTH: int = 256
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -85,6 +102,24 @@ logger = logging.getLogger(__name__)
 # Callback types for acquire() and for per-ticket re-broadcast (Task 4).
 OnQueuedCallback = Callable[[int, QueueReason], Awaitable[None] | None]
 OnStartedCallback = Callable[[], Awaitable[None] | None]
+
+
+class ToolQueueFullError(AdeptusError):
+    """Raised when an engagement's admission queue is at MAX_QUEUE_DEPTH.
+
+    A single engagement member cannot grow the in-process queue without bound
+    by submitting thousands of heavy runs at a locked host.  When the per-
+    engagement queue depth reaches MAX_QUEUE_DEPTH, ``acquire`` raises this
+    exception synchronously so the caller can surface it as HTTP 429 (Too Many
+    Requests) before the run is persisted.
+
+    This is a domain exception subclassing ``AdeptusError`` so it participates
+    in the core domain-exception → HTTP handler pattern.  Mapped to HTTP 429
+    in ``router.py``.
+    """
+
+    def __init__(self, message: str = "Tool queue is full for this engagement") -> None:
+        super().__init__(message)
 
 
 @dataclass
@@ -272,6 +307,8 @@ async def _rebroadcast_positions(state: _EngagementState) -> None:
 
     Called as a background task after a release-driven admission so each waiting
     run receives an updated 1-based queue position and a freshly computed reason.
+    Also updates ``ticket.reason`` in-place so that ``snapshot()`` returns the
+    current reason rather than the stale initial value.
 
     Error isolation: a failing broadcast to one channel is caught, logged, and
     swallowed so that one dead WebSocket client cannot wedge the queue or block
@@ -279,6 +316,8 @@ async def _rebroadcast_positions(state: _EngagementState) -> None:
     """
     for position, ticket in enumerate(state.queue.values(), start=1):
         reason = _compute_reason(state, ticket)
+        # Keep the stored reason current so snapshot() returns the live value.
+        ticket.reason = reason
         try:
             result = ticket.on_queued(position, reason)
             if asyncio.iscoroutine(result):
@@ -383,6 +422,13 @@ async def acquire(
         )
 
     # Slow path: enqueue the ticket.
+    # Guard the per-engagement queue depth before adding (Security Medium-1).
+    if len(state.queue) >= MAX_QUEUE_DEPTH:
+        raise ToolQueueFullError(
+            f"Engagement {engagement_id} has reached the maximum queue depth "
+            f"({MAX_QUEUE_DEPTH}). Retry when a queued run completes."
+        )
+
     reason: QueueReason = "slot_full" if available <= 0 else "target_locked"
     ticket = _Ticket(
         tool_run_id=tool_run_id,
@@ -501,6 +547,10 @@ def snapshot(engagement_id: UUID) -> ToolQueueSnapshot:
 
     queued_runs: list[QueuedRun] = []
     for position, ticket in enumerate(state.queue.values(), start=1):
+        # Compute the live reason rather than using the frozen initial value so
+        # that the polled GET /tool-queue reason matches the WS re-broadcast
+        # reason (Finding W1 / snapshot stale-reason fix).
+        live_reason = _compute_reason(state, ticket)
         queued_runs.append(
             QueuedRun(
                 tool_run_id=ticket.tool_run_id,
@@ -508,7 +558,7 @@ def snapshot(engagement_id: UUID) -> ToolQueueSnapshot:
                 tool_name=ticket.tool_name,
                 target_host=ticket.target_host,
                 position=position,
-                reason=ticket.reason,
+                reason=live_reason,
                 enqueued_at=ticket.enqueued_at,
             )
         )

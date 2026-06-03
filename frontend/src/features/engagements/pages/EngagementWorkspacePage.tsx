@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useLogout, useMe } from '@/features/auth/api'
 import { TermsGate } from '@/features/auth/components/TermsGate'
@@ -18,6 +18,17 @@ export function EngagementWorkspacePage() {
   const engagement = useEngagement(engagementId)
   const updateEngagement = useUpdateEngagement(engagementId)
 
+  // Controlled slot-limit input with a "draft" approach:
+  // - `slotLimitDraft` holds the user's in-progress edit (null when no edit is in flight).
+  // - When no draft exists, the live server value is shown.
+  // - On blur/Enter the draft is committed (mutation fired) and cleared so the input
+  //   reflects the updated server value after the next refetch.
+  // This avoids the setState-in-effect pattern (react-hooks/set-state-in-effect lint rule)
+  // because the server value is read directly from the query, not mirrored through state.
+  const [slotLimitDraft, setSlotLimitDraft] = useState<number | null>(null)
+  const displayedSlotLimit =
+    slotLimitDraft !== null ? slotLimitDraft : (engagement.data?.concurrency_slot_limit ?? 3)
+
   // All hooks must be called before any conditional return (Rules of Hooks).
   const handlePrivacyToggle = useCallback(
     (checked: boolean) => {
@@ -26,14 +37,25 @@ export function EngagementWorkspacePage() {
     [updateEngagement],
   )
 
-  const handleSlotLimitChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const value = e.target.valueAsNumber
-      // Only submit when value is a valid integer in range 1–16.
-      if (!Number.isInteger(value) || value < 1 || value > 16) return
-      updateEngagement.mutate({ concurrency_slot_limit: value })
+  // Commit on blur (or Enter): validate range 1–16 then fire exactly one mutation.
+  // This mirrors handlePrivacyToggle (fires once per user decision, not per keystroke).
+  const handleSlotLimitCommit = useCallback(() => {
+    const value = slotLimitDraft ?? (engagement.data?.concurrency_slot_limit ?? 3)
+    if (!Number.isInteger(value) || value < 1 || value > 16) {
+      setSlotLimitDraft(null) // Reset invalid draft to server value.
+      return
+    }
+    updateEngagement.mutate({ concurrency_slot_limit: value })
+    setSlotLimitDraft(null) // Clear draft so server value shows after refetch.
+  }, [slotLimitDraft, engagement.data?.concurrency_slot_limit, updateEngagement])
+
+  const handleSlotLimitKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'Enter') {
+        handleSlotLimitCommit()
+      }
     },
-    [updateEngagement],
+    [handleSlotLimitCommit],
   )
 
   // ProtectedRoute already ensures a user is present; this narrows the type.
@@ -86,9 +108,11 @@ export function EngagementWorkspacePage() {
               type="number"
               min={1}
               max={16}
-              defaultValue={engagement.data?.concurrency_slot_limit ?? 3}
+              value={displayedSlotLimit}
               disabled={updateEngagement.isPending}
-              onChange={handleSlotLimitChange}
+              onChange={(e) => setSlotLimitDraft(e.target.valueAsNumber)}
+              onBlur={handleSlotLimitCommit}
+              onKeyDown={handleSlotLimitKeyDown}
               className="w-20"
               aria-label="Concurrent tool slots"
             />

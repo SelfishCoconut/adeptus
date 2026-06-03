@@ -46,6 +46,7 @@ from app.core.errors import ForbiddenError
 from app.features.auth.deps import get_current_user
 from app.features.auth.models import User
 from app.features.mcp import service
+from app.features.mcp.concurrency import ToolQueueFullError
 from app.features.mcp.schemas import (
     McpServerInfo,
     ToolDescriptor,
@@ -155,6 +156,14 @@ async def execute_tool_run(
         return JSONResponse(
             status_code=503,
             content={"error": {"code": "service_unavailable", "message": exc.message}},
+        )
+    except ToolQueueFullError as exc:
+        # No core error type maps to HTTP 429; translate inline (same pattern as 503).
+        # ToolQueueFullError is a domain exception raised by concurrency.acquire when
+        # the per-engagement admission queue has reached MAX_QUEUE_DEPTH.
+        return JSONResponse(
+            status_code=429,
+            content={"error": {"code": "too_many_requests", "message": exc.message}},
         )
 
 
