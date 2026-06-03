@@ -6,18 +6,15 @@
 // NodeEditDialog (create + edit) and the "Show history" -> GraphHistoryPanel
 // surfaces are reused from Slice 07 unchanged.
 //
-// Manages local UI state only: current view, dialog open/target, the selected
-// canvas node, and history visibility. Server state lives in TanStack Query.
-import { useCallback, useEffect, useMemo, useState } from 'react'
+// All local UI state + handlers live in useGraphPaneState so this component is
+// a thin view composition; server state lives in TanStack Query.
 import { Button } from '@/components/ui/button'
 import { GraphCanvas } from './GraphCanvas'
 import { SelectedNodePanel } from './SelectedNodePanel'
 import { GraphNodeList } from './GraphNodeList'
 import { NodeEditDialog } from './NodeEditDialog'
 import { GraphHistoryPanel } from './GraphHistoryPanel'
-import { useGraph } from '../api'
-import type { Node } from '../api'
-import { usePinStore } from '../store/pinStore'
+import { useGraphPaneState } from '../hooks/useGraphPaneState'
 
 // ---------------------------------------------------------------------------
 // Props
@@ -27,63 +24,25 @@ export interface GraphPaneProps {
   engagementId: string
 }
 
-type GraphView = 'graph' | 'list'
-
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export function GraphPane({ engagementId }: GraphPaneProps) {
-  const { data } = useGraph(engagementId)
-  const reconcile = usePinStore((s) => s.reconcile)
-
-  const [view, setView] = useState<GraphView>('graph')
-
-  // Dialog state — null/undefined node = create mode; Node = edit mode.
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [dialogNode, setDialogNode] = useState<Node | undefined>(undefined)
-
-  // Canvas selection is tracked by id and re-derived from live data so the
-  // panel reflects edits and disappears when the node is deleted.
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-  const selectedNode = useMemo(
-    () => data?.nodes?.find((n) => n.id === selectedNodeId) ?? null,
-    [data, selectedNodeId],
-  )
-
-  const [showHistory, setShowHistory] = useState(false)
-
-  // Drop pins for nodes that no longer exist after each successful graph load.
-  useEffect(() => {
-    if (data?.nodes) {
-      reconcile(
-        engagementId,
-        data.nodes.map((n) => n.id),
-      )
-    }
-  }, [data, engagementId, reconcile])
-
-  const handleAddNode = useCallback(() => {
-    setDialogNode(undefined)
-    setDialogOpen(true)
-  }, [])
-
-  const handleEditNode = useCallback((node: Node) => {
-    setDialogNode(node)
-    setDialogOpen(true)
-  }, [])
-
-  const handleSelectNode = useCallback((node: Node | null) => {
-    setSelectedNodeId(node?.id ?? null)
-  }, [])
-
-  function handleDialogOpenChange(open: boolean) {
-    setDialogOpen(open)
-    if (!open) {
-      // Default the next open to create mode rather than re-opening edit mode.
-      setDialogNode(undefined)
-    }
-  }
+  const {
+    view,
+    setView,
+    dialogOpen,
+    dialogNode,
+    selectedNode,
+    showHistory,
+    toggleHistory,
+    handleAddNode,
+    handleEditNode,
+    handleSelectNode,
+    handleDialogOpenChange,
+    clearSelection,
+  } = useGraphPaneState(engagementId)
 
   return (
     <div className="flex flex-col gap-4">
@@ -123,7 +82,7 @@ export function GraphPane({ engagementId }: GraphPaneProps) {
               engagementId={engagementId}
               node={selectedNode}
               onEdit={handleEditNode}
-              onDeleted={() => setSelectedNodeId(null)}
+              onDeleted={clearSelection}
             />
           )}
         </>
@@ -143,7 +102,7 @@ export function GraphPane({ engagementId }: GraphPaneProps) {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => setShowHistory((prev) => !prev)}
+          onClick={toggleHistory}
           aria-expanded={showHistory}
         >
           {showHistory ? 'Hide history' : 'Show history'}

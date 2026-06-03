@@ -1,2 +1,3 @@
 // Feature-local hooks for the graph feature.
-export {}
+export { useGraphPaneState } from './useGraphPaneState'
+export type { GraphPaneState, GraphView } from './useGraphPaneState'

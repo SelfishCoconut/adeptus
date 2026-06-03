@@ -32,6 +32,9 @@ export interface GraphCanvasProps {
   onSelectNode: (node: Node | null) => void
 }
 
+/** Shared canvas height — keeps the skeleton, empty state, and live canvas aligned. */
+const CANVAS_HEIGHT = 'h-[420px]'
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -95,7 +98,7 @@ export function GraphCanvas({ engagementId, onSelectNode }: GraphCanvasProps) {
   if (isLoading) {
     return (
       <div data-testid="graph-canvas-skeleton" className="flex flex-col gap-2">
-        <Skeleton className="h-[420px] w-full" />
+        <Skeleton className={`${CANVAS_HEIGHT} w-full`} />
       </div>
     )
   }
@@ -114,7 +117,7 @@ export function GraphCanvas({ engagementId, onSelectNode }: GraphCanvasProps) {
     return (
       <div
         data-testid="graph-canvas-empty"
-        className="flex h-[420px] items-center justify-center rounded-md border border-dashed"
+        className={`flex ${CANVAS_HEIGHT} items-center justify-center rounded-md border border-dashed`}
       >
         <p className="text-sm text-muted-foreground">
           No graph entities yet — add one.
@@ -134,14 +137,14 @@ export function GraphCanvas({ engagementId, onSelectNode }: GraphCanvasProps) {
       </div>
       <div
         data-testid="graph-canvas"
-        className="h-[420px] w-full overflow-hidden rounded-md border bg-card"
+        className={`${CANVAS_HEIGHT} w-full overflow-hidden rounded-md border bg-card`}
       >
         <CytoscapeComponent
           elements={elements}
           stylesheet={graphStylesheet}
           layout={graphLayout}
           cy={handleCy}
-          style={{ width: '100%', height: '100%' }}
+          className="h-full w-full"
         />
       </div>
     </div>

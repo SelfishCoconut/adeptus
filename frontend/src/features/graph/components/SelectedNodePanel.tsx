@@ -5,6 +5,7 @@
 // existing NodeEditDialog via the parent), Delete (useDeleteNode), and Undo
 // (useUndoNode) — Undo is shown only when the node has prior history to revert
 // to (it has been updated since creation).
+import { useMemo } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useDeleteNode, useUndoNode } from '../api'
@@ -34,10 +35,14 @@ export function SelectedNodePanel({
   onEdit,
   onDeleted,
 }: SelectedNodePanelProps) {
-  const isPinned = usePinStore(
-    (s) => s.pinnedByEngagement[engagementId]?.includes(node.id) ?? false,
-  )
+  // Select the stable map reference (same pattern as GraphCanvas) and derive
+  // the boolean, rather than computing it inside the selector.
+  const pinnedByEngagement = usePinStore((s) => s.pinnedByEngagement)
   const togglePin = usePinStore((s) => s.togglePin)
+  const isPinned = useMemo(
+    () => pinnedByEngagement[engagementId]?.includes(node.id) ?? false,
+    [pinnedByEngagement, engagementId, node.id],
+  )
 
   const deleteNode = useDeleteNode(engagementId)
   const undoNode = useUndoNode(engagementId)
