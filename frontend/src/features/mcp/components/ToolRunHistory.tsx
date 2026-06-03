@@ -10,6 +10,7 @@ interface ToolRunHistoryProps {
 }
 
 const STATUS_VARIANT: Record<ToolRunResult['status'], 'secondary' | 'default' | 'destructive'> = {
+  queued: 'default',
   completed: 'secondary',
   running: 'default',
   failed: 'destructive',
