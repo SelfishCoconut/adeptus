@@ -455,6 +455,16 @@ async def execute_tool_run(
         # Heavy runs begin as 'queued'; the background task flips to 'running' on
         # admission (Decision 6: started_at = admission time, not insert time).
         # Light runs insert as 'running' — no admission step needed.
+
+        # SECURITY: pre-flight capacity check for heavy runs.  Must run BEFORE
+        # create_tool_run / db.commit() / asyncio.create_task() so that a full
+        # queue surfaces as HTTP 429 with NO row created and NO task spawned.
+        # The existing cap inside concurrency.acquire() is kept as defence-in-depth
+        # for the residual TOCTOU window, but the gross amplification is eliminated
+        # here.  Light runs are never queued so no check is needed for them.
+        if is_heavy:
+            concurrency.check_queue_capacity(engagement_id)
+
         initial_status: ToolRunStatus = "queued" if is_heavy else "running"
         tool_run = await mcp_repo.create_tool_run(
             db,
@@ -501,6 +511,9 @@ async def execute_tool_run(
         )
 
     # Step 3: insert in-flight ToolRun row (sync path).
+    # Pre-flight capacity check for heavy sync runs (same defence as async path).
+    if is_heavy:
+        concurrency.check_queue_capacity(engagement_id)
     tool_run = await mcp_repo.create_tool_run(
         db,
         engagement_id=engagement_id,

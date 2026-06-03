@@ -110,7 +110,16 @@ export function EngagementWorkspacePage() {
               max={16}
               value={displayedSlotLimit}
               disabled={updateEngagement.isPending}
-              onChange={(e) => setSlotLimitDraft(e.target.valueAsNumber)}
+              onChange={(e) => {
+                const value = e.target.valueAsNumber
+                // When the field is cleared, valueAsNumber is NaN.  Rather than
+                // storing NaN in the draft (which renders as a blank controlled
+                // input), keep the draft unchanged so the displayed value falls
+                // back to the server value until the user types a valid number.
+                if (!Number.isNaN(value)) {
+                  setSlotLimitDraft(value)
+                }
+              }}
               onBlur={handleSlotLimitCommit}
               onKeyDown={handleSlotLimitKeyDown}
               className="w-20"

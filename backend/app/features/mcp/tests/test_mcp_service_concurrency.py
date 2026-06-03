@@ -28,6 +28,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.features.mcp import concurrency as concurrency_module
+from app.features.mcp.concurrency import ToolQueueFullError
 from app.features.mcp.registry import McpServerConfig, McpToolConfig
 from app.features.mcp.schemas import WebSocketOutputChunk
 from app.features.mcp.service import (
@@ -811,3 +812,202 @@ async def test_sync_heavy_slot_released_on_server_down() -> None:
     # Slot must be released even though McpServerDown was raised.
     snap = concurrency_module.snapshot(engagement_id)
     assert snap.running_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Async heavy path: queue cap pre-check hoisted BEFORE row/task allocation
+# (fix: blocker item 1 — ToolQueueFullError must fire as 429 with no row/task)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_heavy_queue_full_raises_before_row_created() -> None:
+    """When the per-engagement queue is full, execute_tool_run with async_mode=True
+    must raise ToolQueueFullError BEFORE creating any tool_runs row and BEFORE
+    spawning any background task.
+
+    Assertions:
+      (a) ToolQueueFullError is raised (→ HTTP 429 in the router).
+      (b) create_tool_run is NOT called for the rejected request (no DB row).
+      (c) asyncio.create_task is NOT called (no background task spawned).
+
+    This pins the hoisted pre-check in execute_tool_run (the fix).  Prior to the
+    fix, ToolQueueFullError was only raised inside _stream_to_channel (inside the
+    already-spawned background task), which meant: the 429 was never returned to
+    the client, a tool_runs row was already committed, and an asyncio.Task had
+    already been allocated.
+    """
+    import unittest.mock as mock_module
+
+    engagement_id = uuid4()
+    cap = 2
+
+    heavy_tool = _make_tool_config(name=_HEAVY_TOOL_NAME, weight="heavy")
+    registry = _make_registry_with_tools(heavy_tool)
+    engagement_mock = _make_engagement_mock(slot_limit=1)
+
+    # Fill the queue to exactly cap so the pre-check fires.
+    slot_limit = 1
+    handle = await concurrency_module.acquire(
+        engagement_id=engagement_id,
+        slot_limit=slot_limit,
+        tool_run_id=uuid4(),
+        target_host="hostA",
+        server_name=_SERVER_NAME,
+        tool_name=_HEAVY_TOOL_NAME,
+        on_queued=lambda pos, reason: None,
+        on_started=lambda: None,
+    )
+    waiter_tasks: list[asyncio.Task[concurrency_module.AdmissionHandle]] = []
+    with mock_module.patch("app.features.mcp.concurrency.MAX_QUEUE_DEPTH", cap):
+        for i in range(cap):
+            t = asyncio.create_task(
+                concurrency_module.acquire(
+                    engagement_id=engagement_id,
+                    slot_limit=slot_limit,
+                    tool_run_id=uuid4(),
+                    target_host=f"host{i}",
+                    server_name=_SERVER_NAME,
+                    tool_name=_HEAVY_TOOL_NAME,
+                    on_queued=lambda pos, reason: None,
+                    on_started=lambda: None,
+                )
+            )
+            waiter_tasks.append(t)
+        await asyncio.sleep(0)
+        assert concurrency_module.snapshot(engagement_id).queued_count == cap
+
+        # Now call execute_tool_run with async_mode=True — must raise before any row/task.
+        db = AsyncMock()
+        create_tool_run_mock = AsyncMock()
+        create_task_calls: list[Any] = []
+
+        def _track_create_task(coro: Any) -> MagicMock:
+            create_task_calls.append(coro)
+            coro.close()
+            return MagicMock()
+
+        with (
+            patch(
+                "app.features.mcp.service.eng_repo.get_engagement_for_member",
+                new_callable=AsyncMock,
+                return_value=(engagement_mock, _make_member_mock()),
+            ),
+            patch("app.features.mcp.service.get_registry", return_value=registry),
+            patch(
+                "app.features.mcp.service.mcp_repo.create_tool_run",
+                create_tool_run_mock,
+            ),
+            patch("asyncio.create_task", side_effect=_track_create_task),
+        ):
+            with pytest.raises(ToolQueueFullError):
+                await execute_tool_run(
+                    db,
+                    engagement_id=engagement_id,
+                    server_name=_SERVER_NAME,
+                    tool_name=_HEAVY_TOOL_NAME,
+                    args={"target": _TARGET},
+                    timeout_seconds=_TIMEOUT,
+                    user_id=uuid4(),
+                    async_mode=True,
+                )
+
+        # (b) No row was created.
+        create_tool_run_mock.assert_not_called()
+        # (c) No background task was spawned.
+        assert len(create_task_calls) == 0, (
+            f"Expected no asyncio.create_task calls, got {len(create_task_calls)}"
+        )
+
+    # Cleanup.
+    concurrency_module.release(handle)
+    for t in waiter_tasks:
+        h = await t
+        concurrency_module.release(h)
+
+
+@pytest.mark.asyncio
+async def test_async_light_run_ignores_queue_cap() -> None:
+    """Light runs must NOT be rejected even when the heavy queue is full.
+
+    The pre-check only applies to heavy runs; light runs bypass the queue entirely.
+    """
+    import unittest.mock as mock_module
+
+    engagement_id = uuid4()
+    cap = 1
+
+    light_tool = _make_tool_config(name=_LIGHT_TOOL_NAME, weight="light")
+    registry = _make_registry_with_tools(light_tool)
+    engagement_mock = _make_engagement_mock(slot_limit=1)
+    tool_run = _make_tool_run_mock(engagement_id=engagement_id, status="running")
+
+    db = AsyncMock()
+
+    def _close_coro(coro: Any) -> MagicMock:
+        coro.close()
+        return MagicMock()
+
+    # Fill the heavy queue to the cap — must NOT affect light runs.
+    slot_limit = 1
+    handle = await concurrency_module.acquire(
+        engagement_id=engagement_id,
+        slot_limit=slot_limit,
+        tool_run_id=uuid4(),
+        target_host="hostA",
+        server_name=_SERVER_NAME,
+        tool_name=_HEAVY_TOOL_NAME,
+        on_queued=lambda pos, reason: None,
+        on_started=lambda: None,
+    )
+    waiter_tasks: list[asyncio.Task[concurrency_module.AdmissionHandle]] = []
+    with mock_module.patch("app.features.mcp.concurrency.MAX_QUEUE_DEPTH", cap):
+        for i in range(cap):
+            t = asyncio.create_task(
+                concurrency_module.acquire(
+                    engagement_id=engagement_id,
+                    slot_limit=slot_limit,
+                    tool_run_id=uuid4(),
+                    target_host=f"host{i}",
+                    server_name=_SERVER_NAME,
+                    tool_name=_HEAVY_TOOL_NAME,
+                    on_queued=lambda pos, reason: None,
+                    on_started=lambda: None,
+                )
+            )
+            waiter_tasks.append(t)
+        await asyncio.sleep(0)
+
+        with (
+            patch(
+                "app.features.mcp.service.eng_repo.get_engagement_for_member",
+                new_callable=AsyncMock,
+                return_value=(engagement_mock, _make_member_mock()),
+            ),
+            patch("app.features.mcp.service.get_registry", return_value=registry),
+            patch(
+                "app.features.mcp.service.mcp_repo.create_tool_run",
+                new_callable=AsyncMock,
+                return_value=tool_run,
+            ),
+            patch("asyncio.create_task", side_effect=_close_coro),
+        ):
+            # Light run must succeed — no ToolQueueFullError.
+            result = await execute_tool_run(
+                db,
+                engagement_id=engagement_id,
+                server_name=_SERVER_NAME,
+                tool_name=_LIGHT_TOOL_NAME,
+                args={"target": _TARGET},
+                timeout_seconds=_TIMEOUT,
+                user_id=uuid4(),
+                async_mode=True,
+            )
+
+        assert result.status == "running"
+
+    # Cleanup.
+    concurrency_module.release(handle)
+    for t in waiter_tasks:
+        h = await t
+        concurrency_module.release(h)

@@ -290,15 +290,17 @@ def _compute_reason(state: _EngagementState, ticket: _Ticket) -> QueueReason:
 
     Called after a release-driven admission to determine the fresh reason for
     each still-waiting ticket.  A ticket is slot_full when no slots are free
-    (regardless of host), and target_locked when a slot IS free but the ticket's
-    target host is currently held by another run.
+    (regardless of host), or when the ticket has no target host (a host-less
+    run can only ever wait on a slot, never on a per-host lock).  A ticket is
+    target_locked when a slot IS free AND the ticket has a target host that is
+    currently held by another run.
     """
     available = state.slot_limit - state.in_use
-    if available <= 0:
+    if available <= 0 or ticket.target_host is None:
         return "slot_full"
-    # Slot is free — the only reason this ticket is still waiting is that its
-    # host is locked.  (If its host were free AND a slot were available the
-    # scan would have admitted it.)
+    # Slot is free and the ticket has a target host — the only reason this
+    # ticket is still waiting is that its host is locked.  (If its host were
+    # free AND a slot were available the scan would have admitted it.)
     return "target_locked"
 
 
@@ -360,6 +362,37 @@ _rebroadcast_tasks: set[asyncio.Task[None]] = set()
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def check_queue_capacity(engagement_id: UUID) -> None:
+    """Synchronous pre-flight capacity check — raise ToolQueueFullError if the queue is full.
+
+    Call this BEFORE creating any database rows or spawning any tasks for a heavy
+    run on the async path.  This eliminates the gross unbounded amplification that
+    would otherwise occur: without this check a caller could commit thousands of
+    ``tool_runs`` rows and spawn thousands of background tasks before the depth cap
+    in ``acquire`` fires (inside the background task, after the request has already
+    returned 202).
+
+    Reads the SAME ``_get_state(...).queue`` length that ``acquire``'s depth guard
+    uses.  Does NOT mutate state — it is purely a read.
+
+    Why keep the cap inside ``acquire`` too?
+        The cap inside ``acquire`` is retained as defence-in-depth: a small
+        bounded race exists between this pre-check and the background task's
+        ``acquire`` call (other coroutines can enqueue in the DB-commit await
+        window).  A minor overshoot is acceptable; the gross unbounded case is
+        eliminated by this pre-check.
+
+    Only used for HEAVY runs.  Light runs never enter the queue so this function
+    must not be called for them.
+    """
+    state = _get_state(engagement_id)
+    if len(state.queue) >= MAX_QUEUE_DEPTH:
+        raise ToolQueueFullError(
+            f"Engagement {engagement_id} has reached the maximum queue depth "
+            f"({MAX_QUEUE_DEPTH}). Retry when a queued run completes."
+        )
 
 
 async def acquire(
@@ -429,7 +462,9 @@ async def acquire(
             f"({MAX_QUEUE_DEPTH}). Retry when a queued run completes."
         )
 
-    reason: QueueReason = "slot_full" if available <= 0 else "target_locked"
+    reason: QueueReason = (
+        "slot_full" if (available <= 0 or target_host is None) else "target_locked"
+    )
     ticket = _Ticket(
         tool_run_id=tool_run_id,
         server_name=server_name,

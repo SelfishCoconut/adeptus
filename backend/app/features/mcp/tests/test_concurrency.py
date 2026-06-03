@@ -29,6 +29,7 @@ from app.features.mcp.concurrency import (
     ToolQueueFullError,
     _reset,
     acquire,
+    check_queue_capacity,
     position_of,
     release,
     resolve_target_host,
@@ -1247,3 +1248,182 @@ async def test_queue_depth_cap_allows_exactly_at_ceiling() -> None:
     for t in tasks:
         h = await t
         release(h)
+
+
+# ---------------------------------------------------------------------------
+# check_queue_capacity — synchronous pre-flight cap check (fix: blocker item 1)
+# ---------------------------------------------------------------------------
+
+
+def test_check_queue_capacity_passes_when_queue_empty() -> None:
+    """check_queue_capacity does not raise when the queue is empty."""
+    eng = _engagement_id()
+    # Should not raise — no state yet for this engagement.
+    check_queue_capacity(eng)
+
+
+async def test_check_queue_capacity_passes_when_below_ceiling() -> None:
+    """check_queue_capacity does not raise when queue has room."""
+    import unittest.mock as mock_module
+
+    eng = _engagement_id()
+    slot_limit = 1
+    cap = 3
+
+    handle = await _acquire(eng, slot_limit=slot_limit, target_host="hostA")
+
+    tasks: list[asyncio.Task[AdmissionHandle]] = []
+    with mock_module.patch("app.features.mcp.concurrency.MAX_QUEUE_DEPTH", cap):
+        # Enqueue cap-1 runs (one below the ceiling).
+        for i in range(cap - 1):
+            t = asyncio.create_task(
+                acquire(
+                    engagement_id=eng,
+                    slot_limit=slot_limit,
+                    tool_run_id=_run_id(),
+                    target_host=f"host{i}",
+                    server_name="httpx",
+                    tool_name="run_httpx_heavy",
+                    on_queued=_noop_queued,
+                    on_started=_noop_started,
+                )
+            )
+            tasks.append(t)
+        await asyncio.sleep(0)
+
+        # Pre-check must pass — still one slot below cap.
+        check_queue_capacity(eng)  # Must not raise.
+
+    release(handle)
+    for t in tasks:
+        h = await t
+        release(h)
+
+
+async def test_check_queue_capacity_raises_at_ceiling() -> None:
+    """check_queue_capacity raises ToolQueueFullError when queue == MAX_QUEUE_DEPTH."""
+    import unittest.mock as mock_module
+
+    eng = _engagement_id()
+    slot_limit = 1
+    cap = 2
+
+    handle = await _acquire(eng, slot_limit=slot_limit, target_host="hostA")
+
+    tasks: list[asyncio.Task[AdmissionHandle]] = []
+    with mock_module.patch("app.features.mcp.concurrency.MAX_QUEUE_DEPTH", cap):
+        # Fill queue to exactly cap.
+        for i in range(cap):
+            t = asyncio.create_task(
+                acquire(
+                    engagement_id=eng,
+                    slot_limit=slot_limit,
+                    tool_run_id=_run_id(),
+                    target_host=f"host{i}",
+                    server_name="httpx",
+                    tool_name="run_httpx_heavy",
+                    on_queued=_noop_queued,
+                    on_started=_noop_started,
+                )
+            )
+            tasks.append(t)
+        await asyncio.sleep(0)
+        assert snapshot(eng).queued_count == cap
+
+        # Pre-check must now raise — queue is at cap.
+        with pytest.raises(ToolQueueFullError):
+            check_queue_capacity(eng)
+
+    release(handle)
+    for t in tasks:
+        h = await t
+        release(h)
+
+
+# ---------------------------------------------------------------------------
+# Host-less ticket reason (fix: suggestion item 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_hostless_ticket_always_reports_slot_full() -> None:
+    """A ticket with target_host=None must always report reason='slot_full', never 'target_locked'.
+
+    A host-less run has no host to lock.  Even when slots become available while
+    it is queued, its reason must remain 'slot_full' (waiting for a slot/position)
+    rather than 'target_locked' (which would be semantically wrong for a run with
+    no target host).
+
+    Setup: slot_limit=1; A holds the slot + localhost lock.
+    C (localhost) and D (target_host=None) both queue.
+    Initial reasons: both slot_full (no slots available).
+    Release A: D should be admitted (C's host still locked); D's callbacks must
+    never have reported 'target_locked'.
+    """
+    eng = _engagement_id()
+    slot_limit = 1
+
+    handle_a = await _acquire(eng, slot_limit=slot_limit, target_host="localhost")
+
+    c_queued_calls: list[tuple[int, QueueReason]] = []
+    d_queued_calls: list[tuple[int, QueueReason]] = []
+
+    def _track_c(pos: int, reason: QueueReason) -> None:
+        c_queued_calls.append((pos, reason))
+
+    def _track_d(pos: int, reason: QueueReason) -> None:
+        d_queued_calls.append((pos, reason))
+
+    # C queues with target_host=localhost.
+    c_task = asyncio.create_task(
+        acquire(
+            engagement_id=eng,
+            slot_limit=slot_limit,
+            tool_run_id=_run_id(),
+            target_host="localhost",
+            server_name="httpx",
+            tool_name="run_httpx_heavy",
+            on_queued=_track_c,
+            on_started=_noop_started,
+        )
+    )
+    # D queues with target_host=None (like run_command).
+    d_task = asyncio.create_task(
+        acquire(
+            engagement_id=eng,
+            slot_limit=slot_limit,
+            tool_run_id=_run_id(),
+            target_host=None,
+            server_name="shell-exec",
+            tool_name="run_command",
+            on_queued=_track_d,
+            on_started=_noop_started,
+        )
+    )
+    await asyncio.sleep(0)
+
+    # Both queued initially with slot_full (no slots available).
+    assert c_queued_calls[0] == (1, "slot_full"), f"C initial: {c_queued_calls}"
+    assert d_queued_calls[0] == (2, "slot_full"), (
+        f"Host-less D initial reason must be 'slot_full' (no slots), got {d_queued_calls}"
+    )
+
+    # Release A: slot freed + localhost unlocked.
+    # Scan: C is front (localhost), localhost now free, slot free → C admitted.
+    # (D would be next if C's host were still locked, but localhost is freed.)
+    release(handle_a)
+    await asyncio.sleep(0)
+    handle_c = await asyncio.wait_for(c_task, timeout=1.0)
+
+    # With slot_limit=1 and C now holding the slot, D is still queued.
+    # Re-broadcast reason for D: slot is now full (C holds it), so still 'slot_full'.
+    await asyncio.sleep(0)
+
+    # D must NEVER have reported 'target_locked'.
+    for call in d_queued_calls:
+        assert call[1] != "target_locked", (
+            f"Host-less D must never report 'target_locked'; all calls: {d_queued_calls}"
+        )
+
+    release(handle_c)
+    handle_d = await asyncio.wait_for(d_task, timeout=1.0)
+    release(handle_d)
