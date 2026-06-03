@@ -8,6 +8,7 @@ dependencies = [
     "argon2-cffi",
     "asyncpg",
     "fastapi>=0.111",
+    "networkx>=3.0",
     "pydantic-settings>=2.0",
     "python-multipart",
     "pyyaml>=6.0",
