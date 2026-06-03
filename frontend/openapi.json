@@ -853,6 +853,476 @@
           }
         }
       }
+    },
+    "/api/v1/engagements/{engagement_id}/graph": {
+      "get": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Get Graph",
+        "description": "Return the full live graph (non-deleted nodes + edges) for an engagement.\n\nServed from the in-memory single writer (warm-starts from Postgres on first\naccess after a restart).  Membership-gated (\u00a717.1 \u2014 non-member returns 404).\nRead-only path: archived engagements are accessible.",
+        "operationId": "get_graph",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphSnapshot"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/graph/history": {
+      "get": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Get Graph History",
+        "description": "Return soft-deleted nodes and the per-entity node history.\n\nMembership-gated.  Read-only path: archived engagements are accessible.\n``include_deleted`` defaults to true (matching the contract).",
+        "operationId": "get_graph_history",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "include_deleted",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true,
+              "title": "Include Deleted"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphHistory"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/graph/nodes": {
+      "post": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Create Node",
+        "description": "Create a graph node (serialized through the single writer).\n\nMembership-gated.  Returns 409 for archived engagements; 422 for bad type\nor invalid body (automatic Pydantic validation).",
+        "operationId": "create_node",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/graph/nodes/{node_id}": {
+      "patch": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Update Node",
+        "description": "Update a node's label and/or properties (serialized; records a history entry).\n\nMembership-gated.  Returns 404 when the node is not found or deleted.\nReturns 409 for archived engagements.",
+        "operationId": "update_node",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Delete Node",
+        "description": "Soft-delete a node and cascade to its incident edges (serialized).\n\nReturns 204 on success (no body).  Returns 404 when not found or already\ndeleted; 409 when the engagement is archived.",
+        "operationId": "delete_node",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/graph/nodes/{node_id}/undo": {
+      "post": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Undo Node",
+        "description": "Revert a node to its immediately-prior state from history (serialized).\n\nReturns 404 when no prior state exists (NoHistory).\nReturns 409 for archived engagements.",
+        "operationId": "undo_node",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/graph/edges": {
+      "post": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Create Edge",
+        "description": "Create a directed edge between two existing non-deleted nodes (serialized).\n\nDuplicate live (source, target, relation) triples are rejected with 409\n(DuplicateEdge \u2014 checked race-free inside the writer consumer).\nMissing or deleted endpoints return 404.",
+        "operationId": "create_edge",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EdgeCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Edge"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/graph/edges/{edge_id}": {
+      "delete": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Delete Edge",
+        "description": "Soft-delete an edge (serialized).\n\nReturns 204 on success (no body).  Returns 404 when not found or already\ndeleted; 409 when the engagement is archived.",
+        "operationId": "delete_edge",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "edge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Edge Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/graph/edges/{edge_id}/undo": {
+      "post": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Undo Edge",
+        "description": "Revert an edge to its prior state from history (serialized).\n\nReturns 404 when no prior state exists (NoHistory) or edge not found.\nReturns 409 for archived engagements.",
+        "operationId": "undo_edge",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "edge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Edge Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Edge"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -869,6 +1339,100 @@
           "username"
         ],
         "title": "AddMemberRequest"
+      },
+      "Edge": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "engagement_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Engagement Id"
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Source Id"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Target Id"
+          },
+          "relation": {
+            "type": "string",
+            "title": "Relation"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Properties"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "engagement_id",
+          "source_id",
+          "target_id",
+          "relation",
+          "properties",
+          "deleted",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "Edge",
+        "description": "Response model for a graph edge."
+      },
+      "EdgeCreate": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Source Id"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Target Id"
+          },
+          "relation": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Relation"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Properties"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_id",
+          "target_id",
+          "relation"
+        ],
+        "title": "EdgeCreate",
+        "description": "Request body for POST .../graph/edges."
       },
       "EngagementCreate": {
         "properties": {
@@ -1132,6 +1696,56 @@
         "type": "object",
         "title": "EngagementUpdate"
       },
+      "GraphHistory": {
+        "properties": {
+          "deleted_nodes": {
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            },
+            "type": "array",
+            "title": "Deleted Nodes"
+          },
+          "node_history": {
+            "items": {
+              "$ref": "#/components/schemas/NodeHistoryEntry"
+            },
+            "type": "array",
+            "title": "Node History"
+          }
+        },
+        "type": "object",
+        "required": [
+          "deleted_nodes",
+          "node_history"
+        ],
+        "title": "GraphHistory",
+        "description": "History view: soft-deleted nodes and the per-entity edit history."
+      },
+      "GraphSnapshot": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            },
+            "type": "array",
+            "title": "Nodes"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/Edge"
+            },
+            "type": "array",
+            "title": "Edges"
+          }
+        },
+        "type": "object",
+        "required": [
+          "nodes",
+          "edges"
+        ],
+        "title": "GraphSnapshot",
+        "description": "Full live graph (non-deleted nodes + edges) for one engagement."
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1258,6 +1872,175 @@
           "joined_at"
         ],
         "title": "MemberEntry"
+      },
+      "Node": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "engagement_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Engagement Id"
+          },
+          "type": {
+            "$ref": "#/components/schemas/NodeType"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Properties"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "engagement_id",
+          "type",
+          "label",
+          "properties",
+          "deleted",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "Node",
+        "description": "Response model for a graph node."
+      },
+      "NodeCreate": {
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/NodeType"
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Label"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Properties"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "label"
+        ],
+        "title": "NodeCreate",
+        "description": "Request body for POST .../graph/nodes."
+      },
+      "NodeHistoryEntry": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "entity_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Entity Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Properties"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted"
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Recorded At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "entity_id",
+          "label",
+          "properties",
+          "deleted",
+          "recorded_at"
+        ],
+        "title": "NodeHistoryEntry",
+        "description": "A single pre-mutation snapshot row from ``graph_node_history``."
+      },
+      "NodeType": {
+        "type": "string",
+        "enum": [
+          "host",
+          "port",
+          "service",
+          "url",
+          "endpoint",
+          "vulnerability",
+          "credential",
+          "note",
+          "attack_path"
+        ],
+        "title": "NodeType",
+        "description": "Allowed graph node types (\u00a78.1 entity list)."
+      },
+      "NodeUpdate": {
+        "properties": {
+          "label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "properties": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Properties"
+          }
+        },
+        "type": "object",
+        "title": "NodeUpdate",
+        "description": "Request body for PATCH .../graph/nodes/{node_id}.\n\nAt least one of ``label`` or ``properties`` must be present.\n``properties`` fully replaces the prior blob when provided."
       },
       "QueuedRun": {
         "properties": {
