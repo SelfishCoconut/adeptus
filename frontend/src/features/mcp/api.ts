@@ -1,7 +1,8 @@
-import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api,
   type McpServerInfo,
+  type TimeoutDecision,
   type ToolDescriptor,
   type ToolQueueSnapshot,
   type ToolRunCreate,
@@ -129,6 +130,58 @@ export function useToolQueue(engagementId: string) {
       )
       if (error || !data) throw new Error('Failed to load tool queue')
       return data
+    },
+  })
+}
+
+/**
+ * Kill a single tool run (running, queued, or awaiting_decision). The backend
+ * is idempotent — killing an already-terminal run returns 200 with the current
+ * state. On success, both the queue strip and the run list are invalidated so
+ * the freed slot and the updated status are reflected immediately.
+ */
+export function useKillToolRun(engagementId: string) {
+  const queryClient = useQueryClient()
+  return useMutation<ToolRunResult, Error, string>({
+    mutationFn: async (toolRunId) => {
+      const { data, error } = await api.POST('/api/v1/tool-runs/{tool_run_id}/kill', {
+        params: { path: { tool_run_id: toolRunId } },
+      })
+      if (error || !data) throw new Error('Failed to kill tool run')
+      return data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: toolQueueKey(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: toolRunsKey(engagementId) })
+    },
+  })
+}
+
+/**
+ * Answer a pending timeout prompt for a run in state `awaiting_decision`.
+ * The decision (`kill`, `extend`, or `wait`) is forwarded to the parked
+ * background task. On success, both the queue strip and the run list are
+ * invalidated: `extend`/`wait` re-enter the FIFO queue (queue strip needs
+ * refresh) and the run status transitions away from `awaiting_decision` (run
+ * list needs refresh).
+ */
+export function useTimeoutDecision(engagementId: string) {
+  const queryClient = useQueryClient()
+  return useMutation<ToolRunResult, Error, { toolRunId: string } & TimeoutDecision>({
+    mutationFn: async ({ toolRunId, ...body }) => {
+      const { data, error } = await api.POST(
+        '/api/v1/tool-runs/{tool_run_id}/timeout-decision',
+        {
+          params: { path: { tool_run_id: toolRunId } },
+          body,
+        },
+      )
+      if (error || !data) throw new Error('Failed to submit timeout decision')
+      return data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: toolQueueKey(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: toolRunsKey(engagementId) })
     },
   })
 }
