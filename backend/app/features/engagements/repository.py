@@ -70,6 +70,21 @@ async def get_engagement_for_member(
     return row[0], row[1]
 
 
+async def update_paused(
+    db: AsyncSession,
+    engagement_id: UUID,
+    paused: bool,
+) -> Engagement | None:
+    """Update the ``paused`` column of an Engagement and return the refreshed row.
+
+    Returns ``None`` if the engagement does not exist.  The caller is responsible
+    for committing the transaction.
+    """
+    await db.execute(update(Engagement).where(Engagement.id == engagement_id).values(paused=paused))
+    result = await db.execute(select(Engagement).where(Engagement.id == engagement_id))
+    return result.scalar_one_or_none()
+
+
 async def update_engagement(
     db: AsyncSession,
     engagement_id: UUID,

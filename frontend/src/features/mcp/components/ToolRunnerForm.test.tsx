@@ -237,4 +237,51 @@ describe('ToolRunnerForm', () => {
     renderForm()
     expect(screen.getByRole('alert')).toHaveTextContent(/target outside sandbox/i)
   })
+
+  it('disables the Run button when paused=true is passed', async () => {
+    const user = userEvent.setup()
+    mockedUseListTools.mockReturnValue(listToolsResult({ data: [HTTPX_DESCRIPTOR] }))
+    mockedUseExecuteToolRunAsync.mockReturnValue(mutationResult({}))
+
+    render(
+      <ToolRunnerForm
+        engagementId={ENGAGEMENT_ID}
+        onRunStarted={vi.fn()}
+        paused={true}
+      />,
+    )
+    await user.selectOptions(screen.getByLabelText(/^tool$/i), 'httpx/run_httpx')
+
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeDisabled()
+  })
+
+  it('enables the Run button when paused=false', async () => {
+    const user = userEvent.setup()
+    mockedUseListTools.mockReturnValue(listToolsResult({ data: [HTTPX_DESCRIPTOR] }))
+    mockedUseExecuteToolRunAsync.mockReturnValue(mutationResult({}))
+
+    render(
+      <ToolRunnerForm
+        engagementId={ENGAGEMENT_ID}
+        onRunStarted={vi.fn()}
+        paused={false}
+      />,
+    )
+    await user.selectOptions(screen.getByLabelText(/^tool$/i), 'httpx/run_httpx')
+
+    expect(screen.getByRole('button', { name: /^run$/i })).not.toBeDisabled()
+  })
+
+  it('surfaces a clear message when a 409 (engagement paused) is returned', () => {
+    mockedUseListTools.mockReturnValue(listToolsResult({ data: [HTTPX_DESCRIPTOR] }))
+    mockedUseExecuteToolRunAsync.mockReturnValue(
+      mutationResult({
+        isError: true,
+        error: new Error('Engagement is paused — no tool runs may start while paused'),
+      }),
+    )
+
+    renderForm()
+    expect(screen.getByRole('alert')).toHaveTextContent(/engagement is paused/i)
+  })
 })

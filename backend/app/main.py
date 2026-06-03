@@ -15,6 +15,7 @@ from app.features.engagements import events as engagement_events
 from app.features.engagements.router import router as engagements_router
 from app.features.health.router import router as health_router
 from app.features.mcp import concurrency as mcp_concurrency
+from app.features.mcp import listeners as mcp_listeners
 from app.features.mcp import repository as mcp_repo
 from app.features.mcp import subprocess_manager
 from app.features.mcp.registry import ConfigError, load_registry
@@ -101,6 +102,12 @@ def create_app() -> FastAPI:
     # so the engagements feature stays ignorant of mcp; the dependency flows
     # mcp → engagements via the events seam.  Idempotent across create_app() calls.
     engagement_events.on_slot_limit_changed(mcp_concurrency.set_slot_limit)
+    # Slice 06 (task 7): an engagement pause/resume change notifies the in-process
+    # concurrency manager so it can kill/de-queue in-flight runs.  The listener
+    # (defined in mcp/listeners.py) returns (killed_running, dequeued) counts via
+    # the event-dispatch return value — keeping the dependency direction mcp →
+    # engagements (engagements never imports mcp).  Idempotent.
+    engagement_events.on_engagement_paused_changed(mcp_listeners.on_engagement_paused_changed)
     # feature routers
     app.include_router(health_router)
     app.include_router(auth_router)

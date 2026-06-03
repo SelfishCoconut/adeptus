@@ -84,7 +84,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §6.3
 - **Depends on**: 05
 - **Risky**: no
-- **Status**: todo
+- **Status**: done
 
 ### Slice 07: Graph data model + single-writer process
 - **Goal**: Manual node create/edit; per-engagement writer process owns in-memory NetworkX; soft-delete + per-entity undo

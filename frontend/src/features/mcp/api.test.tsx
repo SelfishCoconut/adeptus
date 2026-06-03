@@ -5,12 +5,15 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import {
   mcpServersKey,
   mcpToolsKey,
+  toolQueueKey,
   toolRunsKey,
   useExecuteToolRun,
   useExecuteToolRunAsync,
+  useKillToolRun,
   useListMcpServers,
   useListTools,
   useListToolRuns,
+  useTimeoutDecision,
 } from './api'
 import { api } from '@/shared/api'
 
@@ -312,4 +315,250 @@ describe('useExecuteToolRunAsync', () => {
       )
     })
   })
+})
+
+// ---------------------------------------------------------------------------
+// useKillToolRun
+// ---------------------------------------------------------------------------
+
+describe('useKillToolRun', () => {
+  const killedResult = { ...TOOL_RUN_RESULT, status: 'killed' as const }
+
+  it('POSTs to /kill and returns the updated run result', async () => {
+    resolvePost({ data: killedResult, response: { status: 200 } })
+    const { result } = renderHook(() => useKillToolRun(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    let returned: unknown
+    await act(async () => {
+      returned = await result.current.mutateAsync(TOOL_RUN_ID)
+    })
+
+    expect(returned).toEqual(killedResult)
+    expect(mockPost).toHaveBeenCalledWith('/api/v1/tool-runs/{tool_run_id}/kill', {
+      params: { path: { tool_run_id: TOOL_RUN_ID } },
+    })
+  })
+
+  it('invalidates toolQueueKey on success', async () => {
+    resolvePost({ data: killedResult, response: { status: 200 } })
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+
+    const { result } = renderHook(() => useKillToolRun(ENGAGEMENT_ID), { wrapper })
+
+    await act(async () => {
+      await result.current.mutateAsync(TOOL_RUN_ID)
+    })
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: toolQueueKey(ENGAGEMENT_ID) })
+  })
+
+  it('invalidates toolRunsKey on success', async () => {
+    resolvePost({ data: killedResult, response: { status: 200 } })
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+
+    const { result } = renderHook(() => useKillToolRun(ENGAGEMENT_ID), { wrapper })
+
+    await act(async () => {
+      await result.current.mutateAsync(TOOL_RUN_ID)
+    })
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: toolRunsKey(ENGAGEMENT_ID) })
+  })
+
+  it('throws on 404 (non-member or unknown run)', async () => {
+    resolvePost({ error: { detail: 'Not Found' }, response: { status: 404 } })
+    const { result } = renderHook(() => useKillToolRun(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await act(async () => {
+      await expect(result.current.mutateAsync(TOOL_RUN_ID)).rejects.toThrow(
+        'Failed to kill tool run',
+      )
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// useTimeoutDecision
+// ---------------------------------------------------------------------------
+
+describe('useTimeoutDecision', () => {
+  const killedResult = { ...TOOL_RUN_RESULT, status: 'killed' as const }
+
+  it('POSTs a kill decision with the correct body', async () => {
+    resolvePost({ data: killedResult, response: { status: 200 } })
+    const { result } = renderHook(() => useTimeoutDecision(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    let returned: unknown
+    await act(async () => {
+      returned = await result.current.mutateAsync({
+        toolRunId: TOOL_RUN_ID,
+        decision: 'kill',
+        extend_seconds: 30,
+      })
+    })
+
+    expect(returned).toEqual(killedResult)
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/v1/tool-runs/{tool_run_id}/timeout-decision',
+      {
+        params: { path: { tool_run_id: TOOL_RUN_ID } },
+        body: { decision: 'kill', extend_seconds: 30 },
+      },
+    )
+  })
+
+  it('POSTs an extend decision and carries extend_seconds in the body', async () => {
+    const resumingResult = { ...TOOL_RUN_RESULT, status: 'running' as const }
+    resolvePost({ data: resumingResult, response: { status: 200 } })
+    const { result } = renderHook(() => useTimeoutDecision(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        toolRunId: TOOL_RUN_ID,
+        decision: 'extend',
+        extend_seconds: 60,
+      })
+    })
+
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/v1/tool-runs/{tool_run_id}/timeout-decision',
+      {
+        params: { path: { tool_run_id: TOOL_RUN_ID } },
+        body: { decision: 'extend', extend_seconds: 60 },
+      },
+    )
+  })
+
+  it('POSTs a wait decision with the correct body', async () => {
+    const resumingResult = { ...TOOL_RUN_RESULT, status: 'running' as const }
+    resolvePost({ data: resumingResult, response: { status: 200 } })
+    const { result } = renderHook(() => useTimeoutDecision(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        toolRunId: TOOL_RUN_ID,
+        decision: 'wait',
+        extend_seconds: 30,
+      })
+    })
+
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/v1/tool-runs/{tool_run_id}/timeout-decision',
+      {
+        params: { path: { tool_run_id: TOOL_RUN_ID } },
+        body: { decision: 'wait', extend_seconds: 30 },
+      },
+    )
+  })
+
+  it('invalidates toolQueueKey on success', async () => {
+    resolvePost({ data: killedResult, response: { status: 200 } })
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+
+    const { result } = renderHook(() => useTimeoutDecision(ENGAGEMENT_ID), { wrapper })
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        toolRunId: TOOL_RUN_ID,
+        decision: 'kill',
+        extend_seconds: 30,
+      })
+    })
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: toolQueueKey(ENGAGEMENT_ID) })
+  })
+
+  it('invalidates toolRunsKey on success', async () => {
+    resolvePost({ data: killedResult, response: { status: 200 } })
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+
+    const { result } = renderHook(() => useTimeoutDecision(ENGAGEMENT_ID), { wrapper })
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        toolRunId: TOOL_RUN_ID,
+        decision: 'kill',
+        extend_seconds: 30,
+      })
+    })
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: toolRunsKey(ENGAGEMENT_ID) })
+  })
+
+  it('throws on 404 (non-member or unknown run)', async () => {
+    resolvePost({ error: { detail: 'Not Found' }, response: { status: 404 } })
+    const { result } = renderHook(() => useTimeoutDecision(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await act(async () => {
+      await expect(
+        result.current.mutateAsync({
+          toolRunId: TOOL_RUN_ID,
+          decision: 'kill',
+          extend_seconds: 30,
+        }),
+      ).rejects.toThrow('Failed to submit timeout decision')
+    })
+  })
+
+  it('throws on 409 (run is not awaiting a decision)', async () => {
+    resolvePost({ error: { detail: 'Run is not awaiting a decision' }, response: { status: 409 } })
+    const { result } = renderHook(() => useTimeoutDecision(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await act(async () => {
+      await expect(
+        result.current.mutateAsync({
+          toolRunId: TOOL_RUN_ID,
+          decision: 'extend',
+          extend_seconds: 30,
+        }),
+      ).rejects.toThrow('Failed to submit timeout decision')
+    })
+  })
+
 })

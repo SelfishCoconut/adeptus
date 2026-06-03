@@ -4,10 +4,13 @@ import {
   type AddMemberRequest,
   type EngagementCreate,
   type EngagementDetail,
+  type EngagementPauseRequest,
+  type EngagementPauseState,
   type EngagementSummary,
   type EngagementUpdate,
   type MemberEntry,
 } from '@/shared/api'
+import { toolQueueKey } from '@/shared/api/queryKeys'
 
 // --- Query key constants ---
 
@@ -106,6 +109,33 @@ export function useAddMember(engagementId: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: membersKey(engagementId) })
+    },
+  })
+}
+
+/**
+ * Toggle the engagement-wide tool pause.
+ *
+ * Invalidation strategy: on success we invalidate both the engagement detail
+ * query (the `paused` field) and the tool-queue snapshot. The tool-queue key is
+ * imported from `shared/api/queryKeys` — the single source of truth for cross-
+ * feature query key constants — so both this module and `mcp/api.ts` stay in sync
+ * automatically if the key shape ever changes.
+ */
+export function useEngagementPause(engagementId: string) {
+  const queryClient = useQueryClient()
+  return useMutation<EngagementPauseState, Error, EngagementPauseRequest>({
+    mutationFn: async (body) => {
+      const { data, error } = await api.POST('/api/v1/engagements/{engagement_id}/pause', {
+        params: { path: { engagement_id: engagementId } },
+        body,
+      })
+      if (error || !data) throw new Error('Failed to set engagement pause state')
+      return data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: engagementKey(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: toolQueueKey(engagementId) })
     },
   })
 }

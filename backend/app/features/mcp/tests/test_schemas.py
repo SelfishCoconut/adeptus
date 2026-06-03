@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from app.features.mcp.schemas import (
     McpServerInfo,
     McpToolDeclaration,
+    TimeoutDecision,
     ToolDescriptor,
     ToolPreset,
     ToolRunCreate,
@@ -627,3 +628,207 @@ class TestRowToResultMapping:
         assert result.stderr == "some error"
         assert result.preset_name == "my-preset"
         assert result.queue_position == 3
+
+    def test_awaiting_since_populated_for_awaiting_decision_row(self) -> None:
+        """W-1: _row_to_result surfaces awaiting_since from the in-process registry
+        when row.status == 'awaiting_decision'.
+
+        The timestamp is NOT a DB column (per the slice Data-model section); it is
+        stored in _RunEntry.awaiting_since by release_for_decision and read here
+        via concurrency.get_awaiting_since.  This test verifies the wiring.
+        """
+        from app.features.mcp.service import _row_to_result
+
+        run_id = uuid4()
+        now = datetime.now(tz=UTC)
+        row = _make_tool_run_row(run_id=run_id, status="awaiting_decision")
+
+        with patch(
+            "app.features.mcp.service.concurrency.get_awaiting_since",
+            return_value=now,
+        ) as mock_get:
+            result = _row_to_result(row)
+
+        mock_get.assert_called_once_with(run_id)
+        assert result.awaiting_since == now, (
+            "_row_to_result must populate awaiting_since from the registry "
+            "when status == 'awaiting_decision'"
+        )
+
+    def test_awaiting_since_is_none_for_non_awaiting_rows(self) -> None:
+        """W-1: _row_to_result returns awaiting_since=None for non-awaiting rows.
+
+        concurrency.get_awaiting_since must NOT be called for rows with other
+        statuses — we only read from the registry when status == 'awaiting_decision'.
+        """
+        from app.features.mcp.service import _row_to_result
+
+        for status in ("running", "queued", "completed", "killed", "failed", "timed_out"):
+            row = _make_tool_run_row(status=status)
+            with patch(
+                "app.features.mcp.service.concurrency.get_awaiting_since",
+            ) as mock_get:
+                result = _row_to_result(row)
+
+            if status != "queued":
+                mock_get.assert_not_called()
+            assert result.awaiting_since is None, (
+                f"awaiting_since must be None for status={status!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# ToolRunStatus — Slice 06 additions (killed, awaiting_decision)
+# ---------------------------------------------------------------------------
+
+
+class TestToolRunStatusSlice06:
+    """ToolRunStatus now includes 'killed' and 'awaiting_decision'."""
+
+    def _make(self, **overrides: Any) -> dict[str, Any]:
+        now = datetime.now(tz=UTC)
+        return {
+            "tool_run_id": str(uuid4()),
+            "engagement_id": str(uuid4()),
+            "server_name": "httpx",
+            "tool_name": "run_httpx_heavy",
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": now,
+            "finished_at": None,
+            "status": "running",
+            **overrides,
+        }
+
+    def test_killed_status_accepted(self) -> None:
+        result = ToolRunResult.model_validate(self._make(status="killed"))
+        assert result.status == "killed"
+
+    def test_awaiting_decision_status_accepted(self) -> None:
+        result = ToolRunResult.model_validate(self._make(status="awaiting_decision"))
+        assert result.status == "awaiting_decision"
+
+    def test_invalid_status_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ToolRunResult.model_validate(self._make(status="stopping"))
+
+    def test_awaiting_since_defaults_to_none(self) -> None:
+        result = ToolRunResult.model_validate(self._make())
+        assert result.awaiting_since is None
+
+    def test_awaiting_since_accepted_with_datetime(self) -> None:
+        now = datetime.now(tz=UTC)
+        result = ToolRunResult.model_validate(
+            self._make(status="awaiting_decision", awaiting_since=now)
+        )
+        assert result.awaiting_since == now
+
+    def test_awaiting_since_is_none_for_terminal_statuses(self) -> None:
+        for status in ("completed", "killed", "failed", "timed_out"):
+            result = ToolRunResult.model_validate(self._make(status=status))
+            assert result.awaiting_since is None
+
+
+# ---------------------------------------------------------------------------
+# WebSocketOutputChunk — Slice 06 type additions (timeout, killed)
+# ---------------------------------------------------------------------------
+
+
+class TestWebSocketOutputChunkSlice06:
+    """WebSocketOutputChunk.type now includes 'timeout' and 'killed'."""
+
+    def test_timeout_type_accepted(self) -> None:
+        chunk = WebSocketOutputChunk(
+            type="timeout", message="Slot released — queue is free to advance."
+        )
+        assert chunk.type == "timeout"
+        assert chunk.message == "Slot released — queue is free to advance."
+
+    def test_killed_type_accepted(self) -> None:
+        chunk = WebSocketOutputChunk(type="killed", message="killed by user")
+        assert chunk.type == "killed"
+        assert chunk.message == "killed by user"
+
+    def test_killed_type_engagement_paused(self) -> None:
+        chunk = WebSocketOutputChunk(type="killed", message="engagement paused")
+        assert chunk.type == "killed"
+
+    def test_invalid_type_still_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            WebSocketOutputChunk.model_validate({"type": "stopping"})
+
+    def test_all_valid_types_accepted(self) -> None:
+        valid_types = [
+            "stdout",
+            "stderr",
+            "done",
+            "error",
+            "queued",
+            "started",
+            "timeout",
+            "killed",
+        ]
+        for t in valid_types:
+            chunk = WebSocketOutputChunk.model_validate({"type": t})
+            assert chunk.type == t
+
+
+# ---------------------------------------------------------------------------
+# TimeoutDecision — Slice 06
+# ---------------------------------------------------------------------------
+
+
+class TestTimeoutDecision:
+    """TimeoutDecision: required 'decision' literal, bounded extend_seconds."""
+
+    def test_kill_decision_accepted(self) -> None:
+        td = TimeoutDecision(decision="kill")
+        assert td.decision == "kill"
+        assert td.extend_seconds == 30  # default
+
+    def test_extend_decision_accepted(self) -> None:
+        td = TimeoutDecision(decision="extend")
+        assert td.decision == "extend"
+        assert td.extend_seconds == 30
+
+    def test_wait_decision_accepted(self) -> None:
+        td = TimeoutDecision(decision="wait")
+        assert td.decision == "wait"
+
+    def test_extend_seconds_default_is_30(self) -> None:
+        td = TimeoutDecision(decision="kill")
+        assert td.extend_seconds == 30
+
+    def test_extend_seconds_minimum_accepted(self) -> None:
+        td = TimeoutDecision(decision="extend", extend_seconds=1)
+        assert td.extend_seconds == 1
+
+    def test_extend_seconds_maximum_accepted(self) -> None:
+        td = TimeoutDecision(decision="extend", extend_seconds=300)
+        assert td.extend_seconds == 300
+
+    def test_extend_seconds_below_minimum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            TimeoutDecision(decision="extend", extend_seconds=0)
+
+    def test_extend_seconds_above_maximum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            TimeoutDecision(decision="extend", extend_seconds=301)
+
+    def test_invalid_decision_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            TimeoutDecision.model_validate({"decision": "snooze"})
+
+    def test_missing_decision_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            TimeoutDecision.model_validate({})
+
+    def test_extend_seconds_custom_value(self) -> None:
+        td = TimeoutDecision(decision="extend", extend_seconds=60)
+        assert td.extend_seconds == 60
+
+    def test_model_validate_from_dict(self) -> None:
+        td = TimeoutDecision.model_validate({"decision": "extend", "extend_seconds": 120})
+        assert td.decision == "extend"
+        assert td.extend_seconds == 120

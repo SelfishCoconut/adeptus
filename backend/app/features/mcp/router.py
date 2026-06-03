@@ -11,6 +11,12 @@ Endpoints:
       Paginated list of tool runs; explicit membership required (§4/§17.1).
   GET  /api/v1/tool-runs/{tool_run_id}
       Single tool run; membership on its engagement required (§4/§17.1).
+  POST /api/v1/tool-runs/{tool_run_id}/kill
+      Stop a single tool run (Slice 06); membership-gated (404 for non-members).
+      Idempotent on terminal runs.
+  POST /api/v1/tool-runs/{tool_run_id}/timeout-decision
+      Answer a pending timeout prompt (Slice 06); membership-gated.  409 when no
+      run is currently awaiting a decision.
   GET  /api/v1/engagements/{engagement_id}/tool-queue
       In-process concurrency snapshot; membership-gated (404 for non-members,
       no existence disclosure — §17.1/§4); Decision Q3.
@@ -29,11 +35,15 @@ the registered handlers in app.core.errors.handlers:
                                                not a member — §17.1 hides existence,
                                                §4 allows no admin bypass)
 
-Only McpServerDown → 503 is translated inline below: there is no core error
-type for HTTP 503, and adding one would widen core/ and require an ADR.
+Three exceptions are translated inline (no core error type maps to their HTTP
+codes without an ADR to widen core/):
+  McpServerDown         → 503
+  ToolQueueFullError    → 429
+  EngagementPaused      → 409  (POST /tool-runs; Slice 06 Task 4/6)
+  TimeoutDecisionConflict → 409 (POST /tool-runs/{id}/timeout-decision; Slice 06 Task 6)
 """
 
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, WebSocket, WebSocketDisconnect, status
@@ -46,9 +56,10 @@ from app.core.errors import ForbiddenError
 from app.features.auth.deps import get_current_user
 from app.features.auth.models import User
 from app.features.mcp import service
-from app.features.mcp.concurrency import ToolQueueFullError
+from app.features.mcp.concurrency import EngagementPaused, ToolQueueFullError
 from app.features.mcp.schemas import (
     McpServerInfo,
+    TimeoutDecision,
     ToolDescriptor,
     ToolQueueSnapshot,
     ToolRunCreate,
@@ -56,6 +67,7 @@ from app.features.mcp.schemas import (
     ToolRunResult,
     WebSocketOutputChunk,
 )
+from app.features.mcp.service import TimeoutDecisionConflict
 from app.features.mcp.subprocess_manager import McpServerDown
 
 router = APIRouter(tags=["mcp"])
@@ -165,6 +177,14 @@ async def execute_tool_run(
             status_code=429,
             content={"error": {"code": "too_many_requests", "message": exc.message}},
         )
+    except EngagementPaused as exc:
+        # No core error type maps to HTTP 409; translate inline (same pattern as 503/429).
+        # EngagementPaused is raised by service.execute_tool_run when the engagement
+        # has been paused via POST /engagements/{id}/pause — Slice 06 Task 4/6.
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"code": "conflict", "message": exc.message}},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +245,102 @@ async def get_tool_run(
         tool_run_id=tool_run_id,
         user_id=current_user.id,  # type: ignore[arg-type]
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/tool-runs/{tool_run_id}/kill
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/api/v1/tool-runs/{tool_run_id}/kill",
+    response_model=ToolRunResult,
+    operation_id="kill_tool_run",
+    tags=["tools"],
+)
+async def kill_tool_run(
+    tool_run_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> ToolRunResult:
+    """Stop a single tool run.
+
+    Membership-gated via the same ``get_tool_run`` + ``get_engagement_for_member``
+    chokepoint used by the other tool-run endpoints — both a missing run and a
+    non-member caller return 404 to avoid existence disclosure (§17.1).
+
+    Idempotent: killing an already-terminal run returns 200 with the current state.
+
+    Returns:
+        ``ToolRunResult`` — current state of the run after the kill signal is sent.
+
+    Raises (translated to HTTP by the registered error handlers):
+        EngagementNotFound (NotFoundError → 404): run not found or caller is not
+            a member of its engagement (no existence disclosure).
+    """
+    return await service.kill_tool_run(
+        db,
+        tool_run_id=tool_run_id,
+        user_id=current_user.id,  # type: ignore[arg-type]
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/tool-runs/{tool_run_id}/timeout-decision
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/api/v1/tool-runs/{tool_run_id}/timeout-decision",
+    response_model=ToolRunResult,
+    operation_id="submit_timeout_decision",
+    tags=["tools"],
+)
+async def submit_timeout_decision(
+    tool_run_id: UUID,
+    body: TimeoutDecision,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> ToolRunResult:
+    """Answer a pending timeout prompt for a run in state ``awaiting_decision``.
+
+    Membership-gated via the same chokepoint as kill_tool_run (§17.1/§4).
+
+    Returns 409 when the run is not currently awaiting a decision — covers:
+    - Already resolved (another member answered first).
+    - Run is in a different state (running, completed, killed, etc.).
+    - Unknown run ID (past the membership gate; unreachable in practice since
+      the membership gate returns 404 for unknown runs — listed for completeness).
+
+    Returns:
+        ``ToolRunResult`` — current state after the decision is forwarded.
+
+    Raises (translated to HTTP by registered handlers):
+        EngagementNotFound (NotFoundError → 404): run not found or non-member.
+
+    Returns inline:
+        409 when no run is awaiting a decision (TimeoutDecisionConflict).
+    """
+    try:
+        return await service.submit_timeout_decision(
+            db,
+            tool_run_id=tool_run_id,
+            user_id=current_user.id,  # type: ignore[arg-type]
+            decision=body.decision,
+            extend_seconds=body.extend_seconds,
+        )
+    except TimeoutDecisionConflict as exc:
+        # No core error type maps to HTTP 409; translate inline (same pattern as 503/429).
+        # FastAPI bypasses serialization for Response subclasses — JSONResponse is passed
+        # through as-is even though the annotation says ToolRunResult.  cast() satisfies
+        # mypy without widening the annotation to ToolRunResult | JSONResponse (W-5).
+        return cast(
+            ToolRunResult,
+            JSONResponse(
+                status_code=409,
+                content={"error": {"code": "conflict", "message": exc.message}},
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

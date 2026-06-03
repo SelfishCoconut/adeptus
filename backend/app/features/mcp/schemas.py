@@ -22,7 +22,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 McpServerStatus = Literal["running", "stopped"]
 ToolWeight = Literal["light", "heavy"]
-ToolRunStatus = Literal["queued", "running", "completed", "failed", "timed_out"]
+ToolRunStatus = Literal[
+    "queued", "running", "awaiting_decision", "completed", "killed", "failed", "timed_out"
+]
 QueueReason = Literal["slot_full", "target_locked"]
 
 
@@ -119,6 +121,12 @@ class ToolRunResult(BaseModel):
     - ``status`` gains the ``"queued"`` member (via ``ToolRunStatus``).
     - ``queue_position`` is the 1-based FIFO position while ``status == "queued"``;
       ``None`` once running or terminal, and always ``None`` for light runs.
+
+    Slice 06 additions:
+    - ``status`` gains ``"killed"`` and ``"awaiting_decision"`` members.
+    - ``awaiting_since`` is set (non-null) while ``status == "awaiting_decision"``
+      to let the UI show how long the timeout prompt has been open.  Cleared when
+      the run resolves.  Derived in-process; NOT persisted as a DB column.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -135,6 +143,7 @@ class ToolRunResult(BaseModel):
     status: ToolRunStatus
     preset_name: str | None = None
     queue_position: int | None = None
+    awaiting_since: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -162,15 +171,41 @@ class WebSocketOutputChunk(BaseModel):
     type "error": message carries the error description.
     type "queued" (Slice 05): run is waiting; queue_position and reason are set.
     type "started" (Slice 05): run was admitted from the queue and is now running.
+    type "timeout" (Slice 06): the run hit its timeout, released its concurrency
+      slot + host lock back to the FIFO queue, and is awaiting a kill/extend/wait
+      decision; message notes the slot was released.  No auto-kill countdown.
+    type "killed" (Slice 06): the run was stopped (per-tool kill or engagement
+      pause); message carries the cause ("killed by user" / "engagement paused").
     """
 
-    type: Literal["stdout", "stderr", "done", "error", "queued", "started"]
+    type: Literal["stdout", "stderr", "done", "error", "queued", "started", "timeout", "killed"]
     data: str | None = None
     exit_code: int | None = None
     finished_at: datetime | None = None
     message: str | None = None
     queue_position: int | None = None
     reason: QueueReason | None = None
+
+
+# ---------------------------------------------------------------------------
+# Kill-switch / timeout-confirm schemas (Slice 06)
+# ---------------------------------------------------------------------------
+
+
+class TimeoutDecision(BaseModel):
+    """Request body for POST /api/v1/tool-runs/{id}/timeout-decision.
+
+    ``decision`` is required; ``extend_seconds`` is used only when
+    ``decision == "extend"`` and defaults to 30 s (range 1–300).
+    """
+
+    decision: Literal["kill", "extend", "wait"]
+    extend_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=300,
+        description="Additional seconds granted when decision == 'extend'. Default 30 s.",
+    )
 
 
 # ---------------------------------------------------------------------------

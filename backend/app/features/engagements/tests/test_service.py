@@ -32,6 +32,7 @@ def _make_engagement(
     status: str = "active",
     privacy_mode: str = "local_only",
     concurrency_slot_limit: int = 3,
+    paused: bool = False,
 ) -> MagicMock:
     eng = MagicMock()
     eng.id = engagement_id or uuid4()
@@ -41,6 +42,7 @@ def _make_engagement(
     eng.status = status
     eng.privacy_mode = privacy_mode
     eng.concurrency_slot_limit = concurrency_slot_limit
+    eng.paused = paused
     eng.created_at = NOW
     eng.updated_at = NOW
     return eng
@@ -618,3 +620,76 @@ async def test_list_engagements_returns_privacy_mode(db: AsyncMock, caller: Magi
     assert len(result) == 2
     assert result[0].privacy_mode == "local_only"
     assert result[1].privacy_mode == "cloud_enabled"
+
+
+# ---------------------------------------------------------------------------
+# paused field — Slice 06 Task 2
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_engagement_paused_defaults_false(db: AsyncMock, caller: MagicMock) -> None:
+    """create_engagement returns EngagementDetail with paused=False by default."""
+    mock_eng = _make_engagement(paused=False)
+    data = EngagementCreate(name="New Eng", scope="10.0.0.0/8")
+
+    with patch(
+        "app.features.engagements.service.repo.create_engagement",
+        new=AsyncMock(return_value=mock_eng),
+    ):
+        result = await service.create_engagement(db, caller, data)
+
+    assert result.paused is False
+
+
+@pytest.mark.asyncio
+async def test_get_engagement_paused_surfaces_in_detail(db: AsyncMock, caller: MagicMock) -> None:
+    """get_engagement surfaces the paused field in EngagementDetail."""
+    eng_id = uuid4()
+    mock_eng = _make_engagement(engagement_id=eng_id, paused=True)
+    mock_membership = _make_member(engagement_id=eng_id, user_id=caller.id, role="member")
+
+    with patch(
+        "app.features.engagements.service.repo.get_engagement_for_member",
+        new=AsyncMock(return_value=(mock_eng, mock_membership)),
+    ):
+        result = await service.get_engagement(db, caller, eng_id)
+
+    assert result.paused is True
+
+
+@pytest.mark.asyncio
+async def test_get_engagement_paused_false_surfaces_in_detail(
+    db: AsyncMock, caller: MagicMock
+) -> None:
+    """get_engagement surfaces paused=False when the engagement is not paused."""
+    eng_id = uuid4()
+    mock_eng = _make_engagement(engagement_id=eng_id, paused=False)
+    mock_membership = _make_member(engagement_id=eng_id, user_id=caller.id, role="owner")
+
+    with patch(
+        "app.features.engagements.service.repo.get_engagement_for_member",
+        new=AsyncMock(return_value=(mock_eng, mock_membership)),
+    ):
+        result = await service.get_engagement(db, caller, eng_id)
+
+    assert result.paused is False
+
+
+@pytest.mark.asyncio
+async def test_list_engagements_paused_surfaces_in_summary(
+    db: AsyncMock, caller: MagicMock
+) -> None:
+    """list_engagements surfaces the paused field in each EngagementSummary."""
+    eng_a = _make_engagement(name="Unpaused", paused=False)
+    eng_b = _make_engagement(name="Paused", paused=True)
+    rows = [(eng_a, "owner"), (eng_b, "member")]
+
+    with patch(
+        "app.features.engagements.service.repo.list_engagements_for_user",
+        new=AsyncMock(return_value=rows),
+    ):
+        result = await service.list_engagements(db, caller)
+
+    assert result[0].paused is False
+    assert result[1].paused is True

@@ -1,13 +1,15 @@
-import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api,
   type McpServerInfo,
+  type TimeoutDecision,
   type ToolDescriptor,
   type ToolQueueSnapshot,
   type ToolRunCreate,
   type ToolRunPage,
   type ToolRunResult,
 } from '@/shared/api'
+import { toolQueueKey } from '@/shared/api/queryKeys'
 
 // --- Query key constants ---
 
@@ -18,9 +20,8 @@ export function toolRunsKey(engagementId: string) {
   return ['tool-runs', engagementId] as const
 }
 
-export function toolQueueKey(engagementId: string) {
-  return ['mcp', 'tool-queue', engagementId] as const
-}
+// Re-export the shared toolQueueKey so existing imports from this module keep working.
+export { toolQueueKey }
 
 // --- Queries ---
 
@@ -96,6 +97,12 @@ export function useExecuteToolRun() {
  * Execute a tool run in async/streaming mode. The endpoint responds 202 with a
  * partial result (status `running`); the caller then opens the WebSocket to
  * consume output. `async_mode` is forced true regardless of the supplied body.
+ *
+ * Error message extraction: the backend returns structured error bodies for
+ * known 4xx responses (e.g. 409 when the engagement is paused:
+ * `{ error: { code: "conflict", message: "..." } }`). The mutation extracts
+ * that message when available so `ToolRunnerForm` can surface a clear reason
+ * to the user without hand-parsing the raw error.
  */
 export function useExecuteToolRunAsync() {
   return useMutation<ToolRunResult, Error, ToolRunCreate>({
@@ -103,10 +110,28 @@ export function useExecuteToolRunAsync() {
       const { data, error } = await api.POST('/api/v1/tool-runs', {
         body: { ...body, async_mode: true },
       })
-      if (error || !data) throw new Error('Failed to execute tool run')
+      if (error || !data) {
+        const serverMessage = extractServerMessage(error)
+        throw new Error(serverMessage ?? 'Failed to execute tool run')
+      }
       return data
     },
   })
+}
+
+/**
+ * Extract a human-readable message from a structured backend error body.
+ * The backend uses `{ error: { code, message } }` for inline 4xx responses
+ * (e.g. 409 engagement-paused, 429 queue-full, 503 MCP server down).
+ * Returns `undefined` when the body does not match this shape.
+ */
+function extractServerMessage(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const e = error as Record<string, unknown>
+  if (typeof e.error !== 'object' || e.error === null) return undefined
+  const inner = e.error as Record<string, unknown>
+  if (typeof inner.message === 'string') return inner.message
+  return undefined
 }
 
 /**
@@ -129,6 +154,58 @@ export function useToolQueue(engagementId: string) {
       )
       if (error || !data) throw new Error('Failed to load tool queue')
       return data
+    },
+  })
+}
+
+/**
+ * Kill a single tool run (running, queued, or awaiting_decision). The backend
+ * is idempotent — killing an already-terminal run returns 200 with the current
+ * state. On success, both the queue strip and the run list are invalidated so
+ * the freed slot and the updated status are reflected immediately.
+ */
+export function useKillToolRun(engagementId: string) {
+  const queryClient = useQueryClient()
+  return useMutation<ToolRunResult, Error, string>({
+    mutationFn: async (toolRunId) => {
+      const { data, error } = await api.POST('/api/v1/tool-runs/{tool_run_id}/kill', {
+        params: { path: { tool_run_id: toolRunId } },
+      })
+      if (error || !data) throw new Error('Failed to kill tool run')
+      return data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: toolQueueKey(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: toolRunsKey(engagementId) })
+    },
+  })
+}
+
+/**
+ * Answer a pending timeout prompt for a run in state `awaiting_decision`.
+ * The decision (`kill`, `extend`, or `wait`) is forwarded to the parked
+ * background task. On success, both the queue strip and the run list are
+ * invalidated: `extend`/`wait` re-enter the FIFO queue (queue strip needs
+ * refresh) and the run status transitions away from `awaiting_decision` (run
+ * list needs refresh).
+ */
+export function useTimeoutDecision(engagementId: string) {
+  const queryClient = useQueryClient()
+  return useMutation<ToolRunResult, Error, { toolRunId: string } & TimeoutDecision>({
+    mutationFn: async ({ toolRunId, ...body }) => {
+      const { data, error } = await api.POST(
+        '/api/v1/tool-runs/{tool_run_id}/timeout-decision',
+        {
+          params: { path: { tool_run_id: toolRunId } },
+          body,
+        },
+      )
+      if (error || !data) throw new Error('Failed to submit timeout decision')
+      return data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: toolQueueKey(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: toolRunsKey(engagementId) })
     },
   })
 }

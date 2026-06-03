@@ -13,6 +13,8 @@ const STATUS_VARIANT: Record<ToolRunResult['status'], 'secondary' | 'default' | 
   queued: 'default',
   completed: 'secondary',
   running: 'default',
+  awaiting_decision: 'default',
+  killed: 'destructive',
   failed: 'destructive',
   timed_out: 'destructive',
 }
