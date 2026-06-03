@@ -47,6 +47,8 @@ export function WorkspaceShell({
         <section aria-label="AI chat" className="bg-background p-4">
           <h2 className="text-sm font-medium text-muted-foreground">AI chat</h2>
         </section>
+        {/* Right pane: the live force-directed graph (§11.2). GraphPane renders
+            the interactive Cytoscape canvas (slice 08), with a List/Graph toggle. */}
         <section aria-label="Graph" className="overflow-y-auto bg-background p-4">
           <h2 className="mb-3 text-sm font-medium text-muted-foreground">Graph</h2>
           {engagementId ? (
