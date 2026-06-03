@@ -29,11 +29,12 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
 from argon2 import PasswordHasher
-from sqlalchemy import text
+from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
@@ -497,3 +498,42 @@ async def test_personal_undo_empty_stack_returns_undone_null(
     assert result.undone is None
     assert result.skipped_stale == []
     assert result.stack.depth == 0
+
+
+@pytest.mark.asyncio
+async def test_engagement_cascade_deletes_stack_rows(
+    pg_two_members: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID, uuid.UUID],
+) -> None:
+    """Deleting an engagement cascades to its graph_user_undo_stack rows (FK CASCADE).
+
+    Exercised against real Postgres because SQLite does not enforce FK constraints
+    at runtime.
+    """
+    factory, eng_id, alice_id, _ = pg_two_members
+
+    async with factory() as db:
+        for i in range(2):
+            await repo.push_undo_entry(
+                db,
+                engagement_id=eng_id,
+                user_id=alice_id,
+                op_type="create_node",
+                entity_kind="node",
+                entity_id=uuid.uuid4(),
+                target_updated_at=datetime.now(UTC),
+                summary=f"row-{i}",
+            )
+        await db.commit()
+
+    async with factory() as db:
+        before = await repo.list_active_undo_stack(db, eng_id, alice_id)
+    assert len(before) == 2
+
+    # Delete the engagement — the ON DELETE CASCADE FK must clean up stack rows.
+    async with factory() as db:
+        await db.execute(delete(eng_models.Engagement).where(eng_models.Engagement.id == eng_id))
+        await db.commit()
+
+    async with factory() as db:
+        after = await repo.list_active_undo_stack(db, eng_id, alice_id)
+    assert after == []

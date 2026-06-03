@@ -203,9 +203,10 @@ class EntityKind(StrEnum):
 class UndoStackEntry(BaseModel):
     """A single entry on the calling user's personal undo stack.
 
-    Maps from the ``GraphUserUndoStack`` ORM row (``from_attributes=True``); the
-    ``stale`` flag is computed by the service against current graph state and set
-    on the instance after validation.
+    Maps from the ``GraphUserUndoStack`` ORM row (``from_attributes=True``). The
+    ``stale`` flag is computed by the service against current graph state and is a
+    REQUIRED field (matching the contract) — callers always receive it, so the UI
+    never has to guess whether an entry is poppable.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -216,7 +217,7 @@ class UndoStackEntry(BaseModel):
     entity_id: UUID
     summary: str
     recorded_at: datetime
-    stale: bool = False
+    stale: bool
 
 
 class UndoStack(BaseModel):

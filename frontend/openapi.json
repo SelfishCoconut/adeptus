@@ -2636,8 +2636,7 @@
           },
           "stale": {
             "type": "boolean",
-            "title": "Stale",
-            "default": false
+            "title": "Stale"
           }
         },
         "type": "object",
@@ -2647,10 +2646,11 @@
           "entity_kind",
           "entity_id",
           "summary",
-          "recorded_at"
+          "recorded_at",
+          "stale"
         ],
         "title": "UndoStackEntry",
-        "description": "A single entry on the calling user's personal undo stack.\n\nMaps from the ``GraphUserUndoStack`` ORM row (``from_attributes=True``); the\n``stale`` flag is computed by the service against current graph state and set\non the instance after validation."
+        "description": "A single entry on the calling user's personal undo stack.\n\nMaps from the ``GraphUserUndoStack`` ORM row (``from_attributes=True``). The\n``stale`` flag is computed by the service against current graph state and is a\nREQUIRED field (matching the contract) \u2014 callers always receive it, so the UI\nnever has to guess whether an entry is poppable."
       },
       "UserMe": {
         "properties": {

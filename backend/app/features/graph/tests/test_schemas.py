@@ -315,8 +315,8 @@ def test_graph_history_empty() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_undo_stack_entry_from_attributes_defaults_not_stale() -> None:
-    """UndoStackEntry maps from an ORM-like row; stale defaults to False."""
+def test_undo_stack_entry_maps_from_attributes() -> None:
+    """UndoStackEntry maps from an ORM-like row; stale is required and carried through."""
     row = SimpleNamespace(
         id=uuid.uuid4(),
         op_type="create_node",
@@ -324,10 +324,26 @@ def test_undo_stack_entry_from_attributes_defaults_not_stale() -> None:
         entity_id=uuid.uuid4(),
         summary="Created host 10.0.0.5",
         recorded_at=datetime.now(UTC),
+        stale=True,
     )
     entry = UndoStackEntry.model_validate(row)
     assert entry.op_type is UndoOpType.create_node
-    assert entry.stale is False
+    assert entry.stale is True
+
+
+def test_undo_stack_entry_requires_stale() -> None:
+    """stale is a required field (contract) — omitting it is a validation error."""
+    with pytest.raises(ValidationError):
+        UndoStackEntry.model_validate(
+            {
+                "id": uuid.uuid4(),
+                "op_type": "create_node",
+                "entity_kind": "node",
+                "entity_id": uuid.uuid4(),
+                "summary": "Created host 10.0.0.5",
+                "recorded_at": datetime.now(UTC),
+            }
+        )
 
 
 def test_undo_result_undone_null_is_allowed() -> None:

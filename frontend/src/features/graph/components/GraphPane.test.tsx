@@ -152,7 +152,7 @@ describe('GraphPane', () => {
     expect(screen.queryByTestId('graph-node-list')).not.toBeInTheDocument()
   })
 
-  it('test_renders_undo_button_in_toolbar', () => {
+  it('renders the undo button in the toolbar', () => {
     renderPane()
     const undo = screen.getByTestId('undo-button')
     expect(undo).toBeInTheDocument()

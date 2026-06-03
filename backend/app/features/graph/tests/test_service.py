@@ -872,6 +872,34 @@ async def test_undo_create_edge_calls_soft_delete_edge(db: AsyncMock) -> None:
 
 
 @pytest.mark.asyncio
+async def test_undo_delete_edge_calls_submit_undo_edge(db: AsyncMock) -> None:
+    """Undo of a delete_edge steps one history snapshot back via submit_undo_edge."""
+    engagement_id, user_id, eid = uuid4(), uuid4(), uuid4()
+    eng, member = _active_eng(engagement_id, user_id)
+    row = _undo_row(op_type="delete_edge", entity_kind="edge", entity_id=eid)
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch(
+            "app.features.graph.service.repo.list_active_undo_stack",
+            new=AsyncMock(return_value=[row]),
+        ),
+        patch(
+            "app.features.graph.service.repo.get_edge",
+            new=AsyncMock(return_value=SimpleNamespace(updated_at=NOW)),
+        ),
+        patch("app.features.graph.service.repo.mark_undo_entry_undone", new=AsyncMock()),
+        patch("app.features.graph.service.writer.submit_undo_edge", new=AsyncMock()) as submit,
+    ):
+        await service.pop_undo_stack(db, engagement_id, user_id)
+
+    submit.assert_awaited_once_with(engagement_id, eid)
+
+
+@pytest.mark.asyncio
 async def test_pop_skips_and_drops_stale_entry(db: AsyncMock) -> None:
     """A stale top entry is dropped (marked undone) and the next fresh one is undone."""
     engagement_id, user_id = uuid4(), uuid4()

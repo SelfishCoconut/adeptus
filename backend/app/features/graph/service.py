@@ -31,6 +31,7 @@ Single-writer delegation (ADR-0001):
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import cast
 from uuid import UUID
@@ -68,6 +69,8 @@ from app.features.graph.schemas import (
     UndoStack,
     UndoStackEntry,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # EngagementNotFound — local definition following the mcp.service pattern
@@ -398,6 +401,13 @@ async def delete_node(
             target_updated_at=cast(datetime, deleted.updated_at),
             summary=_node_op_summary("delete_node", deleted.type, deleted.label),
         )
+    else:
+        # Soft-delete leaves the row in place, so this should be unreachable; if the
+        # row is gone the write succeeded but no undo entry is recorded — surface it.
+        logger.warning(
+            "delete_node: node %s not found after soft-delete; undo entry not recorded",
+            node_id,
+        )
 
 
 async def undo_node(
@@ -513,6 +523,13 @@ async def delete_edge(
             target_updated_at=cast(datetime, deleted.updated_at),
             summary=_edge_op_summary("delete_edge", deleted.relation),
         )
+    else:
+        # Soft-delete leaves the row in place, so this should be unreachable; if the
+        # row is gone the write succeeded but no undo entry is recorded — surface it.
+        logger.warning(
+            "delete_edge: edge %s not found after soft-delete; undo entry not recorded",
+            edge_id,
+        )
 
 
 async def undo_edge(
@@ -558,10 +575,22 @@ async def _current_entity(
 
 
 def _to_entry(row: GraphUserUndoStack, *, stale: bool) -> UndoStackEntry:
-    """Map an ORM stack row to the API entry, setting the computed stale flag."""
-    entry = UndoStackEntry.model_validate(row)
-    entry.stale = stale
-    return entry
+    """Map an ORM stack row to the API entry, setting the computed stale flag.
+
+    ``stale`` is required on the schema (it is not a column on the row), so it is
+    supplied explicitly alongside the row's attributes.
+    """
+    return UndoStackEntry.model_validate(
+        {
+            "id": row.id,
+            "op_type": row.op_type,
+            "entity_kind": row.entity_kind,
+            "entity_id": row.entity_id,
+            "summary": row.summary,
+            "recorded_at": row.recorded_at,
+            "stale": stale,
+        }
+    )
 
 
 async def _build_stack(
