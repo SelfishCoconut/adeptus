@@ -484,3 +484,4 @@ All three resolved at planning time in favor of the production-grade, requiremen
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-06-03T18:16:40Z — a69ec75 Slice 06: Kill switches + timeout-confirm (#20)
 - 2026-06-03T18:17:07Z — a69ec75 Slice 06: Kill switches + timeout-confirm (#20)
+- 2026-06-03T19:42:00Z — fb0c46f chore(plan): mark slice 07 in-review (#22)

@@ -467,6 +467,23 @@ class _Writer:
     ) -> Edge:
         await self._ensure_warm(db)
 
+        # Defense-in-depth endpoint-ownership check INSIDE the consumer.  The
+        # service already validates both endpoints for the user write path, but
+        # the writer is the single chokepoint for ALL future write sources (AI /
+        # tool ingestion plug into this same queue — ADR-0001).  Validating here
+        # means no ingestion caller can ever create an edge that crosses an
+        # engagement boundary or references a deleted/missing node.
+        for endpoint_id in (cmd.source_id, cmd.target_id):
+            endpoint = await repo.get_node(db, endpoint_id)
+            if (
+                endpoint is None
+                or endpoint.engagement_id != self._engagement_id
+                or endpoint.deleted
+            ):
+                raise NodeNotFound(
+                    f"Edge endpoint {endpoint_id} not found, not in this engagement, or deleted"
+                )
+
         # Race-free duplicate-triple check (inside single consumer so no race).
         existing = await repo.find_live_edge(
             db,
@@ -552,12 +569,33 @@ class _Writer:
 
     def _apply_soft_delete_node(self, node_id: UUID) -> None:
         if self._graph.has_node(node_id):
-            self._graph.nodes[node_id][_DELETED_ATTR] = True
-            # Also mark all incident edges as deleted in memory.
-            for u, v, key in list(self._graph.edges(node_id, keys=True)):
-                self._graph.edges[u, v, key][_DELETED_ATTR] = True
-            for u, v, key in list(self._graph.in_edges(node_id, keys=True)):
-                self._graph.edges[u, v, key][_DELETED_ATTR] = True
+            self._mark_node_deleted(node_id, deleted=True)
+            # Cascade: mark all incident edges deleted in memory.  Dedupe across
+            # out- and in-edges so a self-loop (source == target) is touched once.
+            incident = {(u, v, key) for u, v, key in self._graph.edges(node_id, keys=True)} | {
+                (u, v, key) for u, v, key in self._graph.in_edges(node_id, keys=True)
+            }
+            for u, v, key in incident:
+                self._mark_edge_deleted((u, v, key), deleted=True)
+
+    def _mark_node_deleted(self, node_id: UUID, *, deleted: bool) -> None:
+        """Set the deleted flag on both the graph attribute AND the stored Node
+        schema object, so live reads (which filter on the attribute) and full
+        reads (which return the stored object) agree."""
+        data = self._graph.nodes[node_id]
+        data[_DELETED_ATTR] = deleted
+        node = data.get(_NODE_DATA_ATTR)
+        if node is not None:
+            data[_NODE_DATA_ATTR] = node.model_copy(update={"deleted": deleted})
+
+    def _mark_edge_deleted(self, edge_key: tuple[UUID, UUID, UUID], *, deleted: bool) -> None:
+        """Set the deleted flag on both the graph attribute AND the stored Edge
+        schema object (keeps read_full consistent with read_graph)."""
+        data = self._graph.edges[edge_key]
+        data[_DELETED_ATTR] = deleted
+        edge = data.get(_EDGE_DATA_ATTR)
+        if edge is not None:
+            data[_EDGE_DATA_ATTR] = edge.model_copy(update={"deleted": deleted})
 
     def _apply_create_edge(self, edge: Edge) -> None:
         self._graph.add_edge(
@@ -571,7 +609,7 @@ class _Writer:
     def _apply_soft_delete_edge(self, edge_id: UUID) -> None:
         for u, v, key in self._graph.edges(keys=True):
             if key == edge_id:
-                self._graph.edges[u, v, key][_DELETED_ATTR] = True
+                self._mark_edge_deleted((u, v, key), deleted=True)
                 break
 
     def _apply_update_edge(self, edge: Edge) -> None:

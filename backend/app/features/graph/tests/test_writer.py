@@ -572,3 +572,78 @@ async def test_multi_engagement_isolation(
 
     # Two separate writer entries.
     assert len(gw._writers) == 2
+
+
+# ---------------------------------------------------------------------------
+# test_read_full_reflects_deleted_after_cascade  (code-review/security flag 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_read_full_reflects_deleted_after_cascade(
+    test_factory: async_sessionmaker[AsyncSession],
+    engagement_id: UUID,
+) -> None:
+    """After a cascade soft-delete, read_full returns the node AND its incident
+    edge with deleted=True on the schema payload (not just the internal graph
+    attribute) — keeping read_full consistent with read_graph and Postgres."""
+    n1 = await _make_node(engagement_id, label="n1")
+    n2 = await _make_node(engagement_id, label="n2")
+    edge = await _make_edge(engagement_id, n1.id, n2.id)
+
+    await gw.submit_soft_delete_node(engagement_id, n1.id)
+
+    full = await gw.read_full(engagement_id)
+    deleted_node = next(n for n in full.nodes if n.id == n1.id)
+    cascaded_edge = next(e for e in full.edges if e.id == edge.id)
+    assert deleted_node.deleted is True
+    assert cascaded_edge.deleted is True
+
+    # The surviving node stays live.
+    surviving = next(n for n in full.nodes if n.id == n2.id)
+    assert surviving.deleted is False
+
+
+# ---------------------------------------------------------------------------
+# test_create_edge_rejects_foreign_or_deleted_endpoint  (flag 1: writer-level
+# endpoint-ownership guard — defense-in-depth for future ingestion callers)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_edge_rejects_cross_engagement_endpoint(
+    test_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The writer consumer rejects an edge whose endpoint belongs to another
+    engagement, even though the call targets the edge's own engagement."""
+    eng_a = uuid4()
+    eng_b = uuid4()
+    a_node = await _make_node(eng_a, label="a-host")
+    b_node = await _make_node(eng_b, label="b-host")
+
+    # Try to link engagement B's edge to engagement A's node.
+    with pytest.raises(NodeNotFound):
+        await gw.submit_create_edge(
+            eng_b,
+            source_id=b_node.id,
+            target_id=a_node.id,
+            relation="runs",
+            properties={},
+        )
+
+
+async def test_create_edge_rejects_deleted_endpoint(
+    test_factory: async_sessionmaker[AsyncSession],
+    engagement_id: UUID,
+) -> None:
+    """The writer consumer rejects an edge referencing a soft-deleted endpoint."""
+    n1 = await _make_node(engagement_id, label="n1")
+    n2 = await _make_node(engagement_id, label="n2")
+    await gw.submit_soft_delete_node(engagement_id, n2.id)
+
+    with pytest.raises(NodeNotFound):
+        await gw.submit_create_edge(
+            engagement_id,
+            source_id=n1.id,
+            target_id=n2.id,
+            relation="runs",
+            properties={},
+        )

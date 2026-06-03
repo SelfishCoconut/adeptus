@@ -27,6 +27,11 @@ Each active engagement has exactly one writer process that owns the in-memory Ne
 **Neutral**
 - Read-after-write consistency requires either querying the writer directly or accepting eventual consistency via Postgres
 
+## Implementation notes
+
+- **Realized in Slice 07** (`backend/app/features/graph/writer.py`): a lazy per-engagement registry (`_writers`) with one consumer `asyncio.Task` per engagement draining a per-engagement command queue. The registry entry is created in a synchronous critical section (no `await` between the membership check and assignment) so concurrent first-writes cannot spawn two consumers.
+- **The writer is the validation chokepoint for *all* write sources, not just the user path.** Slice 07 wires only the user write path (router → service → `writer.submit_*`), and the service performs the engagement-isolation and endpoint-ownership checks. But because the AI-ingestion and tool-result paths will plug into this *same* queue in later slices, invariants that must hold for every write source — engagement-boundary isolation and edge-endpoint ownership (both endpoints live and in this engagement) — are enforced **inside the writer consumer** (`_handle_create_edge`), not only in the service. Any future ingestion caller therefore inherits these guards for free; a new caller that bypassed the service could not bypass the writer.
+
 ## Alternatives considered
 
 - **Optimistic concurrency via row versioning**: would push race resolution into every endpoint, complicating the AI ingestion path and making undo harder.
