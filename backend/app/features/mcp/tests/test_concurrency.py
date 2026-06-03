@@ -34,6 +34,7 @@ from app.features.mcp.concurrency import (
     set_slot_limit,
     snapshot,
 )
+from app.features.mcp.schemas import QueueReason
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -813,3 +814,223 @@ async def test_snapshot_queued_list_order() -> None:
     for t in tasks:
         h = await t
         release(h)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: re-broadcast queue-position updates after release-driven admission
+# ---------------------------------------------------------------------------
+
+
+async def test_positions_rebroadcast_on_admit() -> None:
+    """Admitting the front run shifts the remaining two runs' positions and re-broadcasts.
+
+    Setup: slot_limit=1, run A holds the slot; runs B, C, D all queue (positions 1, 2, 3).
+    On release of A: B is admitted; C and D should receive fresh queued chunks with
+    positions 1 and 2 respectively (shifted from 2 and 3).
+    """
+    eng = _engagement_id()
+    slot_limit = 1
+
+    # Hold the single slot.
+    handle_a = await _acquire(eng, slot_limit=slot_limit, target_host="hostA")
+
+    b_id = _run_id()
+    c_id = _run_id()
+    d_id = _run_id()
+
+    # Per-run tracking of on_queued invocations: list of (position, reason) tuples.
+    b_queued_calls: list[tuple[int, QueueReason]] = []
+    c_queued_calls: list[tuple[int, QueueReason]] = []
+    d_queued_calls: list[tuple[int, QueueReason]] = []
+
+    def _make_tracker(log: list[tuple[int, QueueReason]]) -> Any:
+        def _cb(position: int, reason: QueueReason) -> None:
+            log.append((position, reason))
+
+        return _cb
+
+    b_task = asyncio.create_task(
+        acquire(
+            engagement_id=eng,
+            slot_limit=slot_limit,
+            tool_run_id=b_id,
+            target_host="hostB",
+            server_name="httpx",
+            tool_name="run_httpx_heavy",
+            on_queued=_make_tracker(b_queued_calls),
+            on_started=_noop_started,
+        )
+    )
+    c_task = asyncio.create_task(
+        acquire(
+            engagement_id=eng,
+            slot_limit=slot_limit,
+            tool_run_id=c_id,
+            target_host="hostC",
+            server_name="httpx",
+            tool_name="run_httpx_heavy",
+            on_queued=_make_tracker(c_queued_calls),
+            on_started=_noop_started,
+        )
+    )
+    d_task = asyncio.create_task(
+        acquire(
+            engagement_id=eng,
+            slot_limit=slot_limit,
+            tool_run_id=d_id,
+            target_host="hostD",
+            server_name="httpx",
+            tool_name="run_httpx_heavy",
+            on_queued=_make_tracker(d_queued_calls),
+            on_started=_noop_started,
+        )
+    )
+
+    # Let all three enqueue (B first → position 1, C second → position 2, D third → 3).
+    await asyncio.sleep(0)
+
+    # Each received its initial position at enqueue time.
+    assert b_queued_calls == [(1, "slot_full")], f"B initial: {b_queued_calls}"
+    assert c_queued_calls == [(2, "slot_full")], f"C initial: {c_queued_calls}"
+    assert d_queued_calls == [(3, "slot_full")], f"D initial: {d_queued_calls}"
+
+    # Release A: B is admitted (front, eligible), C and D remain at positions 1 and 2.
+    release(handle_a)
+
+    # Yield to let the admission and the rebroadcast task run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    # B was admitted — it should have finished (task done), not received a rebroadcast.
+    handle_b = await b_task
+
+    # C and D should each have received a re-broadcast with their shifted positions.
+    # C was at position 2, now at position 1 (B left the queue).
+    # D was at position 3, now at position 2.
+    assert len(c_queued_calls) >= 2, f"C should have been re-broadcast; got {c_queued_calls}"
+    assert len(d_queued_calls) >= 2, f"D should have been re-broadcast; got {d_queued_calls}"
+
+    # The latest re-broadcast positions.
+    assert c_queued_calls[-1] == (1, "slot_full"), (
+        f"C expected position 1 (slot_full), got {c_queued_calls[-1]}"
+    )
+    assert d_queued_calls[-1] == (2, "slot_full"), (
+        f"D expected position 2 (slot_full), got {d_queued_calls[-1]}"
+    )
+
+    # B must NOT have been re-broadcast (it was admitted, removed from the queue).
+    assert len(b_queued_calls) == 1, f"B should only have its initial queued call: {b_queued_calls}"
+
+    # C and D are still waiting (slot_limit=1, B holds it now).
+    assert not c_task.done()
+    assert not d_task.done()
+
+    # Drain the rest.
+    release(handle_b)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    handle_c = await c_task
+    release(handle_c)
+    handle_d = await d_task
+    release(handle_d)
+
+
+async def test_broadcast_failure_does_not_block_others() -> None:
+    """A failing on_queued callback for one waiter must not prevent others from being notified.
+
+    Setup: slot_limit=1, run A holds slot; runs B (failing callback), C, D queue.
+    Release A → B admitted; C's callback raises; D must still receive its re-broadcast.
+    """
+    eng = _engagement_id()
+    slot_limit = 1
+
+    handle_a = await _acquire(eng, slot_limit=slot_limit, target_host="hostA")
+
+    b_id = _run_id()
+    c_id = _run_id()
+    d_id = _run_id()
+
+    c_queued_calls: list[tuple[int, QueueReason]] = []
+    d_queued_calls: list[tuple[int, QueueReason]] = []
+
+    c_call_count = 0
+
+    def _c_failing_queued(position: int, reason: QueueReason) -> None:
+        nonlocal c_call_count
+        c_call_count += 1
+        c_queued_calls.append((position, reason))
+        if c_call_count > 1:
+            # Re-broadcast call — raise to simulate a dead WS channel.
+            raise RuntimeError("channel dead")
+
+    def _d_queued(position: int, reason: QueueReason) -> None:
+        d_queued_calls.append((position, reason))
+
+    b_task = asyncio.create_task(
+        acquire(
+            engagement_id=eng,
+            slot_limit=slot_limit,
+            tool_run_id=b_id,
+            target_host="hostB",
+            server_name="httpx",
+            tool_name="run_httpx_heavy",
+            on_queued=_noop_queued,
+            on_started=_noop_started,
+        )
+    )
+    c_task = asyncio.create_task(
+        acquire(
+            engagement_id=eng,
+            slot_limit=slot_limit,
+            tool_run_id=c_id,
+            target_host="hostC",
+            server_name="httpx",
+            tool_name="run_httpx_heavy",
+            on_queued=_c_failing_queued,
+            on_started=_noop_started,
+        )
+    )
+    d_task = asyncio.create_task(
+        acquire(
+            engagement_id=eng,
+            slot_limit=slot_limit,
+            tool_run_id=d_id,
+            target_host="hostD",
+            server_name="httpx",
+            tool_name="run_httpx_heavy",
+            on_queued=_d_queued,
+            on_started=_noop_started,
+        )
+    )
+
+    await asyncio.sleep(0)  # All enqueue: B=1, C=2, D=3.
+
+    # Release A: B is admitted; C and D get re-broadcasts.
+    # C's re-broadcast raises but D must still receive its update.
+    release(handle_a)
+
+    # Let re-broadcast run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    handle_b = await b_task
+
+    # D must have received its re-broadcast even though C's callback raised.
+    assert len(d_queued_calls) >= 2, (
+        f"D should have been re-broadcast despite C failing; got {d_queued_calls}"
+    )
+    assert d_queued_calls[-1][0] == 2, (
+        f"D expected position 2 after B admitted, got {d_queued_calls}"
+    )
+
+    # C and D are still waiting.
+    assert not c_task.done()
+    assert not d_task.done()
+
+    release(handle_b)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    handle_c = await c_task
+    release(handle_c)
+    handle_d = await d_task
+    release(handle_d)

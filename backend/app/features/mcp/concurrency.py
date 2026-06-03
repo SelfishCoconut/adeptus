@@ -82,6 +82,10 @@ logger = logging.getLogger(__name__)
 # Public types
 # ---------------------------------------------------------------------------
 
+# Callback types for acquire() and for per-ticket re-broadcast (Task 4).
+OnQueuedCallback = Callable[[int, QueueReason], Awaitable[None] | None]
+OnStartedCallback = Callable[[], Awaitable[None] | None]
+
 
 @dataclass
 class AdmissionHandle:
@@ -112,6 +116,9 @@ class _Ticket:
     tool_name: str
     target_host: str | None
     enqueued_at: datetime
+    # Callback stored so the admission scan can re-broadcast updated queue positions
+    # to still-waiting tickets after a release-driven admission (Task 4).
+    on_queued: OnQueuedCallback
     # asyncio.Event set by the admission scan to wake this waiter.
     admitted: asyncio.Event = field(default_factory=asyncio.Event)
     # Reason why the run is waiting (updated when enqueued; may change but we
@@ -195,7 +202,7 @@ def resolve_target_host(
 # ---------------------------------------------------------------------------
 
 
-def _scan_and_admit(state: _EngagementState) -> None:
+def _scan_and_admit(state: _EngagementState) -> bool:
     """Walk the FIFO queue and admit the front-most eligible waiter(s).
 
     Called by ``release`` (and by ``acquire`` itself for the fast path).
@@ -212,7 +219,11 @@ def _scan_and_admit(state: _EngagementState) -> None:
     eligible ticket.  If the front ticket is blocked because no slots are free,
     we stop immediately — no later ticket can be admitted either (they would also
     need a slot).
+
+    Returns ``True`` if at least one ticket was admitted (so the caller can
+    schedule position-update re-broadcasts for the still-waiting tickets).
     """
+    admitted_any = False
     for ticket in list(state.queue.values()):
         available = state.slot_limit - state.in_use
         if available <= 0:
@@ -232,18 +243,84 @@ def _scan_and_admit(state: _EngagementState) -> None:
         if ticket.target_host is not None:
             state.locked_hosts.add(ticket.target_host)
         ticket.admitted.set()
+        admitted_any = True
         # After admitting one ticket, loop again to see if more can be admitted
         # (e.g. two slots free, two waiters with different hosts).
         # The next iteration re-checks ``available`` with the updated in_use.
+    return admitted_any
+
+
+def _compute_reason(state: _EngagementState, ticket: _Ticket) -> QueueReason:
+    """Recompute the current queue reason for a still-waiting ticket.
+
+    Called after a release-driven admission to determine the fresh reason for
+    each still-waiting ticket.  A ticket is slot_full when no slots are free
+    (regardless of host), and target_locked when a slot IS free but the ticket's
+    target host is currently held by another run.
+    """
+    available = state.slot_limit - state.in_use
+    if available <= 0:
+        return "slot_full"
+    # Slot is free — the only reason this ticket is still waiting is that its
+    # host is locked.  (If its host were free AND a slot were available the
+    # scan would have admitted it.)
+    return "target_locked"
+
+
+async def _rebroadcast_positions(state: _EngagementState) -> None:
+    """Re-invoke on_queued for every ticket still waiting in *state.queue*.
+
+    Called as a background task after a release-driven admission so each waiting
+    run receives an updated 1-based queue position and a freshly computed reason.
+
+    Error isolation: a failing broadcast to one channel is caught, logged, and
+    swallowed so that one dead WebSocket client cannot wedge the queue or block
+    admission notifications for other waiters.
+    """
+    for position, ticket in enumerate(state.queue.values(), start=1):
+        reason = _compute_reason(state, ticket)
+        try:
+            result = ticket.on_queued(position, reason)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:  # noqa: BLE001 — isolate per-channel errors
+            logger.exception(
+                "Failed to re-broadcast queue position to tool_run_id=%s (position=%d)",
+                ticket.tool_run_id,
+                position,
+            )
+
+
+def _schedule_rebroadcast(state: _EngagementState) -> None:
+    """Schedule _rebroadcast_positions as a background task if the event loop is running.
+
+    Uses asyncio.get_running_loop() so this is safe to call from synchronous code
+    that is running inside an async context (e.g. ``release`` called from a
+    ``finally`` block in an async function).  If no loop is running (e.g. a sync
+    unit test that calls ``release`` directly), the re-broadcast is a silent no-op —
+    correctness is preserved because the waiter's original on_queued was already
+    called at enqueue time.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running event loop — we are in a sync context (e.g. sync test).
+        # Re-broadcasts are not possible; skip silently.
+        return
+    task = loop.create_task(_rebroadcast_positions(state))
+    # Keep a strong reference so the GC does not collect the task before it runs.
+    _rebroadcast_tasks.add(task)
+    task.add_done_callback(_rebroadcast_tasks.discard)
+
+
+# Strong-reference set for background rebroadcast tasks (mirrors _background_tasks
+# in service.py — asyncio.create_task returns a weakly-referenced task).
+_rebroadcast_tasks: set[asyncio.Task[None]] = set()
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-
-# Callback types for acquire().
-OnQueuedCallback = Callable[[int, QueueReason], Awaitable[None] | None]
-OnStartedCallback = Callable[[], Awaitable[None] | None]
 
 
 async def acquire(
@@ -313,6 +390,7 @@ async def acquire(
         tool_name=tool_name,
         target_host=target_host,
         enqueued_at=datetime.now(tz=UTC),
+        on_queued=on_queued,
         reason=reason,
     )
     state.queue[tool_run_id] = ticket
@@ -343,6 +421,12 @@ def release(handle: AdmissionHandle) -> None:
 
     Idempotent: safe to call multiple times or after an error (Risk 3).
     Always runs even if the engagement state has been reset (e.g. in tests).
+
+    After the admission scan, if any waiters were admitted, schedules an async
+    re-broadcast task that updates the queue positions of the still-waiting
+    tickets (Task 4).  If no event loop is running (sync test context), the
+    re-broadcast is skipped silently — correctness is preserved because each
+    waiter already received its initial position at enqueue time.
     """
     if handle.released:
         return  # Idempotency guard.
@@ -361,7 +445,14 @@ def release(handle: AdmissionHandle) -> None:
         state.locked_hosts.discard(handle.target_host)
 
     # Admit next eligible waiter(s).
-    _scan_and_admit(state)
+    admitted = _scan_and_admit(state)
+
+    # If any waiters were admitted, the remaining waiters' positions have shifted.
+    # Schedule an async re-broadcast so each still-waiting run receives an updated
+    # queued chunk.  This must happen AFTER the scan bookkeeping completes so that
+    # the positions and reasons we broadcast reflect the current state.
+    if admitted and state.queue:
+        _schedule_rebroadcast(state)
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +537,9 @@ def set_slot_limit(engagement_id: UUID, n: int) -> None:
     state = _get_state(engagement_id)
     state.slot_limit = n
     # Growing: run scan in case waiters can now be admitted.
-    _scan_and_admit(state)
+    admitted = _scan_and_admit(state)
+    if admitted and state.queue:
+        _schedule_rebroadcast(state)
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +550,7 @@ def set_slot_limit(engagement_id: UUID, n: int) -> None:
 def _reset() -> None:
     """Clear all admission state.  For use in tests only (mirrors service._reset_channels)."""
     _states.clear()
+    _rebroadcast_tasks.clear()
 
 
 # ---------------------------------------------------------------------------
