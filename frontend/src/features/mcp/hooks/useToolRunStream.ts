@@ -16,20 +16,26 @@ export interface ToolRunLine {
  * type is not in the generated OpenAPI client because WebSocket endpoints are
  * not part of the OpenAPI document, so it is declared here to match the backend
  * contract: type stdout|stderr carry `data`; done carries `exit_code` /
- * `finished_at`; error carries `message`.
+ * `finished_at`; error carries `message`; queued carries `queue_position` and
+ * optionally `reason` (the first queued message); started carries no extra fields.
  */
 interface WebSocketOutputChunk {
-  type: 'stdout' | 'stderr' | 'done' | 'error'
+  type: 'queued' | 'started' | 'stdout' | 'stderr' | 'done' | 'error'
   data?: string
   exit_code?: number | null
   finished_at?: string | null
   message?: string
+  queue_position?: number
+  reason?: 'slot_full' | 'target_locked'
 }
 
 export interface ToolRunStream {
   lines: ToolRunLine[]
   isDone: boolean
   exitCode: number | null
+  queued: boolean
+  queuePosition: number | null
+  queueReason: 'slot_full' | 'target_locked' | null
 }
 
 /** Build the ws(s):// URL for a tool run, mirroring the same-origin API client. */
@@ -51,6 +57,9 @@ export function useToolRunStream(toolRunId: string | null): ToolRunStream {
   const [lines, setLines] = useState<ToolRunLine[]>([])
   const [isDone, setIsDone] = useState(false)
   const [exitCode, setExitCode] = useState<number | null>(null)
+  const [queued, setQueued] = useState(false)
+  const [queuePosition, setQueuePosition] = useState<number | null>(null)
+  const [queueReason, setQueueReason] = useState<'slot_full' | 'target_locked' | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
 
   // Reset the buffer when we (re)target a run. Adjusting state during render —
@@ -62,6 +71,9 @@ export function useToolRunStream(toolRunId: string | null): ToolRunStream {
     setLines([])
     setIsDone(false)
     setExitCode(null)
+    setQueued(false)
+    setQueuePosition(null)
+    setQueueReason(null)
   }
 
   useEffect(() => {
@@ -79,6 +91,18 @@ export function useToolRunStream(toolRunId: string | null): ToolRunStream {
       }
 
       switch (chunk.type) {
+        case 'queued':
+          setQueued(true)
+          setQueuePosition(chunk.queue_position ?? null)
+          if (chunk.reason !== undefined) {
+            setQueueReason(chunk.reason)
+          }
+          break
+        case 'started':
+          setQueued(false)
+          setQueuePosition(null)
+          setQueueReason(null)
+          break
         case 'stdout':
         case 'stderr':
           setLines((prev) => [...prev, { stream: chunk.type as 'stdout' | 'stderr', text: chunk.data ?? '' }])
@@ -105,5 +129,5 @@ export function useToolRunStream(toolRunId: string | null): ToolRunStream {
     }
   }, [toolRunId])
 
-  return { lines, isDone, exitCode }
+  return { lines, isDone, exitCode, queued, queuePosition, queueReason }
 }

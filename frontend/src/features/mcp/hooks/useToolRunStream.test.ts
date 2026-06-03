@@ -49,7 +49,7 @@ describe('useToolRunStream', () => {
   it('does not open a socket when toolRunId is null', () => {
     const { result } = renderHook(() => useToolRunStream(null))
     expect(FakeWebSocket.instances).toHaveLength(0)
-    expect(result.current).toEqual({ lines: [], isDone: false, exitCode: null })
+    expect(result.current).toEqual({ lines: [], isDone: false, exitCode: null, queued: false, queuePosition: null, queueReason: null })
   })
 
   it('opens a ws:// socket targeting the run id', () => {
@@ -138,5 +138,95 @@ describe('useToolRunStream', () => {
     expect(result.current.lines).toEqual([])
     expect(FakeWebSocket.instances).toHaveLength(2)
     expect(FakeWebSocket.instances[1].url).toContain(nextId)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Queued / started chunk handling (Slice 05 Task 10)
+  // ---------------------------------------------------------------------------
+
+  it('initial state has queued=false with no queue fields set', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    expect(result.current.queued).toBe(false)
+    expect(result.current.queuePosition).toBeNull()
+    expect(result.current.queueReason).toBeNull()
+  })
+
+  it('queued→started→stdout sequence transitions state correctly', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    // Step 1: receive queued
+    act(() => {
+      socket.emit({ type: 'queued', queue_position: 1, reason: 'slot_full' })
+    })
+    expect(result.current.queued).toBe(true)
+    expect(result.current.queuePosition).toBe(1)
+    expect(result.current.queueReason).toBe('slot_full')
+    expect(result.current.lines).toEqual([])
+    expect(result.current.isDone).toBe(false)
+
+    // Step 2: receive started — queued fields clear
+    act(() => {
+      socket.emit({ type: 'started' })
+    })
+    expect(result.current.queued).toBe(false)
+    expect(result.current.queuePosition).toBeNull()
+    expect(result.current.queueReason).toBeNull()
+    expect(result.current.isDone).toBe(false)
+
+    // Step 3: stdout appends normally after admission
+    act(() => {
+      socket.emit({ type: 'stdout', data: 'result line' })
+    })
+    expect(result.current.lines).toEqual([{ stream: 'stdout', text: 'result line' }])
+    expect(result.current.queued).toBe(false)
+  })
+
+  it('re-broadcast queued chunks update the position (and reason stays from first)', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    // First queued message — position 2, reason set
+    act(() => {
+      socket.emit({ type: 'queued', queue_position: 2, reason: 'target_locked' })
+    })
+    expect(result.current.queuePosition).toBe(2)
+    expect(result.current.queueReason).toBe('target_locked')
+
+    // Second queued message — position shifts to 1 (no reason field in re-broadcast)
+    act(() => {
+      socket.emit({ type: 'queued', queue_position: 1 })
+    })
+    expect(result.current.queued).toBe(true)
+    expect(result.current.queuePosition).toBe(1)
+    // reason not present in the re-broadcast chunk, so it should not be overwritten
+    expect(result.current.queueReason).toBe('target_locked')
+  })
+
+  it('a run that receives stdout with no preceding queued chunk stays queued=false', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit({ type: 'stdout', data: 'immediate output' })
+    })
+
+    expect(result.current.queued).toBe(false)
+    expect(result.current.queuePosition).toBeNull()
+    expect(result.current.queueReason).toBeNull()
+    expect(result.current.lines).toEqual([{ stream: 'stdout', text: 'immediate output' }])
+  })
+
+  it('queued chunk with target_locked reason sets the reason correctly', () => {
+    const { result } = renderHook(() => useToolRunStream(TOOL_RUN_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit({ type: 'queued', queue_position: 3, reason: 'target_locked' })
+    })
+
+    expect(result.current.queued).toBe(true)
+    expect(result.current.queuePosition).toBe(3)
+    expect(result.current.queueReason).toBe('target_locked')
   })
 })
