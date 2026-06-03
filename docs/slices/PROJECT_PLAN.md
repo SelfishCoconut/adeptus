@@ -105,7 +105,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §8.2 (personal undo)
 - **Depends on**: 07
 - **Risky**: yes (single-writer + authorship surface — see slice-09 spec Decision 3)
-- **Status**: in-review
+- **Status**: done
 
 ### Slice 10: Audit log + hash-chain
 - **Goal**: Every action recorded; verify-chain CLI detects tampering; includes self_approved boolean
