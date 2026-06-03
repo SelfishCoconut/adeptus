@@ -307,3 +307,5 @@ PROJECT_PLAN's risky-slice summary now includes 09.
 ## Progress
 
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
+- 2026-06-03T21:20:00Z — 27cd0bf docs(slice-09): add slice spec, mark in-progress (#27)
+- 2026-06-03T21:22:11Z — 27cd0bf docs(slice-09): add slice spec, mark in-progress (#27)

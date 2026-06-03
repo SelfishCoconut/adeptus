@@ -56,6 +56,9 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     edge_hist_id_col: Column = graph_models.GraphEdgeHistory.__table__.c.id  # type: ignore[assignment]
     edge_hist_id_col.default = ColumnDefault(uuid4)
 
+    undo_id_col: Column = graph_models.GraphUserUndoStack.__table__.c.id  # type: ignore[assignment]
+    undo_id_col.default = ColumnDefault(uuid4)
+
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

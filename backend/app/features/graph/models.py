@@ -1,10 +1,19 @@
 """SQLAlchemy ORM models for the graph feature: GraphNode, GraphEdge,
-GraphNodeHistory, GraphEdgeHistory. Owns the four graph_* tables (task 1)."""
+GraphNodeHistory, GraphEdgeHistory (the four graph_* tables, Slice 07) plus
+GraphUserUndoStack — the per-user personal undo stack (Slice 09, task 1)."""
 
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func, text
@@ -178,6 +187,78 @@ class GraphEdgeHistory(Base):
     relation: Mapped[str] = mapped_column(String(128), nullable=False)
     properties: Mapped[dict[str, Any]] = mapped_column(_PROPS_JSON, nullable=False)
     deleted: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class GraphUserUndoStack(Base):
+    """Per-user, per-engagement append log of a human's graph writes — the
+    "personal undo stack" (Slice 09, §8.2 manual-undo layer 2).
+
+    This is an *operation log keyed by user*, NOT provenance smeared onto the
+    graph entities: authorship for undo lives here so the four graph_* tables
+    stay clean (CLAUDE.md anti-pattern / §8.2 no-provenance). It is also NOT the
+    hash-chained audit log (Slice 10): it is mutable, user-private, and a
+    convenience structure. ``push_undo_entry`` and ``pop_undo_stack`` are the two
+    chokepoints where Slice 10 will later attach audit emission (Decision 4) —
+    this slice imports no audit module.
+
+    The active stack for an owner = rows WHERE ``undone = false``, newest-first;
+    it is trimmed to the most recent 20 in application logic (not by a DB
+    constraint). ``entity_id`` has deliberately NO FK: the entity may be
+    hard-deleted by an engagement CASCADE, and validity is checked at pop-time
+    (staleness), not by referential integrity. Rows are cleaned up by the
+    engagement CASCADE via ``engagement_id``.
+    """
+
+    __tablename__ = "graph_user_undo_stack"
+    __table_args__ = (
+        CheckConstraint(
+            "op_type IN ('create_node', 'update_node', 'delete_node', "
+            "'create_edge', 'delete_edge')",
+            name="ck_graph_user_undo_stack_op_type",
+        ),
+        CheckConstraint(
+            "entity_kind IN ('node', 'edge')",
+            name="ck_graph_user_undo_stack_entity_kind",
+        ),
+        # Hot query: top-of-stack for this owner, active only, newest-first.
+        Index(
+            "ix_graph_user_undo_stack_owner",
+            "engagement_id",
+            "user_id",
+            "undone",
+            text("recorded_at DESC"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    engagement_id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("engagements.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    op_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    entity_kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    # No FK: the entity may be hard-deleted by an engagement CASCADE; validity is
+    # checked at pop-time (staleness), not by referential integrity.
+    entity_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # The entity's updated_at value immediately AFTER this user's write committed.
+    # Staleness baseline: if the entity's current updated_at differs (any later
+    # write by anyone, per Decision 1), the entry is stale.
+    target_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    summary: Mapped[str] = mapped_column(String(256), nullable=False)
+    undone: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
