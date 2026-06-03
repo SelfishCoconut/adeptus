@@ -25,6 +25,7 @@ class EngagementSummary(BaseModel):
     created_at: datetime
     member_role: Literal["owner", "member"]
     privacy_mode: PrivacyMode
+    paused: bool = False
 
 
 class EngagementDetail(BaseModel):
@@ -40,6 +41,7 @@ class EngagementDetail(BaseModel):
     member_role: Literal["owner", "member"]
     privacy_mode: PrivacyMode
     concurrency_slot_limit: int
+    paused: bool = False
 
 
 class EngagementUpdate(BaseModel):
@@ -58,3 +60,29 @@ class MemberEntry(BaseModel):
 
 class AddMemberRequest(BaseModel):
     username: str
+
+
+# ---------------------------------------------------------------------------
+# Engagement pause schemas (Slice 06)
+# ---------------------------------------------------------------------------
+
+
+class EngagementPauseRequest(BaseModel):
+    """Request body for POST /api/v1/engagements/{id}/pause."""
+
+    paused: bool
+
+
+class EngagementPauseState(BaseModel):
+    """Response body for POST /api/v1/engagements/{id}/pause.
+
+    ``killed_running`` — number of in-flight runs (including runs awaiting a
+    timeout decision) that were killed by this pause action; 0 when resuming or
+    when the engagement was already paused.
+    ``dequeued`` — number of queued runs removed by this pause action.
+    """
+
+    engagement_id: UUID
+    paused: bool
+    killed_running: int
+    dequeued: int
