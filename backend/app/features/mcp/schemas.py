@@ -113,7 +113,13 @@ class ToolRunCreate(BaseModel):
 
 
 class ToolRunResult(BaseModel):
-    """Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}."""
+    """Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}.
+
+    Slice 05 additions:
+    - ``status`` gains the ``"queued"`` member (via ``ToolRunStatus``).
+    - ``queue_position`` is the 1-based FIFO position while ``status == "queued"``;
+      ``None`` once running or terminal, and always ``None`` for light runs.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -128,6 +134,7 @@ class ToolRunResult(BaseModel):
     finished_at: datetime | None
     status: ToolRunStatus
     preset_name: str | None = None
+    queue_position: int | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -1006,9 +1006,25 @@ async def fetch_tool_run_row(db: AsyncSession, tool_run_id: UUID) -> ToolRun | N
 
 
 def _row_to_result(row: ToolRun) -> ToolRunResult:
-    """Map a ToolRun ORM row to a ToolRunResult schema."""
+    """Map a ToolRun ORM row to a ToolRunResult schema.
+
+    ``queue_position`` is derived from the in-process concurrency state: it is
+    the 1-based FIFO position returned by ``concurrency.position_of`` when the
+    row's status is ``'queued'``, and ``None`` for all other statuses (running,
+    completed, failed, timed_out) and for light runs (which are never enqueued).
+
+    The in-process queue is the authoritative source for position — there is no
+    persistent ``queue_position`` column.  If the run has already been admitted
+    (status flipped to ``'running'``) but ``position_of`` still returns a value
+    (a transient race), we return ``None`` per the contract.
+    """
+    raw_status: str | None = getattr(row, "status", None)
+    run_id = cast(UUID, row.id)
+    queue_position: int | None = None
+    if raw_status == "queued":
+        queue_position = concurrency.position_of(run_id)
     return ToolRunResult(
-        tool_run_id=cast(UUID, row.id),
+        tool_run_id=run_id,
         engagement_id=cast(UUID, row.engagement_id),
         server_name=row.server_name,
         tool_name=row.tool_name,
@@ -1017,6 +1033,7 @@ def _row_to_result(row: ToolRun) -> ToolRunResult:
         stderr=row.stderr or "",
         started_at=row.started_at,
         finished_at=row.finished_at,
-        status=cast(ToolRunStatus, row.status),
+        status=cast(ToolRunStatus, raw_status) if raw_status else "completed",
         preset_name=row.preset_name,
+        queue_position=queue_position,
     )
