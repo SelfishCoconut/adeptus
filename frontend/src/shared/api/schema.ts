@@ -624,6 +624,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/engagements/{engagement_id}/graph/undo-stack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Undo Stack
+         * @description List the calling user's personal undo stack for this engagement (newest-first).
+         *
+         *     Membership-gated (§17.1 — non-member returns 404) and scoped to the caller, so
+         *     members never see each other's stacks. Read-only path: archived engagements are
+         *     accessible. Each entry's ``stale`` flag is computed against current graph state.
+         */
+        get: operations["get_undo_stack"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/graph/undo-stack/pop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pop Undo Stack
+         * @description Undo the caller's most recent still-valid personal write (serialized through
+         *     the single writer).
+         *
+         *     Always returns 200 (Decision 2): ``undone`` is null when there was nothing left
+         *     to undo (empty stack, or every remaining entry was stale and dropped). Stale
+         *     entries are surfaced in ``skipped_stale`` and never silently revert a teammate's
+         *     later work (§8.2). Returns 409 for archived engagements; 404 for non-members.
+         */
+        post: operations["pop_undo_stack"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -832,6 +882,12 @@ export interface components {
             /** Concurrency Slot Limit */
             concurrency_slot_limit?: number | null;
         };
+        /**
+         * EntityKind
+         * @description Whether an undo-stack entry targets a node or an edge.
+         * @enum {string}
+         */
+        EntityKind: "node" | "edge";
         /**
          * GraphHistory
          * @description History view: soft-deleted nodes and the per-entity edit history.
@@ -1222,6 +1278,71 @@ export interface components {
             queue_position?: number | null;
             /** Awaiting Since */
             awaiting_since?: string | null;
+        };
+        /**
+         * UndoOpType
+         * @description The kind of human graph write recorded on a personal undo-stack entry.
+         * @enum {string}
+         */
+        UndoOpType: "create_node" | "update_node" | "delete_node" | "create_edge" | "delete_edge";
+        /**
+         * UndoResult
+         * @description Result of popping the personal undo stack.
+         *
+         *     ``undone`` is the entry that was reverted, or ``None`` when there was nothing
+         *     left to undo (empty stack, or every remaining entry was stale and dropped).
+         *     ``skipped_stale`` lists entries dropped as stale during this pop. ``stack`` is
+         *     the refreshed (possibly empty) stack so the client can update the Undo control.
+         */
+        UndoResult: {
+            undone: components["schemas"]["UndoStackEntry"] | null;
+            /** Skipped Stale */
+            skipped_stale: components["schemas"]["UndoStackEntry"][];
+            stack: components["schemas"]["UndoStack"];
+        };
+        /**
+         * UndoStack
+         * @description The calling user's current personal undo stack, newest-first.
+         */
+        UndoStack: {
+            /** Depth */
+            depth: number;
+            /** Entries */
+            entries: components["schemas"]["UndoStackEntry"][];
+        };
+        /**
+         * UndoStackEntry
+         * @description A single entry on the calling user's personal undo stack.
+         *
+         *     Maps from the ``GraphUserUndoStack`` ORM row (``from_attributes=True``); the
+         *     ``stale`` flag is computed by the service against current graph state and set
+         *     on the instance after validation.
+         */
+        UndoStackEntry: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            op_type: components["schemas"]["UndoOpType"];
+            entity_kind: components["schemas"]["EntityKind"];
+            /**
+             * Entity Id
+             * Format: uuid
+             */
+            entity_id: string;
+            /** Summary */
+            summary: string;
+            /**
+             * Recorded At
+             * Format: date-time
+             */
+            recorded_at: string;
+            /**
+             * Stale
+             * @default false
+             */
+            stale: boolean;
         };
         /** UserMe */
         UserMe: {
@@ -2161,6 +2282,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Edge"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_undo_stack: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UndoStack"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pop_undo_stack: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UndoResult"];
                 };
             };
             /** @description Validation Error */

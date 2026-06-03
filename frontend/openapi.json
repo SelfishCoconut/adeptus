@@ -1323,6 +1323,94 @@
           }
         }
       }
+    },
+    "/api/v1/engagements/{engagement_id}/graph/undo-stack": {
+      "get": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Get Undo Stack",
+        "description": "List the calling user's personal undo stack for this engagement (newest-first).\n\nMembership-gated (\u00a717.1 \u2014 non-member returns 404) and scoped to the caller, so\nmembers never see each other's stacks. Read-only path: archived engagements are\naccessible. Each entry's ``stale`` flag is computed against current graph state.",
+        "operationId": "get_undo_stack",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UndoStack"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/graph/undo-stack/pop": {
+      "post": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Pop Undo Stack",
+        "description": "Undo the caller's most recent still-valid personal write (serialized through\nthe single writer).\n\nAlways returns 200 (Decision 2): ``undone`` is null when there was nothing left\nto undo (empty stack, or every remaining entry was stale and dropped). Stale\nentries are surfaced in ``skipped_stale`` and never silently revert a teammate's\nlater work (\u00a78.2). Returns 409 for archived engagements; 404 for non-members.",
+        "operationId": "pop_undo_stack",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UndoResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1695,6 +1783,15 @@
         },
         "type": "object",
         "title": "EngagementUpdate"
+      },
+      "EntityKind": {
+        "type": "string",
+        "enum": [
+          "node",
+          "edge"
+        ],
+        "title": "EntityKind",
+        "description": "Whether an undo-stack entry targets a node or an edge."
       },
       "GraphHistory": {
         "properties": {
@@ -2443,6 +2540,117 @@
         ],
         "title": "ToolRunResult",
         "description": "Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}.\n\nSlice 05 additions:\n- ``status`` gains the ``\"queued\"`` member (via ``ToolRunStatus``).\n- ``queue_position`` is the 1-based FIFO position while ``status == \"queued\"``;\n  ``None`` once running or terminal, and always ``None`` for light runs.\n\nSlice 06 additions:\n- ``status`` gains ``\"killed\"`` and ``\"awaiting_decision\"`` members.\n- ``awaiting_since`` is set (non-null) while ``status == \"awaiting_decision\"``\n  to let the UI show how long the timeout prompt has been open.  Cleared when\n  the run resolves.  Derived in-process; NOT persisted as a DB column."
+      },
+      "UndoOpType": {
+        "type": "string",
+        "enum": [
+          "create_node",
+          "update_node",
+          "delete_node",
+          "create_edge",
+          "delete_edge"
+        ],
+        "title": "UndoOpType",
+        "description": "The kind of human graph write recorded on a personal undo-stack entry."
+      },
+      "UndoResult": {
+        "properties": {
+          "undone": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UndoStackEntry"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skipped_stale": {
+            "items": {
+              "$ref": "#/components/schemas/UndoStackEntry"
+            },
+            "type": "array",
+            "title": "Skipped Stale"
+          },
+          "stack": {
+            "$ref": "#/components/schemas/UndoStack"
+          }
+        },
+        "type": "object",
+        "required": [
+          "undone",
+          "skipped_stale",
+          "stack"
+        ],
+        "title": "UndoResult",
+        "description": "Result of popping the personal undo stack.\n\n``undone`` is the entry that was reverted, or ``None`` when there was nothing\nleft to undo (empty stack, or every remaining entry was stale and dropped).\n``skipped_stale`` lists entries dropped as stale during this pop. ``stack`` is\nthe refreshed (possibly empty) stack so the client can update the Undo control."
+      },
+      "UndoStack": {
+        "properties": {
+          "depth": {
+            "type": "integer",
+            "title": "Depth"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/UndoStackEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "depth",
+          "entries"
+        ],
+        "title": "UndoStack",
+        "description": "The calling user's current personal undo stack, newest-first."
+      },
+      "UndoStackEntry": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op_type": {
+            "$ref": "#/components/schemas/UndoOpType"
+          },
+          "entity_kind": {
+            "$ref": "#/components/schemas/EntityKind"
+          },
+          "entity_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Entity Id"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Recorded At"
+          },
+          "stale": {
+            "type": "boolean",
+            "title": "Stale",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "op_type",
+          "entity_kind",
+          "entity_id",
+          "summary",
+          "recorded_at"
+        ],
+        "title": "UndoStackEntry",
+        "description": "A single entry on the calling user's personal undo stack.\n\nMaps from the ``GraphUserUndoStack`` ORM row (``from_attributes=True``); the\n``stale`` flag is computed by the service against current graph state and set\non the instance after validation."
       },
       "UserMe": {
         "properties": {
