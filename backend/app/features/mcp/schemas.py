@@ -1,7 +1,13 @@
 """Pydantic v2 request/response models for the MCP feature.
 
-Schemas match the Slice 03/04 OpenAPI contract exactly — field names, types,
+Schemas match the Slice 03/04/05 OpenAPI contract exactly — field names, types,
 enums, and validation constraints are authoritative here.
+
+Slice 05 additions:
+- ``ToolRunStatus`` gains the ``"queued"`` member.
+- ``QueuedRun`` and ``ToolQueueSnapshot`` models for the queue-status endpoint.
+  These are defined here (not inline in concurrency.py) because concurrency.py
+  needs a concrete return type for ``snapshot()`` and Task 6 will only extend them.
 """
 
 from datetime import datetime
@@ -16,7 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 McpServerStatus = Literal["running", "stopped"]
 ToolWeight = Literal["light", "heavy"]
-ToolRunStatus = Literal["running", "completed", "failed", "timed_out"]
+ToolRunStatus = Literal["queued", "running", "completed", "failed", "timed_out"]
+QueueReason = Literal["slot_full", "target_locked"]
 
 
 # ---------------------------------------------------------------------------
@@ -146,10 +153,52 @@ class WebSocketOutputChunk(BaseModel):
     type "stdout" / "stderr": data carries the output line.
     type "done": exit_code and finished_at are populated.
     type "error": message carries the error description.
+    type "queued" (Slice 05): run is waiting; queue_position and reason are set.
+    type "started" (Slice 05): run was admitted from the queue and is now running.
     """
 
-    type: Literal["stdout", "stderr", "done", "error"]
+    type: Literal["stdout", "stderr", "done", "error", "queued", "started"]
     data: str | None = None
     exit_code: int | None = None
     finished_at: datetime | None = None
     message: str | None = None
+    queue_position: int | None = None
+    reason: QueueReason | None = None
+
+
+# ---------------------------------------------------------------------------
+# Concurrency / queue-status schemas (Slice 05, Task 2)
+# ---------------------------------------------------------------------------
+
+
+class QueuedRun(BaseModel):
+    """A single run waiting for admission in the FIFO queue.
+
+    Returned as part of ``ToolQueueSnapshot``; the ``position`` field is
+    1-based (1 = next to admit).  ``target_host`` is ``None`` for tools that
+    take no ``target`` arg (they acquire only a slot, no host lock).
+    ``enqueued_at`` is the wall-clock time the ticket was created — it lives
+    in the in-process queue only and is NOT persisted to the DB.
+    """
+
+    tool_run_id: UUID
+    server_name: str
+    tool_name: str
+    target_host: str | None
+    position: int
+    reason: QueueReason
+    enqueued_at: datetime
+
+
+class ToolQueueSnapshot(BaseModel):
+    """Snapshot of the heavy-tool concurrency pool for one engagement.
+
+    Returned by ``GET /api/v1/engagements/{engagement_id}/tool-queue``.
+    All fields are derived from the in-process admission manager; nothing is
+    read from the DB at snapshot time (the DB has status rows but no queue order).
+    """
+
+    slot_limit: int
+    running_count: int
+    queued_count: int
+    queued: list[QueuedRun]
