@@ -3,7 +3,16 @@
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, SmallInteger, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    SmallInteger,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func, text
@@ -37,6 +46,7 @@ class Engagement(Base):
     concurrency_slot_limit: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, server_default=text("3")
     )
+    paused: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -63,6 +63,7 @@ async def create_engagement(
         member_role="owner",
         privacy_mode=engagement.privacy_mode,
         concurrency_slot_limit=engagement.concurrency_slot_limit,
+        paused=engagement.paused,
     )
 
 
@@ -97,6 +98,7 @@ async def get_engagement(
         member_role=member_role,
         privacy_mode=engagement.privacy_mode,
         concurrency_slot_limit=engagement.concurrency_slot_limit,
+        paused=engagement.paused,
     )
 
 
@@ -154,6 +156,7 @@ async def update_engagement(
         member_role=member_role,
         privacy_mode=engagement.privacy_mode,
         concurrency_slot_limit=engagement.concurrency_slot_limit,
+        paused=engagement.paused,
     )
 
 
@@ -171,6 +174,7 @@ async def list_engagements(
             created_at=eng.created_at,
             member_role=cast(Literal["owner", "member"], role),
             privacy_mode=eng.privacy_mode,
+            paused=eng.paused,
         )
         for eng, role in rows
     ]
