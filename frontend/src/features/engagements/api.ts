@@ -4,6 +4,8 @@ import {
   type AddMemberRequest,
   type EngagementCreate,
   type EngagementDetail,
+  type EngagementPauseRequest,
+  type EngagementPauseState,
   type EngagementSummary,
   type EngagementUpdate,
   type MemberEntry,
@@ -106,6 +108,38 @@ export function useAddMember(engagementId: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: membersKey(engagementId) })
+    },
+  })
+}
+
+/**
+ * Toggle the engagement-wide tool pause.
+ *
+ * Invalidation strategy: on success we invalidate both the engagement detail
+ * query (the `paused` field) and the tool-queue snapshot. The tool-queue key is
+ * inlined as a raw array (`['mcp', 'tool-queue', engagementId]`) to avoid a
+ * backward import from the `engagements` feature into the `mcp` feature — the
+ * dependency direction is mcp → engagements, not the reverse. The raw array
+ * matches the `toolQueueKey(id)` constant in `mcp/api.ts` exactly; if that key
+ * shape ever changes, update both places.
+ */
+export function useEngagementPause(engagementId: string) {
+  const queryClient = useQueryClient()
+  return useMutation<EngagementPauseState, Error, EngagementPauseRequest>({
+    mutationFn: async (body) => {
+      const { data, error } = await api.POST('/api/v1/engagements/{engagement_id}/pause', {
+        params: { path: { engagement_id: engagementId } },
+        body,
+      })
+      if (error || !data) throw new Error('Failed to set engagement pause state')
+      return data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: engagementKey(engagementId) })
+      // Inline the mcp toolQueueKey shape to avoid a backward feature import.
+      void queryClient.invalidateQueries({
+        queryKey: ['mcp', 'tool-queue', engagementId],
+      })
     },
   })
 }

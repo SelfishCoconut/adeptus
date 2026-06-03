@@ -97,6 +97,12 @@ export function useExecuteToolRun() {
  * Execute a tool run in async/streaming mode. The endpoint responds 202 with a
  * partial result (status `running`); the caller then opens the WebSocket to
  * consume output. `async_mode` is forced true regardless of the supplied body.
+ *
+ * Error message extraction: the backend returns structured error bodies for
+ * known 4xx responses (e.g. 409 when the engagement is paused:
+ * `{ error: { code: "conflict", message: "..." } }`). The mutation extracts
+ * that message when available so `ToolRunnerForm` can surface a clear reason
+ * to the user without hand-parsing the raw error.
  */
 export function useExecuteToolRunAsync() {
   return useMutation<ToolRunResult, Error, ToolRunCreate>({
@@ -104,10 +110,28 @@ export function useExecuteToolRunAsync() {
       const { data, error } = await api.POST('/api/v1/tool-runs', {
         body: { ...body, async_mode: true },
       })
-      if (error || !data) throw new Error('Failed to execute tool run')
+      if (error || !data) {
+        const serverMessage = extractServerMessage(error)
+        throw new Error(serverMessage ?? 'Failed to execute tool run')
+      }
       return data
     },
   })
+}
+
+/**
+ * Extract a human-readable message from a structured backend error body.
+ * The backend uses `{ error: { code, message } }` for inline 4xx responses
+ * (e.g. 409 engagement-paused, 429 queue-full, 503 MCP server down).
+ * Returns `undefined` when the body does not match this shape.
+ */
+function extractServerMessage(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const e = error as Record<string, unknown>
+  if (typeof e.error !== 'object' || e.error === null) return undefined
+  const inner = e.error as Record<string, unknown>
+  if (typeof inner.message === 'string') return inner.message
+  return undefined
 }
 
 /**

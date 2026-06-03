@@ -83,9 +83,15 @@ interface ToolRunnerFormProps {
   engagementId: string
   /** Called with the new run id once the async run has been accepted (202). */
   onRunStarted: (toolRunId: string) => void
+  /**
+   * When true (engagement is paused), the Run button is disabled. Passed down
+   * from ToolRunnerPanel which reads the paused flag from the engagement detail
+   * query — no separate fetch is needed.
+   */
+  paused?: boolean
 }
 
-export function ToolRunnerForm({ engagementId, onRunStarted }: ToolRunnerFormProps) {
+export function ToolRunnerForm({ engagementId, onRunStarted, paused = false }: ToolRunnerFormProps) {
   const tools = useListTools()
   const executeAsync = useExecuteToolRunAsync()
 
@@ -245,7 +251,7 @@ export function ToolRunnerForm({ engagementId, onRunStarted }: ToolRunnerFormPro
 
             {/* Submit */}
             <div>
-              <Button type="submit" disabled={executeAsync.isPending || !engagementId}>
+              <Button type="submit" disabled={executeAsync.isPending || !engagementId || paused}>
                 {executeAsync.isPending ? 'Running…' : 'Run'}
               </Button>
             </div>

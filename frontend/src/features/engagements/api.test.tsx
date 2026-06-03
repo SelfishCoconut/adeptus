@@ -9,6 +9,7 @@ import {
   useAddMember,
   useCreateEngagement,
   useEngagement,
+  useEngagementPause,
   useEngagements,
   useMembers,
   useRemoveMember,
@@ -512,5 +513,114 @@ describe('useUpdateEngagement', () => {
     })
 
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: engagementKey(ENGAGEMENT_ID) })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// useEngagementPause
+// ---------------------------------------------------------------------------
+
+const PAUSE_STATE = {
+  engagement_id: ENGAGEMENT_ID,
+  paused: true,
+  killed_running: 1,
+  dequeued: 2,
+}
+
+describe('useEngagementPause', () => {
+  it('POSTs to /pause with paused:true and returns the pause state', async () => {
+    resolvePost({ data: PAUSE_STATE, response: { status: 200 } })
+    const { result } = renderHook(() => useEngagementPause(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    let returned: unknown
+    await act(async () => {
+      returned = await result.current.mutateAsync({ paused: true })
+    })
+
+    expect(returned).toEqual(PAUSE_STATE)
+    expect(mockPost).toHaveBeenCalledWith('/api/v1/engagements/{engagement_id}/pause', {
+      params: { path: { engagement_id: ENGAGEMENT_ID } },
+      body: { paused: true },
+    })
+  })
+
+  it('POSTs to /pause with paused:false (resume)', async () => {
+    const resumeState = { ...PAUSE_STATE, paused: false, killed_running: 0, dequeued: 0 }
+    resolvePost({ data: resumeState, response: { status: 200 } })
+    const { result } = renderHook(() => useEngagementPause(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    let returned: unknown
+    await act(async () => {
+      returned = await result.current.mutateAsync({ paused: false })
+    })
+
+    expect(returned).toEqual(resumeState)
+    expect(mockPost).toHaveBeenCalledWith('/api/v1/engagements/{engagement_id}/pause', {
+      params: { path: { engagement_id: ENGAGEMENT_ID } },
+      body: { paused: false },
+    })
+  })
+
+  it('invalidates the engagement detail query on success', async () => {
+    resolvePost({ data: PAUSE_STATE, response: { status: 200 } })
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+
+    const { result } = renderHook(() => useEngagementPause(ENGAGEMENT_ID), { wrapper })
+
+    await act(async () => {
+      await result.current.mutateAsync({ paused: true })
+    })
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: engagementKey(ENGAGEMENT_ID) })
+  })
+
+  it('invalidates the mcp tool-queue query on success (by inlined key array)', async () => {
+    resolvePost({ data: PAUSE_STATE, response: { status: 200 } })
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+
+    const { result } = renderHook(() => useEngagementPause(ENGAGEMENT_ID), { wrapper })
+
+    await act(async () => {
+      await result.current.mutateAsync({ paused: true })
+    })
+
+    // The mcp toolQueueKey shape is ['mcp', 'tool-queue', engagementId].
+    // It is inlined here to avoid a backward feature import.
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ['mcp', 'tool-queue', ENGAGEMENT_ID],
+    })
+  })
+
+  it('throws on 404 (non-member or unknown engagement)', async () => {
+    resolvePost({ error: { detail: 'Not Found' }, response: { status: 404 } })
+    const { result } = renderHook(() => useEngagementPause(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await act(async () => {
+      await expect(result.current.mutateAsync({ paused: true })).rejects.toThrow(
+        'Failed to set engagement pause state',
+      )
+    })
   })
 })
