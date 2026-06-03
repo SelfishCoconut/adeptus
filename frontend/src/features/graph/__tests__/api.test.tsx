@@ -10,8 +10,10 @@ import {
   useDeleteNode,
   useGraph,
   useGraphHistory,
+  usePopUndoStack,
   useUndoEdge,
   useUndoNode,
+  useUndoStack,
   useUpdateNode,
 } from '../api'
 import { api } from '@/shared/api'
@@ -636,5 +638,113 @@ describe('useUndoEdge', () => {
 
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: graphKeys.graph(ENGAGEMENT_ID) })
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: graphKeys.history(ENGAGEMENT_ID) })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Personal undo stack (Slice 09)
+// ---------------------------------------------------------------------------
+
+const UNDO_ENTRY = {
+  id: '00000000-0000-0000-0000-000000000010',
+  op_type: 'create_node' as const,
+  entity_kind: 'node' as const,
+  entity_id: NODE_ID,
+  summary: 'Created host 10.0.0.5',
+  recorded_at: '2026-01-01T00:00:00Z',
+  stale: false,
+}
+
+const UNDO_STACK = { depth: 1, entries: [UNDO_ENTRY] }
+
+describe('graphKeys.undoStack', () => {
+  it('undo-stack key is namespaced by engagementId', () => {
+    expect(graphKeys.undoStack(ENGAGEMENT_ID)).toEqual(['graph', ENGAGEMENT_ID, 'undo-stack'])
+  })
+})
+
+describe('useUndoStack', () => {
+  it('returns the undo stack on a 200 response', async () => {
+    resolveGet({ data: UNDO_STACK, response: { status: 200 } })
+    const { result } = renderHook(() => useUndoStack(ENGAGEMENT_ID), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data).toEqual(UNDO_STACK)
+    expect(mockGet).toHaveBeenCalledWith(
+      '/api/v1/engagements/{engagement_id}/graph/undo-stack',
+      { params: { path: { engagement_id: ENGAGEMENT_ID } } },
+    )
+  })
+
+  it('is disabled when engagementId is empty', () => {
+    const { result } = renderHook(() => useUndoStack(''), { wrapper: createWrapper() })
+    expect(result.current.fetchStatus).toBe('idle')
+    expect(mockGet).not.toHaveBeenCalled()
+  })
+})
+
+describe('usePopUndoStack', () => {
+  it('invalidates graph, history, and undo-stack on a successful pop', async () => {
+    resolvePost({
+      data: { undone: UNDO_ENTRY, skipped_stale: [], stack: { depth: 0, entries: [] } },
+      response: { status: 200 },
+    })
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+    const { result } = renderHook(() => usePopUndoStack(ENGAGEMENT_ID), { wrapper })
+
+    let popResult: Awaited<ReturnType<typeof result.current.mutateAsync>> | undefined
+    await act(async () => {
+      popResult = await result.current.mutateAsync()
+    })
+
+    expect(popResult?.undone?.id).toBe(UNDO_ENTRY.id)
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: graphKeys.graph(ENGAGEMENT_ID) })
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: graphKeys.history(ENGAGEMENT_ID) })
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: graphKeys.undoStack(ENGAGEMENT_ID) })
+  })
+
+  it('handles an undone === null result without throwing (nothing to undo)', async () => {
+    resolvePost({
+      data: { undone: null, skipped_stale: [], stack: { depth: 0, entries: [] } },
+      response: { status: 200 },
+    })
+    const { result } = renderHook(() => usePopUndoStack(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    let popResult: Awaited<ReturnType<typeof result.current.mutateAsync>> | undefined
+    await act(async () => {
+      popResult = await result.current.mutateAsync()
+    })
+
+    expect(result.current.isError).toBe(false)
+    expect(popResult?.undone).toBeNull()
+    expect(popResult?.stack.depth).toBe(0)
+  })
+
+  it('surfaces skipped_stale entries to the caller', async () => {
+    const staleEntry = { ...UNDO_ENTRY, stale: true }
+    resolvePost({
+      data: { undone: null, skipped_stale: [staleEntry], stack: { depth: 0, entries: [] } },
+      response: { status: 200 },
+    })
+    const { result } = renderHook(() => usePopUndoStack(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    let popResult: Awaited<ReturnType<typeof result.current.mutateAsync>> | undefined
+    await act(async () => {
+      popResult = await result.current.mutateAsync()
+    })
+
+    expect(popResult?.skipped_stale).toHaveLength(1)
+    expect(popResult?.skipped_stale[0].id).toBe(UNDO_ENTRY.id)
   })
 })

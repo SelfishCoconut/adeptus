@@ -13,6 +13,10 @@ export type NodeCreate = components['schemas']['NodeCreate']
 export type NodeUpdate = components['schemas']['NodeUpdate']
 export type Edge = components['schemas']['Edge']
 export type EdgeCreate = components['schemas']['EdgeCreate']
+export type UndoStack = components['schemas']['UndoStack']
+export type UndoStackEntry = components['schemas']['UndoStackEntry']
+export type UndoResult = components['schemas']['UndoResult']
+export type UndoOpType = components['schemas']['UndoOpType']
 
 // ---------------------------------------------------------------------------
 // Query key factory
@@ -23,6 +27,8 @@ export const graphKeys = {
     ['graph', engagementId] as const,
   history: (engagementId: string) =>
     ['graph', engagementId, 'history'] as const,
+  undoStack: (engagementId: string) =>
+    ['graph', engagementId, 'undo-stack'] as const,
 } as const
 
 // ---------------------------------------------------------------------------
@@ -120,6 +126,8 @@ export function useCreateNode(engagementId: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
+      // A successful write pushes onto the caller's personal undo stack.
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }
@@ -145,6 +153,7 @@ export function useUpdateNode(engagementId: string) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
       void queryClient.invalidateQueries({ queryKey: graphKeys.history(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }
@@ -169,6 +178,7 @@ export function useDeleteNode(engagementId: string) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
       void queryClient.invalidateQueries({ queryKey: graphKeys.history(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }
@@ -223,6 +233,7 @@ export function useCreateEdge(engagementId: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }
@@ -247,6 +258,7 @@ export function useDeleteEdge(engagementId: string) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
       void queryClient.invalidateQueries({ queryKey: graphKeys.history(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }
@@ -272,6 +284,58 @@ export function useUndoEdge(engagementId: string) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
       void queryClient.invalidateQueries({ queryKey: graphKeys.history(engagementId) })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Personal undo stack (Slice 09)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/v1/engagements/{engagement_id}/graph/undo-stack
+ * Returns the calling user's personal undo stack for this engagement,
+ * newest-first. Per-user and per-engagement scoped.
+ */
+export function useUndoStack(engagementId: string) {
+  return useQuery<UndoStack>({
+    queryKey: graphKeys.undoStack(engagementId),
+    enabled: !!engagementId,
+    queryFn: async () => {
+      const { data, error } = await api.GET(
+        '/api/v1/engagements/{engagement_id}/graph/undo-stack',
+        { params: { path: { engagement_id: engagementId } } },
+      )
+      if (error || !data) throw toError(error, 'Failed to load undo stack')
+      return data
+    },
+  })
+}
+
+/**
+ * POST /api/v1/engagements/{engagement_id}/graph/undo-stack/pop
+ * Undoes the caller's most recent still-valid personal write.
+ *
+ * Always resolves with an UndoResult (never throws on an empty stack): a
+ * `undone === null` result means there was nothing to undo (not an error), and
+ * `skipped_stale` carries any entries dropped because a teammate (or the user)
+ * changed the target since. Invalidates graph + history + undo-stack on success.
+ */
+export function usePopUndoStack(engagementId: string) {
+  const queryClient = useQueryClient()
+  return useMutation<UndoResult, Error, void>({
+    mutationFn: async () => {
+      const { data, error } = await api.POST(
+        '/api/v1/engagements/{engagement_id}/graph/undo-stack/pop',
+        { params: { path: { engagement_id: engagementId } } },
+      )
+      if (error || !data) throw toError(error, 'Failed to undo')
+      return data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: graphKeys.graph(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.history(engagementId) })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.undoStack(engagementId) })
     },
   })
 }

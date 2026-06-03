@@ -29,11 +29,12 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
 from argon2 import PasswordHasher
-from sqlalchemy import text
+from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
@@ -44,7 +45,9 @@ from app.features.engagements import models as eng_models  # noqa: F401 — regi
 from app.features.engagements import repository as eng_repo
 from app.features.graph import models as graph_models  # noqa: F401 — register ORM metadata
 from app.features.graph import repository as repo
+from app.features.graph import service as graph_service
 from app.features.graph import writer as gw
+from app.features.graph.schemas import NodeCreate, NodeType, NodeUpdate
 
 pytestmark = pytest.mark.integration
 
@@ -332,3 +335,205 @@ async def test_soft_delete_then_undo_roundtrip(
     assert any(n.id == node_id for n in pg_nodes_undo), (
         "Node should reappear in Postgres live graph after undo"
     )
+
+
+# ---------------------------------------------------------------------------
+# Personal undo stack (Slice 09) — service-level integration against Postgres
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def pg_two_members(
+    pg_schema_factory: async_sessionmaker[AsyncSession],
+) -> tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Seed two member users + one engagement; return (factory, eng_id, alice, bob)."""
+    async with pg_schema_factory() as session:
+        alice = await auth_repo.create_user(
+            session,
+            username=f"alice_{uuid.uuid4().hex[:8]}",
+            password_hash=_MEMBER_HASH,
+            role="user",
+        )
+        bob = await auth_repo.create_user(
+            session,
+            username=f"bob_{uuid.uuid4().hex[:8]}",
+            password_hash=_MEMBER_HASH,
+            role="user",
+        )
+        await session.flush()
+        alice_id = alice.id
+        bob_id = bob.id
+
+        engagement = await eng_repo.create_engagement(
+            session,
+            name="Undo Stack Integration",
+            scope="10.0.0.0/24",
+            client_info=None,
+            owner_id=alice_id,  # type: ignore[arg-type]
+        )
+        await session.flush()
+        eng_id = engagement.id
+        await eng_repo.add_member(session, eng_id, bob_id)  # type: ignore[arg-type]
+        await session.commit()
+
+    return pg_schema_factory, eng_id, alice_id, bob_id  # type: ignore[return-value]
+
+
+async def _create_node(
+    factory: async_sessionmaker[AsyncSession],
+    eng_id: uuid.UUID,
+    user_id: uuid.UUID,
+    label: str,
+) -> uuid.UUID:
+    async with factory() as db:
+        node = await graph_service.create_node(
+            db,
+            engagement_id=eng_id,
+            user_id=user_id,
+            payload=NodeCreate(type=NodeType.host, label=label),
+        )
+    return node.id
+
+
+@pytest.mark.asyncio
+async def test_personal_undo_roundtrip(
+    pg_two_members: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create 3 nodes as one user; the stack shows them newest-first; pop removes
+    the newest and the live graph reflects it; depth drops to 2."""
+    factory, eng_id, alice_id, _ = pg_two_members
+    _patch_writer_factory(factory, monkeypatch)
+
+    await _create_node(factory, eng_id, alice_id, "first")
+    await _create_node(factory, eng_id, alice_id, "second")
+    third_id = await _create_node(factory, eng_id, alice_id, "third")
+
+    async with factory() as db:
+        stack = await graph_service.get_undo_stack(db, eng_id, alice_id)
+    assert stack.depth == 3
+    assert [e.summary for e in stack.entries] == [
+        "Created host third",
+        "Created host second",
+        "Created host first",
+    ]
+
+    async with factory() as db:
+        result = await graph_service.pop_undo_stack(db, eng_id, alice_id)
+    assert result.undone is not None
+    assert result.undone.entity_id == third_id
+    assert result.stack.depth == 2
+
+    snapshot = await gw.read_graph(eng_id)
+    assert third_id not in {n.id for n in snapshot.nodes}
+
+
+@pytest.mark.asyncio
+async def test_personal_undo_never_reverts_teammate_work(
+    pg_two_members: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Headline §8.2 acceptance test: A creates host-1; B edits it; A's undo of
+    that create is reported stale + skipped, and B's edit survives — never
+    silently reverted."""
+    factory, eng_id, alice_id, bob_id = pg_two_members
+    _patch_writer_factory(factory, monkeypatch)
+
+    host_id = await _create_node(factory, eng_id, alice_id, "host-1")
+
+    # Bob edits host-1's label (a teammate write after Alice's create).
+    async with factory() as db:
+        await graph_service.update_node(
+            db,
+            engagement_id=eng_id,
+            node_id=host_id,
+            user_id=bob_id,
+            payload=NodeUpdate(label="host-1-bob-edited"),
+        )
+
+    # Alice pops her stack — her create entry must be skipped as stale, not applied.
+    async with factory() as db:
+        result = await graph_service.pop_undo_stack(db, eng_id, alice_id)
+    assert result.undone is None, "Alice's undo must NOT apply over Bob's later edit"
+    assert [e.entity_id for e in result.skipped_stale] == [host_id]
+    assert result.skipped_stale[0].stale is True
+
+    # Bob's edit survives in the live graph (NOT reverted).
+    snapshot = await gw.read_graph(eng_id)
+    host = next((n for n in snapshot.nodes if n.id == host_id), None)
+    assert host is not None, "host-1 must still be live (Bob's edit was not reverted)"
+    assert host.label == "host-1-bob-edited"
+
+
+@pytest.mark.asyncio
+async def test_stack_caps_at_twenty(
+    pg_two_members: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """25 writes by one user → only the most recent 20 remain on the stack."""
+    factory, eng_id, alice_id, _ = pg_two_members
+    _patch_writer_factory(factory, monkeypatch)
+
+    for i in range(25):
+        await _create_node(factory, eng_id, alice_id, f"write-{i}")
+
+    async with factory() as db:
+        stack = await graph_service.get_undo_stack(db, eng_id, alice_id)
+    assert stack.depth == 20
+    assert stack.entries[0].summary == "Created host write-24"
+    assert stack.entries[-1].summary == "Created host write-5"
+
+
+@pytest.mark.asyncio
+async def test_personal_undo_empty_stack_returns_undone_null(
+    pg_two_members: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member with no writes pops their empty stack → undone null, depth 0."""
+    factory, eng_id, _, bob_id = pg_two_members
+    _patch_writer_factory(factory, monkeypatch)
+
+    async with factory() as db:
+        result = await graph_service.pop_undo_stack(db, eng_id, bob_id)
+    assert result.undone is None
+    assert result.skipped_stale == []
+    assert result.stack.depth == 0
+
+
+@pytest.mark.asyncio
+async def test_engagement_cascade_deletes_stack_rows(
+    pg_two_members: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID, uuid.UUID],
+) -> None:
+    """Deleting an engagement cascades to its graph_user_undo_stack rows (FK CASCADE).
+
+    Exercised against real Postgres because SQLite does not enforce FK constraints
+    at runtime.
+    """
+    factory, eng_id, alice_id, _ = pg_two_members
+
+    async with factory() as db:
+        for i in range(2):
+            await repo.push_undo_entry(
+                db,
+                engagement_id=eng_id,
+                user_id=alice_id,
+                op_type="create_node",
+                entity_kind="node",
+                entity_id=uuid.uuid4(),
+                target_updated_at=datetime.now(UTC),
+                summary=f"row-{i}",
+            )
+        await db.commit()
+
+    async with factory() as db:
+        before = await repo.list_active_undo_stack(db, eng_id, alice_id)
+    assert len(before) == 2
+
+    # Delete the engagement — the ON DELETE CASCADE FK must clean up stack rows.
+    async with factory() as db:
+        await db.execute(delete(eng_models.Engagement).where(eng_models.Engagement.id == eng_id))
+        await db.commit()
+
+    async with factory() as db:
+        after = await repo.list_active_undo_stack(db, eng_id, alice_id)
+    assert after == []

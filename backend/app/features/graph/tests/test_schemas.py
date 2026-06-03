@@ -24,6 +24,10 @@ from app.features.graph.schemas import (
     NodeHistoryEntry,
     NodeType,
     NodeUpdate,
+    UndoOpType,
+    UndoResult,
+    UndoStack,
+    UndoStackEntry,
 )
 
 # ---------------------------------------------------------------------------
@@ -304,3 +308,46 @@ def test_graph_history_empty() -> None:
     gh = GraphHistory(deleted_nodes=[], node_history=[])
     assert gh.deleted_nodes == []
     assert gh.node_history == []
+
+
+# ---------------------------------------------------------------------------
+# Personal undo-stack schemas (Slice 09)
+# ---------------------------------------------------------------------------
+
+
+def test_undo_stack_entry_maps_from_attributes() -> None:
+    """UndoStackEntry maps from an ORM-like row; stale is required and carried through."""
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        op_type="create_node",
+        entity_kind="node",
+        entity_id=uuid.uuid4(),
+        summary="Created host 10.0.0.5",
+        recorded_at=datetime.now(UTC),
+        stale=True,
+    )
+    entry = UndoStackEntry.model_validate(row)
+    assert entry.op_type is UndoOpType.create_node
+    assert entry.stale is True
+
+
+def test_undo_stack_entry_requires_stale() -> None:
+    """stale is a required field (contract) — omitting it is a validation error."""
+    with pytest.raises(ValidationError):
+        UndoStackEntry.model_validate(
+            {
+                "id": uuid.uuid4(),
+                "op_type": "create_node",
+                "entity_kind": "node",
+                "entity_id": uuid.uuid4(),
+                "summary": "Created host 10.0.0.5",
+                "recorded_at": datetime.now(UTC),
+            }
+        )
+
+
+def test_undo_result_undone_null_is_allowed() -> None:
+    """A pop with nothing to undo carries undone=None (Decision 2, not an error)."""
+    result = UndoResult(undone=None, skipped_stale=[], stack=UndoStack(depth=0, entries=[]))
+    assert result.undone is None
+    assert result.stack.depth == 0

@@ -176,3 +176,66 @@ class GraphHistory(BaseModel):
 
     deleted_nodes: list[Node]
     node_history: list[NodeHistoryEntry]
+
+
+# ---------------------------------------------------------------------------
+# Personal undo-stack schemas (Slice 09)
+# ---------------------------------------------------------------------------
+
+
+class UndoOpType(StrEnum):
+    """The kind of human graph write recorded on a personal undo-stack entry."""
+
+    create_node = "create_node"
+    update_node = "update_node"
+    delete_node = "delete_node"
+    create_edge = "create_edge"
+    delete_edge = "delete_edge"
+
+
+class EntityKind(StrEnum):
+    """Whether an undo-stack entry targets a node or an edge."""
+
+    node = "node"
+    edge = "edge"
+
+
+class UndoStackEntry(BaseModel):
+    """A single entry on the calling user's personal undo stack.
+
+    Maps from the ``GraphUserUndoStack`` ORM row (``from_attributes=True``). The
+    ``stale`` flag is computed by the service against current graph state and is a
+    REQUIRED field (matching the contract) — callers always receive it, so the UI
+    never has to guess whether an entry is poppable.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    op_type: UndoOpType
+    entity_kind: EntityKind
+    entity_id: UUID
+    summary: str
+    recorded_at: datetime
+    stale: bool
+
+
+class UndoStack(BaseModel):
+    """The calling user's current personal undo stack, newest-first."""
+
+    depth: int
+    entries: list[UndoStackEntry]
+
+
+class UndoResult(BaseModel):
+    """Result of popping the personal undo stack.
+
+    ``undone`` is the entry that was reverted, or ``None`` when there was nothing
+    left to undo (empty stack, or every remaining entry was stale and dropped).
+    ``skipped_stale`` lists entries dropped as stale during this pop. ``stack`` is
+    the refreshed (possibly empty) stack so the client can update the Undo control.
+    """
+
+    undone: UndoStackEntry | None
+    skipped_stale: list[UndoStackEntry]
+    stack: UndoStack

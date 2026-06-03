@@ -240,3 +240,43 @@ test.describe('Graph canvas visualization journey', () => {
     await expect(graphSection2.getByTestId('graph-canvas-empty')).not.toBeVisible()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Journey C — Slice 09 personal undo stack (toolbar Undo button)
+// ---------------------------------------------------------------------------
+
+test.describe('Personal undo stack journey', () => {
+  test('admin undoes their last writes one-by-one until the stack drains', async ({
+    page,
+  }) => {
+    test.skip(!STACK_AVAILABLE, 'Set E2E_STACK=1 to run against the compose stack')
+
+    await loginAs(page, ADMIN_USERNAME, ADMIN_PASSWORD)
+    const graphSection = await createEngagementAndOpenGraph(
+      page,
+      `Graph E2E undo ${Date.now()}`,
+    )
+
+    const undoButton = graphSection.getByRole('button', { name: 'Undo my last change' })
+
+    // Empty engagement: the Undo button starts at zero and is disabled.
+    await expect(undoButton).toHaveText('Undo (0)')
+    await expect(undoButton).toBeDisabled()
+
+    // Add two nodes — the personal stack depth climbs to 2.
+    await addNode(page, graphSection, 'host', 'undo-host-1')
+    await addNode(page, graphSection, 'host', 'undo-host-2')
+    await expect(undoButton).toHaveText('Undo (2)', { timeout: 8_000 })
+    await expect(undoButton).toBeEnabled()
+
+    // Press Undo twice: each press reverses the most recent write, newest-first.
+    await undoButton.click()
+    await expect(undoButton).toHaveText('Undo (1)', { timeout: 8_000 })
+
+    await undoButton.click()
+    await expect(undoButton).toHaveText('Undo (0)', { timeout: 8_000 })
+
+    // The stack has drained — the button disables again.
+    await expect(undoButton).toBeDisabled()
+  })
+})

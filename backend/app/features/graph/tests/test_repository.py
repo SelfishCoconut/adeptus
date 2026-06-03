@@ -11,6 +11,7 @@ re-creating the same triple (SQLAlchemy renders ``postgresql_where`` only for Po
 """
 
 import asyncio
+from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -19,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.features.graph import repository as repo
-from app.features.graph.models import GraphEdge, GraphNode
+from app.features.graph.models import GraphEdge, GraphNode, GraphUserUndoStack
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -462,3 +463,99 @@ async def test_get_node_and_get_edge(db_session: AsyncSession) -> None:
     assert _uid(fetched_edge) == _uid(edge)
 
     assert await repo.get_edge(db_session, uuid4()) is None
+
+
+# ---------------------------------------------------------------------------
+# Personal undo stack (Slice 09)
+# ---------------------------------------------------------------------------
+
+
+async def _push(
+    db: AsyncSession,
+    *,
+    engagement_id: UUID,
+    user_id: UUID,
+    op_type: str = "create_node",
+    entity_kind: str = "node",
+    entity_id: UUID | None = None,
+    summary: str = "Created host 10.0.0.5",
+) -> GraphUserUndoStack:
+    """Helper: push one personal-undo entry."""
+    return await repo.push_undo_entry(
+        db,
+        engagement_id=engagement_id,
+        user_id=user_id,
+        op_type=op_type,
+        entity_kind=entity_kind,
+        entity_id=entity_id or uuid4(),
+        target_updated_at=datetime.now(UTC),
+        summary=summary,
+    )
+
+
+async def test_push_and_list_active_stack_newest_first(db_session: AsyncSession) -> None:
+    """Pushed entries come back active, newest-first."""
+    eng_id, user_id = uuid4(), uuid4()
+
+    first = await _push(db_session, engagement_id=eng_id, user_id=user_id, summary="first")
+    second = await _push(db_session, engagement_id=eng_id, user_id=user_id, summary="second")
+    third = await _push(db_session, engagement_id=eng_id, user_id=user_id, summary="third")
+
+    stack = await repo.list_active_undo_stack(db_session, eng_id, user_id)
+    assert [e.summary for e in stack] == ["third", "second", "first"]
+    assert {e.id for e in stack} == {first.id, second.id, third.id}
+
+    top = await repo.get_top_active_undo_entry(db_session, eng_id, user_id)
+    assert top is not None
+    assert top.id == third.id
+
+
+async def test_push_trims_to_twenty(db_session: AsyncSession) -> None:
+    """The active stack never exceeds 20; oldest active rows are trimmed."""
+    eng_id, user_id = uuid4(), uuid4()
+
+    for i in range(25):
+        await _push(db_session, engagement_id=eng_id, user_id=user_id, summary=f"write-{i}")
+
+    stack = await repo.list_active_undo_stack(db_session, eng_id, user_id)
+    assert len(stack) == 20
+    # Newest 20 retained (write-24 .. write-5); the 5 oldest dropped.
+    assert stack[0].summary == "write-24"
+    assert stack[-1].summary == "write-5"
+
+
+async def test_stack_is_scoped_per_user_and_engagement(db_session: AsyncSession) -> None:
+    """A stack lists only the owner's writes in the given engagement."""
+    eng_a, eng_b = uuid4(), uuid4()
+    user_a, user_b = uuid4(), uuid4()
+
+    await _push(db_session, engagement_id=eng_a, user_id=user_a, summary="A/engA")
+    await _push(db_session, engagement_id=eng_a, user_id=user_b, summary="B/engA")
+    await _push(db_session, engagement_id=eng_b, user_id=user_a, summary="A/engB")
+
+    a_eng_a = await repo.list_active_undo_stack(db_session, eng_a, user_a)
+    assert [e.summary for e in a_eng_a] == ["A/engA"]
+
+    b_eng_a = await repo.list_active_undo_stack(db_session, eng_a, user_b)
+    assert [e.summary for e in b_eng_a] == ["B/engA"]
+
+    a_eng_b = await repo.list_active_undo_stack(db_session, eng_b, user_a)
+    assert [e.summary for e in a_eng_b] == ["A/engB"]
+
+
+async def test_mark_undone_removes_from_active_stack(db_session: AsyncSession) -> None:
+    """Marking an entry undone removes it from the active stack but keeps the row."""
+    eng_id, user_id = uuid4(), uuid4()
+
+    await _push(db_session, engagement_id=eng_id, user_id=user_id, summary="keep")
+    top_entry = await _push(db_session, engagement_id=eng_id, user_id=user_id, summary="pop-me")
+
+    top = await repo.get_top_active_undo_entry(db_session, eng_id, user_id)
+    assert top is not None and top.id == top_entry.id
+
+    await repo.mark_undo_entry_undone(db_session, top)
+
+    remaining = await repo.list_active_undo_stack(db_session, eng_id, user_id)
+    assert [e.summary for e in remaining] == ["keep"]
+    # Row is retained (undone=true), not deleted.
+    assert top.undone is True

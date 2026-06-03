@@ -35,6 +35,8 @@ from app.features.graph.schemas import (
     Node,
     NodeCreate,
     NodeUpdate,
+    UndoResult,
+    UndoStack,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["graph"])
@@ -310,5 +312,65 @@ async def undo_edge(
         db,
         engagement_id=engagement_id,
         edge_id=edge_id,
+        user_id=current_user.id,  # type: ignore[arg-type]
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/engagements/{engagement_id}/graph/undo-stack
+# operationId: get_undo_stack
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/engagements/{engagement_id}/graph/undo-stack",
+    response_model=UndoStack,
+    operation_id="get_undo_stack",
+)
+async def get_undo_stack(
+    engagement_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> UndoStack:
+    """List the calling user's personal undo stack for this engagement (newest-first).
+
+    Membership-gated (§17.1 — non-member returns 404) and scoped to the caller, so
+    members never see each other's stacks. Read-only path: archived engagements are
+    accessible. Each entry's ``stale`` flag is computed against current graph state.
+    """
+    return await service.get_undo_stack(
+        db,
+        engagement_id=engagement_id,
+        user_id=current_user.id,  # type: ignore[arg-type]
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/engagements/{engagement_id}/graph/undo-stack/pop
+# operationId: pop_undo_stack
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/engagements/{engagement_id}/graph/undo-stack/pop",
+    response_model=UndoResult,
+    operation_id="pop_undo_stack",
+)
+async def pop_undo_stack(
+    engagement_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> UndoResult:
+    """Undo the caller's most recent still-valid personal write (serialized through
+    the single writer).
+
+    Always returns 200 (Decision 2): ``undone`` is null when there was nothing left
+    to undo (empty stack, or every remaining entry was stale and dropped). Stale
+    entries are surfaced in ``skipped_stale`` and never silently revert a teammate's
+    later work (§8.2). Returns 409 for archived engagements; 404 for non-members.
+    """
+    return await service.pop_undo_stack(
+        db,
+        engagement_id=engagement_id,
         user_id=current_user.id,  # type: ignore[arg-type]
     )
