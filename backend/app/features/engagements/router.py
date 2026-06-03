@@ -27,6 +27,8 @@ from app.features.engagements.schemas import (
     AddMemberRequest,
     EngagementCreate,
     EngagementDetail,
+    EngagementPauseRequest,
+    EngagementPauseState,
     EngagementSummary,
     EngagementUpdate,
     MemberEntry,
@@ -134,3 +136,27 @@ async def remove_member(
     """Remove a member from the engagement (owner only)."""
     await service.remove_member(db, current_user, engagement_id, user_id)
     await db.commit()
+
+
+@router.post(
+    "/{engagement_id}/pause",
+    response_model=EngagementPauseState,
+    operation_id="set_engagement_paused",
+)
+async def set_engagement_paused(
+    engagement_id: UUID,
+    body: EngagementPauseRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> EngagementPauseState:
+    """Set or clear the engagement-wide tool pause.
+
+    When ``paused=true``, every in-flight tool run for the engagement is killed,
+    every queued run is de-queued, and all subsequent POST /tool-runs are
+    rejected 409 until resumed.  When ``paused=false``, new runs are allowed
+    again (already-killed runs are NOT resumed).  Membership-gated (§17.1).
+    Idempotent: setting the same state twice is a no-op success.
+    """
+    result = await service.set_engagement_paused(db, current_user, engagement_id, body.paused)
+    await db.commit()
+    return result

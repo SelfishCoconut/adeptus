@@ -28,6 +28,7 @@ from app.features.engagements.schemas import (
     AddMemberRequest,
     EngagementCreate,
     EngagementDetail,
+    EngagementPauseState,
     EngagementSummary,
     EngagementUpdate,
     MemberEntry,
@@ -240,6 +241,58 @@ async def add_member(
         username=target_user.username,
         role=cast(Literal["owner", "member"], new_member.role),
         joined_at=new_member.joined_at,
+    )
+
+
+async def set_engagement_paused(
+    db: AsyncSession,
+    caller: User,
+    engagement_id: UUID,
+    paused: bool,
+) -> EngagementPauseState:
+    """Set or clear the engagement-wide tool pause.
+
+    Dependency direction (Slice 06 cite): the engagements service emits
+    ``engagement_paused_changed``; the mcp listener (registered at the
+    composition root in ``app/main.py``) performs the in-process kills and
+    returns ``(killed_running, dequeued)`` counts via the event-dispatch return
+    value.  The engagements feature does NOT import the mcp feature — the
+    dependency flows mcp → engagements.
+
+    Membership gate: non-members receive NotFoundError (404) and cannot infer
+    whether the engagement exists (§17.1 isolation posture).  Any member (not
+    owner-only) may pause/resume — Decision 7.
+
+    Idempotent: setting the same pause state twice is a no-op success.  On
+    resume (``paused=False``) counts are ``(0, 0)`` because ``set_paused`` on
+    the concurrency module only clears the flag when resuming.
+    """
+    row = await repo.get_engagement_for_member(db, engagement_id, cast(UUID, caller.id))
+    if row is None:
+        raise NotFoundError("Engagement not found")
+
+    engagement, _ = row
+
+    # Persist the paused flag.  Even if the value is unchanged (idempotent)
+    # we still run the DB update so the response reflects the current DB state.
+    updated = await repo.update_paused(db, engagement_id, paused)
+    if updated is None:  # extremely unlikely race
+        raise NotFoundError("Engagement not found")
+
+    # Emit the event; collect (killed_running, dequeued) from listeners.
+    # The recommended approach (Slice 06 task 7): the mcp listener calls
+    # concurrency.set_paused and returns its (killed_running, dequeued) tuple.
+    # We aggregate all listener results; in production there is exactly one
+    # listener (mcp), so we sum across all of them for robustness.
+    results = events.emit_engagement_paused_changed(engagement_id, paused)
+    killed_running = sum(r[0] for r in results)
+    dequeued = sum(r[1] for r in results)
+
+    return EngagementPauseState(
+        engagement_id=engagement_id,
+        paused=paused,
+        killed_running=killed_running,
+        dequeued=dequeued,
     )
 
 
