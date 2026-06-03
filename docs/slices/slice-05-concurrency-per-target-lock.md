@@ -343,3 +343,5 @@ No. This slice does not touch auth, MCP subprocess spawning semantics (the exist
 - 2026-06-02T22:39:21Z — 2b0eb41 chore(claude): fix and harden .claude tooling (#15)
 - 2026-06-02T22:40:03Z — e713ce5 docs(slice-05): spec + plan status in-progress (#16)
 - 2026-06-02T22:41:32Z — e713ce5 docs(slice-05): spec + plan status in-progress (#16)
+- 2026-06-03T06:21:12Z — 6eb1773 test(mcp): concurrency serialization integration + e2e tests (#16)
+- 2026-06-03T07:09:02Z — 7486a5c fix(mcp): enforce queue cap before async run admission (#16)
