@@ -35,7 +35,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_sessionmaker
-from app.core.errors import BadRequestError, ForbiddenError, NotFoundError
+from app.core.errors import AdeptusError, BadRequestError, ForbiddenError, NotFoundError
 from app.features.auth import repository as auth_repo
 from app.features.engagements import repository as eng_repo
 from app.features.mcp import concurrency, subprocess_manager
@@ -215,6 +215,19 @@ class SandboxGuardViolation(ForbiddenError):
     """
 
     def __init__(self, message: str = "Target is outside the sandbox allow-list") -> None:
+        super().__init__(message)
+
+
+class TimeoutDecisionConflict(AdeptusError):
+    """Raised by submit_timeout_decision when no run is awaiting a timeout decision.
+
+    Covers: the run already resolved, was killed, or was resolved by another member's
+    concurrent decision.  Translated to HTTP 409 inline in the router (same pattern
+    as ToolQueueFullError → 429 and McpServerDown → 503 — no core error type for 409
+    would be added without an ADR, so the translation lives in the router).
+    """
+
+    def __init__(self, message: str = "Run is not awaiting a timeout decision") -> None:
         super().__init__(message)
 
 
@@ -983,7 +996,11 @@ async def _stream_to_channel(  # noqa: C901 — intentionally complex; split wou
                     )
 
                     # Step 4: Wait indefinitely for the human's decision (Risk 8).
-                    decision = await concurrency.await_timeout_decision(tool_run_id)
+                    # await_timeout_decision returns (decision, extend_seconds) so the
+                    # caller-supplied extend window reaches this task directly — the
+                    # rendezvous carries the value set by submit_timeout_decision (REST
+                    # caller passes TimeoutDecision.extend_seconds through the service).
+                    decision, _extend_secs = await concurrency.await_timeout_decision(tool_run_id)
                     concurrency.cleanup_decision(tool_run_id)
                     _has_decision_rendezvous = False
 
@@ -1019,7 +1036,9 @@ async def _stream_to_channel(  # noqa: C901 — intentionally complex; split wou
                     # extend or wait — re-acquire a slot through the normal path.
                     # (This re-acquire respects FIFO, host lock, and pause flag.)
                     if decision == "extend":
-                        extend_seconds: float = 30.0  # default; caller may override via REST
+                        # Use the caller-supplied extend_seconds from the rendezvous
+                        # (set by the REST handler from TimeoutDecision.extend_seconds).
+                        extend_seconds: float = float(_extend_secs)
                         new_deadline: float | None = _time.monotonic() + extend_seconds
                     else:
                         # decision == "wait" — disable the deadline entirely.
@@ -1435,6 +1454,134 @@ async def get_tool_queue_snapshot(
     # reflects the canonical DB configuration, not the stale in-process default.
     snap = snap.model_copy(update={"slot_limit": int(engagement_obj.concurrency_slot_limit)})
     return snap
+
+
+async def kill_tool_run(
+    db: AsyncSession,
+    *,
+    tool_run_id: UUID,
+    user_id: UUID,
+) -> ToolRunResult:
+    """Stop a single tool run, enforcing engagement membership.
+
+    Flow:
+      1. Fetch the run by id; if missing → EngagementNotFound (404).
+      2. Membership check — same chokepoint as get_tool_run (§17.1/§4).
+      3. Call concurrency.kill_run(tool_run_id) to determine the run's current state.
+         - "cancelled": the running task's finally will persist 'killed'.  Return the
+           current row immediately (the task may still be 'running' briefly; spec says
+           return current state — do NOT block waiting for the task).
+         - "dequeued": the queued run's acquire raises RunKilled and its task persists
+           'killed' IF the task is still alive.  The service also writes 'killed' here
+           to guarantee convergence (the task may have already finished).  Writes are
+           safe because update_tool_run_result is idempotent on the same terminal value.
+         - "awaiting": the parked task resolves itself killed via the rendezvous.
+           Return the current row.
+         - "absent": already terminal (or never existed beyond membership gate) —
+           idempotent success; return the current row.
+      4. Re-read and return the current row as ToolRunResult.
+
+    Returns:
+        ToolRunResult — current state of the run.
+
+    Raises:
+        EngagementNotFound: tool_run_id does not exist OR user_id is not a member
+                            of the run's engagement (404, no existence disclosure).
+    """
+    # Step 1: fetch the run.
+    run = await mcp_repo.get_tool_run_by_id(db, tool_run_id)
+    if run is None:
+        raise EngagementNotFound("Tool run not found")
+
+    # Step 2: membership check.
+    if await eng_repo.get_engagement_for_member(db, cast(UUID, run.engagement_id), user_id) is None:
+        raise EngagementNotFound("Tool run not found")
+
+    # Step 3: attempt to kill via the concurrency registry.
+    outcome = concurrency.kill_run(tool_run_id)
+    logger.info("kill_tool_run tool_run_id=%s outcome=%s", tool_run_id, outcome)
+
+    if outcome == "dequeued":
+        # The run's ticket was removed from the FIFO queue; its task (if alive) will
+        # also persist 'killed' via RunKilled handling.  Write here too to guarantee
+        # the row converges to 'killed' (spec: "service must converge to a killed row").
+        now = datetime.now(tz=UTC)
+        current_status = getattr(run, "status", None)
+        if current_status not in ("killed", "completed", "failed", "timed_out"):
+            try:
+                await mcp_repo.update_tool_run_result(
+                    db,
+                    tool_run_id,
+                    exit_code=1,
+                    stdout="",
+                    stderr="killed by user",
+                    finished_at=now,
+                    status="killed",
+                )
+                await db.commit()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "kill_tool_run: failed to persist 'killed' (dequeued) for tool_run_id=%s",
+                    tool_run_id,
+                )
+
+    # Step 4: re-read the current row and return it.
+    latest = await mcp_repo.get_tool_run_by_id(db, tool_run_id)
+    if latest is not None:
+        run = latest
+    return _row_to_result(run)
+
+
+async def submit_timeout_decision(
+    db: AsyncSession,
+    *,
+    tool_run_id: UUID,
+    user_id: UUID,
+    decision: Literal["kill", "extend", "wait"],
+    extend_seconds: int = 30,
+) -> ToolRunResult:
+    """Submit a timeout decision for a run in awaiting_decision state.
+
+    Flow:
+      1. Fetch the run by id; if missing → EngagementNotFound (404).
+      2. Membership check — same chokepoint as get_tool_run (§17.1/§4).
+      3. Forward to concurrency.submit_timeout_decision.
+         Returns False when no run is awaiting a decision (already resolved,
+         wrong state, or unknown); the router translates this to 409.
+      4. Re-read and return the current row.
+
+    Returns:
+        ToolRunResult — current state; the parked task may still be 'awaiting_decision'
+        for a brief window while it acts on the decision.
+
+    Raises:
+        EngagementNotFound: tool_run_id does not exist OR user_id is not a member.
+        TimeoutDecisionConflict: the run is not currently awaiting a decision
+                                 (→ HTTP 409 in the router).
+    """
+    # Step 1: fetch the run.
+    run = await mcp_repo.get_tool_run_by_id(db, tool_run_id)
+    if run is None:
+        raise EngagementNotFound("Tool run not found")
+
+    # Step 2: membership check.
+    if await eng_repo.get_engagement_for_member(db, cast(UUID, run.engagement_id), user_id) is None:
+        raise EngagementNotFound("Tool run not found")
+
+    # Step 3: forward to the concurrency rendezvous.
+    accepted = concurrency.submit_timeout_decision(
+        tool_run_id, decision, extend_seconds=extend_seconds
+    )
+    if not accepted:
+        raise TimeoutDecisionConflict(
+            f"Run {tool_run_id} is not currently awaiting a timeout decision"
+        )
+
+    # Step 4: re-read the current row and return it.
+    latest = await mcp_repo.get_tool_run_by_id(db, tool_run_id)
+    if latest is not None:
+        run = latest
+    return _row_to_result(run)
 
 
 async def fetch_tool_run_row(db: AsyncSession, tool_run_id: UUID) -> ToolRun | None:

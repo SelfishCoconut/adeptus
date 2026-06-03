@@ -265,10 +265,13 @@ class _DecisionRendezvous:
 
     ``event`` is set when a decision arrives; ``decision`` holds the value.
     ``resolved`` guards against a concurrent double-submit (first writer wins).
+    ``extend_seconds`` is the additional time granted when decision == 'extend';
+    ignored for 'kill' / 'wait' decisions.
     """
 
     event: asyncio.Event = field(default_factory=asyncio.Event)
     decision: Literal["kill", "extend", "wait"] | None = None
+    extend_seconds: int = 30
     resolved: bool = False
 
 
@@ -961,11 +964,15 @@ def release_for_decision(
     _decisions[tool_run_id] = _DecisionRendezvous()
 
 
-async def await_timeout_decision(tool_run_id: UUID) -> Literal["kill", "extend", "wait"]:
+async def await_timeout_decision(
+    tool_run_id: UUID,
+) -> tuple[Literal["kill", "extend", "wait"], int]:
     """Block until a human submits a timeout decision for *tool_run_id*.
 
     No deadline — the prompt stays open indefinitely (Decision 6 / Risk 8).
-    Returns the decision string once ``submit_timeout_decision`` fires.
+    Returns ``(decision, extend_seconds)`` once ``submit_timeout_decision`` fires.
+    ``extend_seconds`` is only meaningful when ``decision == "extend"``; callers
+    may ignore it for ``"kill"`` / ``"wait"`` decisions.
 
     Raises ``KeyError`` if no rendezvous exists for this run (programming error —
     call ``release_for_decision`` first).
@@ -975,15 +982,24 @@ async def await_timeout_decision(tool_run_id: UUID) -> Literal["kill", "extend",
     # The decision must be set by submit_timeout_decision / _submit_decision_internal
     # before the event is fired.
     assert rendezvous.decision is not None  # invariant
-    return rendezvous.decision
+    return rendezvous.decision, rendezvous.extend_seconds
 
 
-def submit_timeout_decision(tool_run_id: UUID, decision: Literal["kill", "extend", "wait"]) -> bool:
+def submit_timeout_decision(
+    tool_run_id: UUID,
+    decision: Literal["kill", "extend", "wait"],
+    *,
+    extend_seconds: int = 30,
+) -> bool:
     """Submit a human timeout decision to the parked run's rendezvous.
 
     Returns ``True`` if the decision was accepted, ``False`` if no run is currently
     awaiting a decision for this ID (e.g. the run already resolved, was killed, or
     the ID is unknown).  The router translates ``False`` → HTTP 409.
+
+    ``extend_seconds`` is stored in the rendezvous so the streaming task can read
+    it after ``await_timeout_decision`` returns.  Only meaningful when
+    ``decision == "extend"``; ignored for ``"kill"`` / ``"wait"``.
 
     Idempotent against concurrent double-submit: the first writer wins; subsequent
     calls return ``False`` without touching the already-resolved rendezvous.
@@ -991,16 +1007,21 @@ def submit_timeout_decision(tool_run_id: UUID, decision: Literal["kill", "extend
     rendezvous = _decisions.get(tool_run_id)
     if rendezvous is None:
         return False
-    return _submit_decision_internal(tool_run_id, decision)
+    return _submit_decision_internal(tool_run_id, decision, extend_seconds=extend_seconds)
 
 
 def _submit_decision_internal(
-    tool_run_id: UUID, decision: Literal["kill", "extend", "wait"]
+    tool_run_id: UUID,
+    decision: Literal["kill", "extend", "wait"],
+    *,
+    extend_seconds: int = 30,
 ) -> bool:
     """Internal helper: set the decision on an existing rendezvous.
 
     Called by ``submit_timeout_decision``, ``kill_run`` (for awaiting-decision
     runs), and ``set_paused`` (same).  Returns False if already resolved.
+    ``extend_seconds`` is stored on the rendezvous so the streaming task reads
+    the caller-supplied value; defaults to 30 for internal kill/pause callers.
     """
     rendezvous = _decisions.get(tool_run_id)
     if rendezvous is None:
@@ -1009,6 +1030,7 @@ def _submit_decision_internal(
         return False  # First writer wins; concurrent double-submit is a no-op.
     rendezvous.resolved = True
     rendezvous.decision = decision
+    rendezvous.extend_seconds = extend_seconds
     rendezvous.event.set()
     return True
 

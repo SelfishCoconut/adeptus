@@ -335,7 +335,7 @@ async def test_await_timeout_decision_blocks_until_submit() -> None:
     decision_received: list[str] = []
 
     async def _await_decision() -> None:
-        d = await await_timeout_decision(run_id)
+        d, _ext = await await_timeout_decision(run_id)
         decision_received.append(d)
 
     decision_task = asyncio.create_task(_await_decision())
@@ -373,8 +373,31 @@ async def test_extend_decision_arrives() -> None:
     assert not decision_task.done()
 
     submit_timeout_decision(run_id, "extend")
-    d = await asyncio.wait_for(decision_task, timeout=1.0)
+    d, _ext = await asyncio.wait_for(decision_task, timeout=1.0)
     assert d == "extend"
+
+    task.cancel()
+    cleanup_decision(run_id)
+    unregister_run(run_id)
+
+
+async def test_extend_decision_carries_extend_seconds() -> None:
+    """submit_timeout_decision passes extend_seconds through to await_timeout_decision."""
+    eng = _eng()
+    run_id = _run_id()
+
+    handle = await _acquire(eng, slot_limit=1, tool_run_id=run_id)
+    task = _make_dummy_task()
+    register_run(eng, run_id, task)
+    release_for_decision(eng, run_id, handle)
+
+    decision_task = asyncio.create_task(await_timeout_decision(run_id))
+    await asyncio.sleep(0)
+
+    submit_timeout_decision(run_id, "extend", extend_seconds=90)
+    d, ext = await asyncio.wait_for(decision_task, timeout=1.0)
+    assert d == "extend"
+    assert ext == 90
 
     task.cancel()
     cleanup_decision(run_id)
@@ -395,7 +418,7 @@ async def test_wait_decision_arrives() -> None:
     await asyncio.sleep(0)
 
     submit_timeout_decision(run_id, "wait")
-    d = await asyncio.wait_for(decision_task, timeout=1.0)
+    d, _ext = await asyncio.wait_for(decision_task, timeout=1.0)
     assert d == "wait"
 
     task.cancel()
@@ -423,7 +446,7 @@ async def test_extend_decision_lets_task_reacquire() -> None:
 
     # Submit extend decision.
     submit_timeout_decision(run_id, "extend")
-    d = await await_timeout_decision(run_id)
+    d, _ext = await await_timeout_decision(run_id)
     assert d == "extend"
     cleanup_decision(run_id)
 
@@ -452,7 +475,7 @@ async def test_wait_decision_lets_task_reacquire() -> None:
 
     release_for_decision(eng, run_id, handle)
     submit_timeout_decision(run_id, "wait")
-    d = await await_timeout_decision(run_id)
+    d, _ext = await await_timeout_decision(run_id)
     assert d == "wait"
     cleanup_decision(run_id)
 
@@ -565,7 +588,7 @@ async def test_kill_awaiting_decision_run_returns_awaiting_and_resolves() -> Non
     result = kill_run(run_id)
     assert result == "awaiting"
 
-    d = await asyncio.wait_for(decision_task, timeout=1.0)
+    d, _ext = await asyncio.wait_for(decision_task, timeout=1.0)
     assert d == "kill"
 
     task.cancel()
@@ -685,7 +708,7 @@ async def test_set_paused_true_kills_awaiting_decision_runs() -> None:
     assert killed_running == 1
     assert dequeued == 0
 
-    d = await asyncio.wait_for(decision_task, timeout=1.0)
+    d, _ext = await asyncio.wait_for(decision_task, timeout=1.0)
     assert d == "kill"
 
     task.cancel()
@@ -826,7 +849,7 @@ async def test_double_submit_second_returns_false() -> None:
     assert second is False
 
     # The resolved decision is the first one.
-    d = await await_timeout_decision(run_id)
+    d, _ext = await await_timeout_decision(run_id)
     assert d == "kill"
 
     task.cancel()
@@ -870,7 +893,7 @@ async def test_slot_accounting_invariant_park_extend_complete() -> None:
 
     # Step 3: decision = extend → re-acquire.
     submit_timeout_decision(run_id, "extend")
-    d = await await_timeout_decision(run_id)
+    d, _ext = await await_timeout_decision(run_id)
     assert d == "extend"
     cleanup_decision(run_id)
 
