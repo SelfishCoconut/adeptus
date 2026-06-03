@@ -147,6 +147,7 @@ function setupMembershipDefaults(memberRole: 'owner' | 'member' = 'owner') {
       updated_at: '2026-01-01T00:00:00Z',
       member_role: memberRole,
       privacy_mode: 'local_only' as const,
+      concurrency_slot_limit: 3,
     },
     isLoading: false,
     isError: false,
@@ -367,6 +368,7 @@ describe('EngagementWorkspacePage', () => {
         updated_at: '2026-01-01T00:00:00Z',
         member_role: 'owner' as const,
         privacy_mode: 'cloud_enabled' as const,
+        concurrency_slot_limit: 3,
       },
       isLoading: false,
       isError: false,
@@ -450,5 +452,62 @@ describe('EngagementWorkspacePage', () => {
     renderPage()
 
     expect(screen.queryByRole('switch')).not.toBeInTheDocument()
+  })
+
+  it('owner sees the concurrency slot limit input with default value 3', () => {
+    mockedUseMe.mockReturnValue({
+      data: ADMIN_USER,
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    // setupMembershipDefaults sets concurrency_slot_limit: 3 and member_role: 'owner'
+
+    renderPage()
+
+    const slotInput = screen.getByRole('spinbutton', { name: /concurrent tool slots/i })
+    expect(slotInput).toBeInTheDocument()
+    expect(slotInput).toHaveValue(3)
+  })
+
+  it('non-owner cannot see the concurrency slot limit input', () => {
+    mockedUseMe.mockReturnValue({
+      data: { ...ADMIN_USER, role: 'user' as const },
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    setupMembershipDefaults('member')
+
+    renderPage()
+
+    expect(
+      screen.queryByRole('spinbutton', { name: /concurrent tool slots/i }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('changing the slot limit input calls updateEngagement mutation with the new value', async () => {
+    const user = userEvent.setup()
+    const mutate = vi.fn()
+    mockedUseMe.mockReturnValue({
+      data: ADMIN_USER,
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    mockedUseUpdateEngagement.mockReturnValue(updateMutation({ mutate }))
+
+    renderPage()
+
+    const slotInput = screen.getByRole('spinbutton', { name: /concurrent tool slots/i })
+    // Clear and type a valid value; the onChange fires on each keystroke.
+    await user.clear(slotInput)
+    await user.type(slotInput, '5')
+
+    // mutate should have been called with concurrency_slot_limit: 5
+    expect(mutate).toHaveBeenCalledWith({ concurrency_slot_limit: 5 })
   })
 })

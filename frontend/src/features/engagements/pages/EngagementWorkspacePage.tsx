@@ -5,6 +5,7 @@ import { TermsGate } from '@/features/auth/components/TermsGate'
 import { WorkspaceShell } from '@/features/workspace/WorkspaceShell'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
+import { Input } from '@/components/ui/input'
 import { useEngagement, useUpdateEngagement } from '../api'
 import { MembersList } from '../components/MembersList'
 import { InviteMemberForm } from '../components/InviteMemberForm'
@@ -21,6 +22,16 @@ export function EngagementWorkspacePage() {
   const handlePrivacyToggle = useCallback(
     (checked: boolean) => {
       updateEngagement.mutate({ privacy_mode: checked ? 'cloud_enabled' : 'local_only' })
+    },
+    [updateEngagement],
+  )
+
+  const handleSlotLimitChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const value = e.target.valueAsNumber
+      // Only submit when value is a valid integer in range 1–16.
+      if (!Number.isInteger(value) || value < 1 || value > 16) return
+      updateEngagement.mutate({ concurrency_slot_limit: value })
     },
     [updateEngagement],
   )
@@ -54,16 +65,34 @@ export function EngagementWorkspacePage() {
         engagementId={engagementId}
       />
       {engagementId && callerRole === 'owner' && (
-        <div className="flex items-center gap-2 border-b px-6 py-3">
-          <Switch
-            id="cloud-llm-toggle"
-            checked={isCloudEnabled}
-            onCheckedChange={handlePrivacyToggle}
-            disabled={updateEngagement.isPending}
-          />
-          <Label htmlFor="cloud-llm-toggle" className="cursor-pointer text-sm">
-            Enable cloud LLM
-          </Label>
+        <div className="flex flex-wrap items-center gap-6 border-b px-6 py-3">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="cloud-llm-toggle"
+              checked={isCloudEnabled}
+              onCheckedChange={handlePrivacyToggle}
+              disabled={updateEngagement.isPending}
+            />
+            <Label htmlFor="cloud-llm-toggle" className="cursor-pointer text-sm">
+              Enable cloud LLM
+            </Label>
+          </div>
+          <div className="flex items-center gap-2">
+            <Label htmlFor="concurrency-slot-limit" className="text-sm whitespace-nowrap">
+              Concurrent tool slots
+            </Label>
+            <Input
+              id="concurrency-slot-limit"
+              type="number"
+              min={1}
+              max={16}
+              defaultValue={engagement.data?.concurrency_slot_limit ?? 3}
+              disabled={updateEngagement.isPending}
+              onChange={handleSlotLimitChange}
+              className="w-20"
+              aria-label="Concurrent tool slots"
+            />
+          </div>
         </div>
       )}
       {engagementId && (
