@@ -270,6 +270,110 @@ async def _run_httpx(
 
 
 # ---------------------------------------------------------------------------
+# Heavy demo/test tool — run_httpx_heavy
+# ---------------------------------------------------------------------------
+# THROWAWAY DEMO TOOL — Slice 05 only.
+#
+# Purpose: make the per-engagement heavy-tool concurrency model observable
+# end-to-end.  Two ``run_httpx_heavy`` calls against the same sandbox host
+# will visibly serialize because the backend admission manager holds the
+# per-host lock for the full duration of ``hold_seconds``.
+#
+# This tool is superseded by real heavy tools (nmap, gobuster, etc.) that
+# land in Slice 26.  Remove or demote it to a test-only preset then.
+#
+# Design:
+#   1. Validate ``target`` (same shape/check as ``run_httpx``).
+#   2. Clamp ``hold_seconds`` to the range [1, 30] so no caller can wedge
+#      the slot for more than 30 s.
+#   3. Make a single httpx request to the target (same subprocess as the
+#      light tool) to prove the target is reachable.
+#   4. Sleep for the (clamped) ``hold_seconds`` while the slot is held.
+#
+# Sandbox-gating: ``target`` is guarded by the backend's
+# ``_enforce_sandbox_guard`` in ``service.execute_tool_run`` before this
+# tool handler is ever invoked.  The guard applies to every tool that carries
+# a ``target`` arg (generic guard at the service layer).  This tool NEVER
+# needs to call the guard itself — it is covered centrally.
+
+_HOLD_SECONDS_MIN: int = 1
+_HOLD_SECONDS_MAX: int = 30
+_HOLD_SECONDS_DEFAULT: int = 2
+
+
+async def _run_httpx_heavy(
+    arguments: dict[str, Any],
+    write_line: Callable[[str], None],
+    req_id: Any,
+) -> dict[str, Any]:
+    """Execute a bounded httpx request then hold the slot for ``hold_seconds``.
+
+    Parameters
+    ----------
+    arguments:
+        Parsed ``arguments`` from the JSON-RPC params.  Required fields:
+        ``target`` (str, non-empty).  Optional: ``hold_seconds`` (number,
+        clamped to [1, 30]; default 2).
+    write_line:
+        Same notification callback as ``_run_httpx``.
+    req_id:
+        The JSON-RPC request id echoed into notification ``params.id``.
+
+    Returns
+    -------
+    dict with ``exit_code``, ``stdout``, ``stderr`` — same shape as
+    ``_run_httpx``.
+    """
+    target = arguments.get("target")
+    if not isinstance(target, str) or not target:
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "run_httpx_heavy requires a non-empty 'target' string argument",
+        }
+
+    # Clamp hold_seconds to [_HOLD_SECONDS_MIN, _HOLD_SECONDS_MAX].
+    raw_hold = arguments.get("hold_seconds", _HOLD_SECONDS_DEFAULT)
+    try:
+        hold_seconds: float = float(raw_hold)
+    except (TypeError, ValueError):
+        hold_seconds = float(_HOLD_SECONDS_DEFAULT)
+    hold_seconds = max(_HOLD_SECONDS_MIN, min(_HOLD_SECONDS_MAX, hold_seconds))
+
+    # Step 1: run the httpx probe to verify the target is reachable.
+    probe_result = await _run_httpx(
+        {"target": target, "flags": ["-sc", "-title"]},
+        write_line,
+        req_id,
+    )
+
+    if probe_result["exit_code"] != 0:
+        # Return the probe failure immediately — no hold needed.
+        return probe_result
+
+    # Step 2: emit a notification that we are entering the hold phase.
+    hold_notification = {
+        "jsonrpc": "2.0",
+        "method": "tools/output",
+        "params": {
+            "id": req_id,
+            "type": "stdout",
+            "data": f"[run_httpx_heavy] holding slot for {hold_seconds:.1f}s ...",
+        },
+    }
+    write_line(json.dumps(hold_notification))
+
+    # Step 3: hold for the bounded duration so the slot is visibly occupied.
+    await asyncio.sleep(hold_seconds)
+
+    return {
+        "exit_code": probe_result["exit_code"],
+        "stdout": probe_result["stdout"],
+        "stderr": probe_result["stderr"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # JSON-RPC dispatch
 # ---------------------------------------------------------------------------
 
@@ -305,7 +409,11 @@ async def _handle_request(
     if not isinstance(arguments, dict):
         arguments = {}
 
-    if tool_name != "run_httpx":
+    if tool_name == "run_httpx":
+        result = await _run_httpx(arguments, write_line, req_id)
+    elif tool_name == "run_httpx_heavy":
+        result = await _run_httpx_heavy(arguments, write_line, req_id)
+    else:
         return {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -315,7 +423,6 @@ async def _handle_request(
             },
         }
 
-    result = await _run_httpx(arguments, write_line, req_id)
     return {
         "jsonrpc": "2.0",
         "id": req_id,

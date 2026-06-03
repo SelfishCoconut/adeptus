@@ -23,6 +23,8 @@ if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
 from server import (  # noqa: E402
+    _HOLD_SECONDS_MAX,
+    _HOLD_SECONDS_MIN,
     JSONRPC_INVALID_REQUEST,
     JSONRPC_PARSE_ERROR,
     MAX_OUTPUT_BYTES,
@@ -30,6 +32,7 @@ from server import (  # noqa: E402
     _cap_buffer,
     _handle_request,
     _run_httpx,
+    _run_httpx_heavy,
     main,
 )
 
@@ -711,3 +714,226 @@ class TestMainLoop:
             await main()
 
         mock_write_transport.write.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _run_httpx_heavy — unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunHttpxHeavy:
+    """Tests for the run_httpx_heavy demo/test tool handler.
+
+    All tests mock asyncio.create_subprocess_exec (via the _run_httpx codepath)
+    and asyncio.sleep so no real network or wall-clock delay occurs.
+    """
+
+    @pytest.mark.asyncio
+    async def test_missing_target_returns_error(self) -> None:
+        """Missing target arg is rejected with exit_code 1 and no subprocess."""
+        with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            result = await _run_httpx_heavy({}, _noop_write, req_id=1)
+
+        assert result["exit_code"] == 1
+        assert "target" in result["stderr"].lower()
+        mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_target_returns_error(self) -> None:
+        """Empty target string is rejected with exit_code 1 and no subprocess."""
+        with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            result = await _run_httpx_heavy({"target": ""}, _noop_write, req_id=2)
+
+        assert result["exit_code"] == 1
+        assert "target" in result["stderr"].lower()
+        mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_happy_path_holds_for_hold_seconds(self) -> None:
+        """On success: probe runs, sleep is called for the (clamped) hold_seconds."""
+        mock_proc = _make_mock_process(
+            stdout_lines=[b"http://localhost:3000 [200]\n"],
+            returncode=0,
+        )
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        notifications: list[dict[str, Any]] = []
+
+        def _capture(line: str) -> None:
+            notifications.append(json.loads(line))
+
+        with (
+            patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("server.asyncio.sleep", side_effect=_fake_sleep),
+        ):
+            mock_exec.return_value = mock_proc
+            result = await _run_httpx_heavy(
+                {"target": "http://localhost:3000", "hold_seconds": 2},
+                _capture,
+                req_id=10,
+            )
+
+        assert result["exit_code"] == 0
+        assert len(sleep_calls) == 1
+        assert sleep_calls[0] == 2.0
+        # At least one notification is the hold-phase message.
+        hold_notes = [
+            n for n in notifications if "holding slot" in n.get("params", {}).get("data", "")
+        ]
+        assert len(hold_notes) == 1
+
+    @pytest.mark.asyncio
+    async def test_hold_seconds_clamped_above_max(self) -> None:
+        """hold_seconds > 30 is clamped to 30."""
+        mock_proc = _make_mock_process(returncode=0)
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        with (
+            patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("server.asyncio.sleep", side_effect=_fake_sleep),
+        ):
+            mock_exec.return_value = mock_proc
+            await _run_httpx_heavy(
+                {"target": "http://localhost", "hold_seconds": 999},
+                _noop_write,
+                req_id=11,
+            )
+
+        assert len(sleep_calls) == 1
+        assert sleep_calls[0] == float(_HOLD_SECONDS_MAX)
+
+    @pytest.mark.asyncio
+    async def test_hold_seconds_clamped_below_min(self) -> None:
+        """hold_seconds < 1 is clamped to 1."""
+        mock_proc = _make_mock_process(returncode=0)
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        with (
+            patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("server.asyncio.sleep", side_effect=_fake_sleep),
+        ):
+            mock_exec.return_value = mock_proc
+            await _run_httpx_heavy(
+                {"target": "http://localhost", "hold_seconds": 0},
+                _noop_write,
+                req_id=12,
+            )
+
+        assert len(sleep_calls) == 1
+        assert sleep_calls[0] == float(_HOLD_SECONDS_MIN)
+
+    @pytest.mark.asyncio
+    async def test_probe_failure_returns_early_without_sleep(self) -> None:
+        """If the httpx probe fails (exit_code != 0), no hold occurs."""
+        mock_proc = _make_mock_process(
+            stderr_lines=[b"connection refused\n"],
+            returncode=1,
+        )
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)  # pragma: no cover — must not be called
+
+        with (
+            patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("server.asyncio.sleep", side_effect=_fake_sleep),
+        ):
+            mock_exec.return_value = mock_proc
+            result = await _run_httpx_heavy(
+                {"target": "http://localhost:9999"},
+                _noop_write,
+                req_id=13,
+            )
+
+        assert result["exit_code"] == 1
+        assert len(sleep_calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_invalid_hold_seconds_type_uses_default(self) -> None:
+        """A non-numeric hold_seconds falls back to the default (2s)."""
+        mock_proc = _make_mock_process(returncode=0)
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        with (
+            patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("server.asyncio.sleep", side_effect=_fake_sleep),
+        ):
+            mock_exec.return_value = mock_proc
+            await _run_httpx_heavy(
+                {"target": "http://localhost", "hold_seconds": "not-a-number"},
+                _noop_write,
+                req_id=14,
+            )
+
+        assert len(sleep_calls) == 1
+        # Default is 2, which is within [1, 30].
+        assert sleep_calls[0] == 2.0
+
+
+# ---------------------------------------------------------------------------
+# _handle_request — run_httpx_heavy dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestHandleRequestHeavy:
+    """Tests for the JSON-RPC dispatch layer for run_httpx_heavy."""
+
+    @pytest.mark.asyncio
+    async def test_run_httpx_heavy_dispatched_correctly(self) -> None:
+        """A tools/call request for run_httpx_heavy reaches the handler."""
+        mock_proc = _make_mock_process(
+            stdout_lines=[b"http://localhost [200]\n"],
+            returncode=0,
+        )
+
+        async def _fake_sleep(_seconds: float) -> None:
+            pass
+
+        with (
+            patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("server.asyncio.sleep", side_effect=_fake_sleep),
+        ):
+            mock_exec.return_value = mock_proc
+            request = {
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": "tools/call",
+                "params": {
+                    "name": "run_httpx_heavy",
+                    "arguments": {"target": "http://localhost", "hold_seconds": 1},
+                },
+            }
+            response = await _handle_request(request, _noop_write)
+
+        assert response["jsonrpc"] == "2.0"
+        assert response["id"] == 20
+        assert "result" in response
+        assert "error" not in response
+        assert response["result"]["exit_code"] == 0
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_still_returns_method_not_found(self) -> None:
+        """Unknown tool names still return -32601 after adding run_httpx_heavy."""
+        request = {
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {"name": "run_nmap", "arguments": {}},
+        }
+        response = await _handle_request(request, _noop_write)
+
+        assert "error" in response
+        assert response["error"]["code"] == -32601
+        assert response["id"] == 21

@@ -18,3 +18,14 @@ tools:
         target: {type: string, title: Target URL}
         flags: {type: array, items: {type: string}, title: Extra flags}
         timeout_seconds: {type: integer, minimum: 1, maximum: 300, default: 30, title: Timeout (s)}
+
+  - name: run_httpx_heavy
+    weight: heavy
+    capability_flags:
+      - network
+    arg_schema:
+      type: object
+      required: [target]
+      properties:
+        target: {type: string, title: Target URL}
+        hold_seconds: {type: number, minimum: 1, maximum: 30, default: 2, title: Hold duration (s)}

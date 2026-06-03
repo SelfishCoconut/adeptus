@@ -89,6 +89,18 @@ _HTTPX_YAML = textwrap.dedent(
                     type: string
                 timeout_seconds:
                   type: integer
+          - name: run_httpx_heavy
+            weight: heavy
+            capability_flags:
+              - network
+            arg_schema:
+              type: object
+              required: [target]
+              properties:
+                target:
+                  type: string
+                hold_seconds:
+                  type: number
       - name: shell-exec
         command: python
         args:
@@ -231,8 +243,10 @@ async def test_list_mcp_tools_includes_httpx_descriptor(
     assert resp.status_code == 200
     body: list[dict[str, Any]] = resp.json()
 
-    httpx_descriptors = [d for d in body if d["server_name"] == "httpx"]
-    assert len(httpx_descriptors) == 1, "Expected exactly one descriptor for server 'httpx'"
+    httpx_descriptors = [
+        d for d in body if d["server_name"] == "httpx" and d["tool_name"] == "run_httpx"
+    ]
+    assert len(httpx_descriptors) == 1, "Expected exactly one descriptor for httpx/run_httpx"
 
     descriptor = httpx_descriptors[0]
     assert descriptor["tool_name"] == "run_httpx"
@@ -298,3 +312,37 @@ async def test_list_mcp_tools_returns_descriptors_in_registry_order(
     server_names = [d["server_name"] for d in body]
     # httpx is declared first in _HTTPX_YAML
     assert server_names.index("httpx") < server_names.index("shell-exec")
+
+
+@pytest.mark.asyncio
+async def test_list_mcp_tools_includes_run_httpx_heavy_with_heavy_weight(
+    regular_client: AsyncClient,
+) -> None:
+    """GET /api/v1/mcp/tools surfaces run_httpx_heavy with weight == 'heavy'.
+
+    Manifest/registry unit test (Task 7): confirms that adding the tool to the
+    static MCP config causes it to be parsed and returned by the tools endpoint
+    with the correct weight so the backend admission manager classifies it as a
+    heavy run.
+    """
+    resp = await regular_client.get("/api/v1/mcp/tools")
+
+    assert resp.status_code == 200
+    body: list[dict[str, Any]] = resp.json()
+
+    heavy_descriptors = [
+        d for d in body if d["server_name"] == "httpx" and d["tool_name"] == "run_httpx_heavy"
+    ]
+    assert len(heavy_descriptors) == 1, "Expected exactly one descriptor for httpx/run_httpx_heavy"
+
+    descriptor = heavy_descriptors[0]
+    assert descriptor["weight"] == "heavy", (
+        f"run_httpx_heavy must have weight='heavy'; got {descriptor['weight']!r}"
+    )
+    assert "network" in descriptor["capability_flags"]
+
+    # arg_schema must declare target and hold_seconds.
+    arg_schema = descriptor["arg_schema"]
+    assert isinstance(arg_schema, dict)
+    assert "target" in arg_schema.get("properties", {})
+    assert "hold_seconds" in arg_schema.get("properties", {})
