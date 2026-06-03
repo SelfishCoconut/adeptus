@@ -41,6 +41,7 @@ from app.features.mcp.concurrency import (
     cleanup_decision,
     is_paused,
     kill_run,
+    mark_slot_reacquired,
     register_run,
     release,
     release_for_decision,
@@ -432,7 +433,14 @@ async def test_wait_decision_arrives() -> None:
 
 
 async def test_extend_decision_lets_task_reacquire() -> None:
-    """After an 'extend' decision the task can re-acquire a slot through the normal path."""
+    """After an 'extend' decision the task can re-acquire a slot through the normal path.
+
+    C-1 regression guard: mark_slot_reacquired must be called (as service.py does)
+    after the re-acquire so that a subsequent kill_run sees holds_slot=True and
+    correctly cancels the live task.  Without mark_slot_reacquired, kill_run takes
+    the awaiting-decision branch and calls _submit_decision_internal against a
+    cleaned-up rendezvous → returns 'awaiting' silently (no-op kill).
+    """
     eng = _eng()
     run_id = _run_id()
 
@@ -452,12 +460,19 @@ async def test_extend_decision_lets_task_reacquire() -> None:
 
     # Re-acquire a fresh slot (as the streaming task would do on extend).
     new_handle = await _acquire(eng, slot_limit=1, tool_run_id=run_id, target_host="host1")
-    from app.features.mcp.concurrency import _registry
-
-    if run_id in _registry:
-        _registry[run_id].holds_slot = True
+    # C-1: call mark_slot_reacquired so kill_run routes correctly (Risk 7).
+    # Without this call kill_run sees holds_slot=False → "awaiting" branch → silent no-op.
+    mark_slot_reacquired(run_id)
 
     assert snapshot(eng).running_count == 1
+
+    # C-1 regression check: after re-acquire + mark_slot_reacquired, kill_run must
+    # return "cancelled" (not "awaiting"), proving the task would actually be stopped.
+    result = kill_run(run_id)
+    assert result == "cancelled", (
+        "kill_run must return 'cancelled' for a resumed (extend/wait) run — "
+        "holds_slot must be True after mark_slot_reacquired"
+    )
 
     release(new_handle)
     unregister_run(run_id)
@@ -465,7 +480,11 @@ async def test_extend_decision_lets_task_reacquire() -> None:
 
 
 async def test_wait_decision_lets_task_reacquire() -> None:
-    """After a 'wait' decision the task can re-acquire a slot."""
+    """After a 'wait' decision the task can re-acquire a slot.
+
+    C-1 regression guard: same as the extend variant — mark_slot_reacquired must
+    be called so kill_run can cancel the resumed task.
+    """
     eng = _eng()
     run_id = _run_id()
 
@@ -480,7 +499,13 @@ async def test_wait_decision_lets_task_reacquire() -> None:
     cleanup_decision(run_id)
 
     new_handle = await _acquire(eng, slot_limit=1, tool_run_id=run_id, target_host="hostX")
+    # C-1: restore holds_slot so kill_run routes to the "cancel task" branch.
+    mark_slot_reacquired(run_id)
     assert snapshot(eng).running_count == 1
+
+    # Verify kill_run correctly cancels the resumed task.
+    result = kill_run(run_id)
+    assert result == "cancelled", "kill_run must return 'cancelled' for a resumed (wait) run"
 
     release(new_handle)
     unregister_run(run_id)
@@ -986,3 +1011,98 @@ async def test_slot_accounting_no_double_acquire_on_kill_during_reacquire() -> N
 
     unregister_run(run_id)
     task.cancel()
+
+
+# ---------------------------------------------------------------------------
+# W-2: set_paused on idle engagement (no _states entry yet)
+# ---------------------------------------------------------------------------
+
+
+async def test_set_paused_true_on_idle_engagement_persists_flag() -> None:
+    """W-2: Pausing an engagement with no in-process state allocates state and sets paused.
+
+    Subsequent acquire/is_paused must see the flag even though there were no
+    prior runs.  This verifies that set_paused(True) allocates _EngagementState
+    via _get_state even when the engagement had no prior admits.
+    """
+    eng = _eng()
+
+    # No state exists yet — is_paused must return False before the pause.
+    assert not is_paused(eng)
+
+    killed, dequeued = set_paused(eng, True)
+    assert killed == 0  # No runs in flight — nothing to kill.
+    assert dequeued == 0
+    assert is_paused(eng), "Pause flag must persist even when no state existed prior"
+
+    # New acquire must raise EngagementPaused.
+    with pytest.raises(EngagementPaused):
+        await _acquire(eng, slot_limit=1)
+
+    # Resume — must work without error and without allocation.
+    set_paused(eng, False)
+    assert not is_paused(eng)
+
+    # After resume, a new run can be admitted.
+    handle = await _acquire(eng, slot_limit=1)
+    assert snapshot(eng).running_count == 1
+    release(handle)
+
+
+async def test_set_paused_false_on_absent_state_is_noop() -> None:
+    """W-2: Resuming an engagement with no _states entry is a safe no-op (no allocation).
+
+    set_paused(False) must return (0, 0) without creating a new _EngagementState.
+    A subsequent is_paused must still return False (already the default for absent state).
+    """
+    from app.features.mcp.concurrency import _states
+
+    eng = _eng()
+    assert eng not in _states, "Precondition: no state allocated yet"
+
+    killed, dequeued = set_paused(eng, False)
+    assert killed == 0
+    assert dequeued == 0
+    assert eng not in _states, "set_paused(False) on absent state must NOT allocate _states entry"
+    assert not is_paused(eng)
+
+
+# ---------------------------------------------------------------------------
+# mark_slot_reacquired — the C-1 fix
+# ---------------------------------------------------------------------------
+
+
+async def test_mark_slot_reacquired_restores_holds_slot() -> None:
+    """C-1: mark_slot_reacquired sets holds_slot=True after release_for_decision."""
+    from app.features.mcp.concurrency import _registry
+
+    eng = _eng()
+    run_id = _run_id()
+
+    handle = await _acquire(eng, slot_limit=1, tool_run_id=run_id)
+    task = _make_dummy_task()
+    register_run(eng, run_id, task)
+
+    # Park — holds_slot becomes False.
+    release_for_decision(eng, run_id, handle)
+    assert run_id in _registry
+    assert not _registry[run_id].holds_slot
+
+    # Restore — holds_slot must become True.
+    mark_slot_reacquired(run_id)
+    assert _registry[run_id].holds_slot, "holds_slot must be True after mark_slot_reacquired"
+
+    # kill_run must now return "cancelled" (task is cancellable), not "awaiting".
+    result = kill_run(run_id)
+    assert result == "cancelled", (
+        "kill_run must route to 'cancelled' for a slot-holding run after mark_slot_reacquired"
+    )
+
+    unregister_run(run_id)
+    task.cancel()
+
+
+def test_mark_slot_reacquired_absent_entry_is_noop() -> None:
+    """mark_slot_reacquired on an absent entry is a safe no-op (defensive guard)."""
+    # Should not raise even though the run was never registered.
+    mark_slot_reacquired(_run_id())

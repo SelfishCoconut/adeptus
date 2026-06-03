@@ -1138,3 +1138,150 @@ async def test_engagement_paused_during_initial_acquire_persists_killed() -> Non
     assert killed_calls, "status=killed must be persisted when engagement paused during acquire"
 
     release(blocker_handle)
+
+
+# ---------------------------------------------------------------------------
+# S-3: pause-originated kill broadcasts "engagement paused"; user kill broadcasts
+# "killed by user"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pause_kill_broadcasts_engagement_paused_message() -> None:
+    """S-3: A kill triggered by set_paused broadcasts 'engagement paused', not 'killed by user'.
+
+    set_paused calls task.cancel(msg='engagement paused') so the CancelledError.args[0]
+    is 'engagement paused'.  The _stream_to_channel handler reads this and uses it as
+    the 'killed' WS chunk message.
+    """
+    engagement_id = uuid4()
+    tool_run_id = uuid4()
+    slot_limit = 1
+    clock = FakeClock(start=1000.0)  # no timeout in this test
+
+    gen_started = asyncio.Event()
+
+    async def _blocking_gen(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        gen_started.set()
+        await asyncio.sleep(3600)
+        yield StreamChunk(type="stdout", data="never")  # unreachable
+
+    session_mock, ctx = _make_session_ctx()
+    update_status_mock = AsyncMock()
+    update_result_mock = AsyncMock(return_value=_make_tool_run_mock(tool_run_id, status="killed"))
+
+    _, queue = subscribe_tool_run(tool_run_id)
+
+    with (
+        patch(
+            "app.features.mcp.service.subprocess_manager.stream_tool_call",
+            side_effect=_blocking_gen,
+        ),
+        patch("app.features.mcp.service.mcp_repo.update_tool_run_status", update_status_mock),
+        patch("app.features.mcp.service.mcp_repo.update_tool_run_result", update_result_mock),
+        patch("app.features.mcp.service.get_sessionmaker", return_value=lambda: ctx),
+        patch("app.features.mcp.service._time.monotonic", side_effect=clock.monotonic),
+    ):
+        stream_task = asyncio.create_task(
+            _stream_to_channel(
+                tool_run_id=tool_run_id,
+                engagement_id=engagement_id,
+                server_name=_SERVER_NAME,
+                tool_name=_HEAVY_TOOL,
+                args={"target": _TARGET},
+                timeout_seconds=9999.0,  # large — no timeout
+                is_heavy=True,
+                slot_limit=slot_limit,
+                target_host=_HOST,
+            )
+        )
+        register_run(engagement_id, tool_run_id, stream_task)
+
+        await asyncio.wait_for(gen_started.wait(), timeout=2.0)
+        assert snapshot(engagement_id).running_count == 1
+
+        # Pause the engagement — uses task.cancel(msg="engagement paused").
+        killed_running, _ = set_paused(engagement_id, True)
+        assert killed_running == 1
+
+        await asyncio.wait_for(stream_task, timeout=2.0)
+
+    # Verify the 'killed' WS chunk carries the pause cause.
+    all_q: list[Any] = []
+    while not queue.empty():
+        all_q.append(queue.get_nowait())
+    killed_chunks = [c for c in all_q if c.type == "killed"]
+    assert killed_chunks, "killed WS chunk must be broadcast after pause"
+    assert killed_chunks[0].message == "engagement paused", (
+        "S-3: pause-originated kill must broadcast 'engagement paused', not 'killed by user'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_kill_broadcasts_killed_by_user_message() -> None:
+    """S-3: A per-tool kill (kill_run) broadcasts 'killed by user', not 'engagement paused'.
+
+    kill_run calls task.cancel() with no msg argument.  The CancelledError has empty
+    args, so the handler falls back to 'killed by user'.
+    """
+    engagement_id = uuid4()
+    tool_run_id = uuid4()
+    slot_limit = 1
+    clock = FakeClock(start=1000.0)
+
+    gen_started = asyncio.Event()
+
+    async def _blocking_gen(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        gen_started.set()
+        await asyncio.sleep(3600)
+        yield StreamChunk(type="stdout", data="never")  # unreachable
+
+    session_mock, ctx = _make_session_ctx()
+    update_status_mock = AsyncMock()
+    update_result_mock = AsyncMock(return_value=_make_tool_run_mock(tool_run_id, status="killed"))
+
+    _, queue = subscribe_tool_run(tool_run_id)
+
+    with (
+        patch(
+            "app.features.mcp.service.subprocess_manager.stream_tool_call",
+            side_effect=_blocking_gen,
+        ),
+        patch("app.features.mcp.service.mcp_repo.update_tool_run_status", update_status_mock),
+        patch("app.features.mcp.service.mcp_repo.update_tool_run_result", update_result_mock),
+        patch("app.features.mcp.service.get_sessionmaker", return_value=lambda: ctx),
+        patch("app.features.mcp.service._time.monotonic", side_effect=clock.monotonic),
+    ):
+        stream_task = asyncio.create_task(
+            _stream_to_channel(
+                tool_run_id=tool_run_id,
+                engagement_id=engagement_id,
+                server_name=_SERVER_NAME,
+                tool_name=_HEAVY_TOOL,
+                args={"target": _TARGET},
+                timeout_seconds=9999.0,  # large — no timeout
+                is_heavy=True,
+                slot_limit=slot_limit,
+                target_host=_HOST,
+            )
+        )
+        register_run(engagement_id, tool_run_id, stream_task)
+
+        await asyncio.wait_for(gen_started.wait(), timeout=2.0)
+        assert snapshot(engagement_id).running_count == 1
+
+        # Per-tool kill — task.cancel() with no msg.
+        result = kill_run(tool_run_id)
+        assert result == "cancelled"
+
+        await asyncio.wait_for(stream_task, timeout=2.0)
+
+    # Verify the 'killed' WS chunk carries the user cause.
+    all_q: list[Any] = []
+    while not queue.empty():
+        all_q.append(queue.get_nowait())
+    killed_chunks = [c for c in all_q if c.type == "killed"]
+    assert killed_chunks, "killed WS chunk must be broadcast after user kill"
+    assert killed_chunks[0].message == "killed by user", (
+        "S-3: per-tool kill must broadcast 'killed by user', not 'engagement paused'"
+    )

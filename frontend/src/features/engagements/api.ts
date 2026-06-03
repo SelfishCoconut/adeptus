@@ -10,6 +10,7 @@ import {
   type EngagementUpdate,
   type MemberEntry,
 } from '@/shared/api'
+import { toolQueueKey } from '@/shared/api/queryKeys'
 
 // --- Query key constants ---
 
@@ -117,11 +118,9 @@ export function useAddMember(engagementId: string) {
  *
  * Invalidation strategy: on success we invalidate both the engagement detail
  * query (the `paused` field) and the tool-queue snapshot. The tool-queue key is
- * inlined as a raw array (`['mcp', 'tool-queue', engagementId]`) to avoid a
- * backward import from the `engagements` feature into the `mcp` feature — the
- * dependency direction is mcp → engagements, not the reverse. The raw array
- * matches the `toolQueueKey(id)` constant in `mcp/api.ts` exactly; if that key
- * shape ever changes, update both places.
+ * imported from `shared/api/queryKeys` — the single source of truth for cross-
+ * feature query key constants — so both this module and `mcp/api.ts` stay in sync
+ * automatically if the key shape ever changes.
  */
 export function useEngagementPause(engagementId: string) {
   const queryClient = useQueryClient()
@@ -136,10 +135,7 @@ export function useEngagementPause(engagementId: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: engagementKey(engagementId) })
-      // Inline the mcp toolQueueKey shape to avoid a backward feature import.
-      void queryClient.invalidateQueries({
-        queryKey: ['mcp', 'tool-queue', engagementId],
-      })
+      void queryClient.invalidateQueries({ queryKey: toolQueueKey(engagementId) })
     },
   })
 }

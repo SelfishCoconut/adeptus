@@ -9,6 +9,7 @@ import {
   type ToolRunPage,
   type ToolRunResult,
 } from '@/shared/api'
+import { toolQueueKey } from '@/shared/api/queryKeys'
 
 // --- Query key constants ---
 
@@ -19,9 +20,8 @@ export function toolRunsKey(engagementId: string) {
   return ['tool-runs', engagementId] as const
 }
 
-export function toolQueueKey(engagementId: string) {
-  return ['mcp', 'tool-queue', engagementId] as const
-}
+// Re-export the shared toolQueueKey so existing imports from this module keep working.
+export { toolQueueKey }
 
 // --- Queries ---
 

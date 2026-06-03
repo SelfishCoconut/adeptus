@@ -432,24 +432,28 @@ async def execute_tool_run(
         McpServerDown:       Subprocess not running / timed out (sync path only;
                              async path surfaces failures via WS error chunk).
     """
-    # Step 0 (Slice 06, Task 4): engagement-wide pause gate.
-    # Must run BEFORE any DB row is created and BEFORE the heavy/light branch so that
-    # the pause blocks ALL new runs (light, heavy-sync, heavy-async) — Risk 5.
-    # Mirrors the placement of check_queue_capacity: it is a pure pre-flight guard
-    # with no side-effects, no DB write, and no task spawn on the unhappy path.
-    # EngagementPaused is translated to HTTP 409 in the router (task 6).
-    if concurrency.is_paused(engagement_id):
-        raise EngagementPaused(f"Engagement {engagement_id} is currently paused")
-
-    # Step 1: fused existence + membership check (§17.1 isolation chokepoint).
-    # get_engagement_for_member returns None when the engagement is missing OR the
-    # caller has no explicit member row; both collapse to 404 so a non-member
-    # cannot infer the engagement exists. Role is never consulted (§4 no-bypass).
+    # Step 0 (§17.1 isolation chokepoint): fused existence + membership check.
+    # This MUST run first — before the pause gate — so a non-member submitting to
+    # a paused engagement gets 404, not 409.  Returning 409 to a non-member would
+    # reveal that the engagement exists AND is paused (existence + state disclosure,
+    # §17.1).  Membership is the outer gate; pause is the inner gate.
+    # get_engagement_for_member returns None for a missing engagement OR a caller
+    # with no explicit member row; both collapse to 404. Role is never consulted
+    # (§4 no-bypass).
     member_pair = await eng_repo.get_engagement_for_member(db, engagement_id, user_id)
     if member_pair is None:
         raise EngagementNotFound(f"Engagement {engagement_id} not found")
     engagement_obj, _ = member_pair
     slot_limit: int = cast(int, engagement_obj.concurrency_slot_limit)
+
+    # Step 1 (Slice 06, Task 4): engagement-wide pause gate.
+    # Runs AFTER the membership gate (above) so non-members get 404, not 409 (§17.1).
+    # Runs BEFORE any DB row creation / task spawn and BEFORE the heavy/light branch
+    # so the pause blocks ALL new runs (light, heavy-sync, heavy-async) — Risk 5.
+    # Mirrors the placement of check_queue_capacity: pure pre-flight, no side-effects.
+    # EngagementPaused is translated to HTTP 409 in the router (task 6).
+    if concurrency.is_paused(engagement_id):
+        raise EngagementPaused(f"Engagement {engagement_id} is currently paused")
 
     # Step 2: server name validation.
     registry = get_registry()
@@ -1134,9 +1138,17 @@ async def _stream_to_channel(  # noqa: C901 — intentionally complex; split wou
                         )
                         return  # finally does cleanup.
 
-                    # Re-acquire succeeded.  Broadcast a fresh 'started' chunk and
-                    # update the DB row to 'running' with a fresh started_at so the
-                    # UI shows the run resuming (Decision 6).
+                    # Re-acquire succeeded.
+                    # Risk 7: restore holds_slot=True so that a subsequent kill_run
+                    # correctly sees this run as slot-holding and cancels the task,
+                    # rather than falling through to the awaiting-decision branch and
+                    # calling _submit_decision_internal against a cleaned-up rendezvous
+                    # (which returns "awaiting" silently — a no-op kill).
+                    concurrency.mark_slot_reacquired(tool_run_id)
+
+                    # Broadcast a fresh 'started' chunk and update the DB row to
+                    # 'running' with a fresh started_at so the UI shows the run resuming
+                    # (Decision 6).
                     reacquire_now = datetime.now(tz=UTC)
                     broadcast_tool_run_output(
                         tool_run_id,
@@ -1164,17 +1176,23 @@ async def _stream_to_channel(  # noqa: C901 — intentionally complex; split wou
                 # the generator exhausted without a StreamDone — treat as error).
                 break  # Falls through to the error path below.
 
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as _ce:
             # KILL WHILE RUNNING (or during awaiting-decision's await_timeout_decision).
-            # The task was cancelled by kill_run / set_paused.
+            # The task was cancelled by kill_run (per-tool) or set_paused (engagement pause).
             # Per-server lock is released by the generator's aclose() in the inner
             # finally block above (which ran before the CancelledError propagated here).
             # Persist killed status and broadcast; SWALLOW the CancelledError.
             # (See docstring for the rationale for swallowing vs re-raising.)
-            logger.info(
-                "tool_run_id=%s cancelled (kill while running or kill-during-await)",
-                tool_run_id,
+            #
+            # Distinguish the two cancel causes (S-3):
+            #   - set_paused calls task.cancel(msg="engagement paused") so the
+            #     CancelledError.args[0] == "engagement paused".
+            #   - kill_run / other callers use task.cancel() (default: no msg),
+            #     so args is empty → fall back to "killed by user".
+            _cancel_msg: str = (
+                _ce.args[0] if _ce.args and isinstance(_ce.args[0], str) else "killed by user"
             )
+            logger.info("tool_run_id=%s cancelled: %s", tool_run_id, _cancel_msg)
             now = datetime.now(tz=UTC)
             try:
                 await mcp_repo.update_tool_run_result(
@@ -1182,7 +1200,7 @@ async def _stream_to_channel(  # noqa: C901 — intentionally complex; split wou
                     tool_run_id,
                     exit_code=1,
                     stdout="",
-                    stderr="killed by user",
+                    stderr=_cancel_msg,
                     finished_at=now,
                     status="killed",
                 )
@@ -1193,7 +1211,7 @@ async def _stream_to_channel(  # noqa: C901 — intentionally complex; split wou
                 )
             broadcast_tool_run_output(
                 tool_run_id,
-                WebSocketOutputChunk(type="killed", message="killed by user"),
+                WebSocketOutputChunk(type="killed", message=_cancel_msg),
             )
             # CancelledError is swallowed — detached task must not crash the loop.
 
@@ -1619,6 +1637,13 @@ def _row_to_result(row: ToolRun) -> ToolRunResult:
     queue_position: int | None = None
     if raw_status == "queued":
         queue_position = concurrency.position_of(run_id)
+    # Populate awaiting_since from the in-process registry when the row is
+    # awaiting a timeout decision.  The value is NOT a DB column (per the slice
+    # Data-model section); it is tracked by release_for_decision and surfaced here
+    # so the REST response satisfies the OpenAPI contract (non-null while awaiting).
+    awaiting_since = (
+        concurrency.get_awaiting_since(run_id) if raw_status == "awaiting_decision" else None
+    )
     return ToolRunResult(
         tool_run_id=run_id,
         engagement_id=cast(UUID, row.engagement_id),
@@ -1632,4 +1657,5 @@ def _row_to_result(row: ToolRun) -> ToolRunResult:
         status=cast(ToolRunStatus, raw_status) if raw_status else "completed",
         preset_name=row.preset_name,
         queue_position=queue_position,
+        awaiting_since=awaiting_since,
     )

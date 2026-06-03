@@ -173,10 +173,12 @@ async def test_execute_tool_run_paused_async_heavy_raises_engagement_paused() ->
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_run_paused_async_heavy_no_membership_check() -> None:
-    """A paused engagement rejects before the DB membership check.
+async def test_execute_tool_run_paused_member_gets_409() -> None:
+    """A paused engagement rejects a member's run with EngagementPaused (→ 409).
 
-    The pause gate is the very first step — it even precedes get_engagement_for_member.
+    C-2 fix: the membership gate runs FIRST (→ 404 for non-members), then the
+    pause gate fires (→ 409 for members).  A member submitting to a paused
+    engagement must receive EngagementPaused, not EngagementNotFound.
     """
     engagement_id = uuid4()
     user_id = uuid4()
@@ -207,9 +209,50 @@ async def test_execute_tool_run_paused_async_heavy_no_membership_check() -> None
             async_mode=True,
         )
 
-    # The pause guard fires before the membership check (the check is cheap but
-    # having the pause gate first keeps the unhappy path free of DB round-trips).
-    membership_mock.assert_not_called()
+    # C-2: membership gate runs FIRST, so get_engagement_for_member IS called.
+    # (A non-member would have received EngagementNotFound → 404 here, not EngagementPaused → 409)
+    membership_mock.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_run_paused_non_member_gets_not_found() -> None:
+    """C-2: A non-member submitting to a paused engagement receives EngagementNotFound (→ 404).
+
+    The membership gate runs BEFORE the pause gate so a non-member cannot infer that
+    the engagement exists OR is paused (§17.1 no existence/state disclosure).
+    """
+    from app.features.mcp.service import EngagementNotFound
+
+    engagement_id = uuid4()
+    user_id = uuid4()
+
+    set_paused(engagement_id, True)
+
+    # Simulate non-member: get_engagement_for_member returns None.
+    membership_mock = AsyncMock(return_value=None)
+    db = AsyncMock()
+
+    with (
+        patch("app.features.mcp.service.eng_repo.get_engagement_for_member", membership_mock),
+        patch(
+            "app.features.mcp.service.get_registry",
+            return_value=_make_registry_with_heavy_and_light(),
+        ),
+        pytest.raises(EngagementNotFound),
+    ):
+        await execute_tool_run(
+            db,
+            engagement_id=engagement_id,
+            server_name=_SERVER_NAME,
+            tool_name=_HEAVY_TOOL_NAME,
+            args={"target": _TARGET},
+            timeout_seconds=_TIMEOUT,
+            user_id=user_id,
+            async_mode=True,
+        )
+
+    # Must get EngagementNotFound (→ 404), not EngagementPaused (→ 409).
+    membership_mock.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

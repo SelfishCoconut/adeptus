@@ -629,6 +629,53 @@ class TestRowToResultMapping:
         assert result.preset_name == "my-preset"
         assert result.queue_position == 3
 
+    def test_awaiting_since_populated_for_awaiting_decision_row(self) -> None:
+        """W-1: _row_to_result surfaces awaiting_since from the in-process registry
+        when row.status == 'awaiting_decision'.
+
+        The timestamp is NOT a DB column (per the slice Data-model section); it is
+        stored in _RunEntry.awaiting_since by release_for_decision and read here
+        via concurrency.get_awaiting_since.  This test verifies the wiring.
+        """
+        from app.features.mcp.service import _row_to_result
+
+        run_id = uuid4()
+        now = datetime.now(tz=UTC)
+        row = _make_tool_run_row(run_id=run_id, status="awaiting_decision")
+
+        with patch(
+            "app.features.mcp.service.concurrency.get_awaiting_since",
+            return_value=now,
+        ) as mock_get:
+            result = _row_to_result(row)
+
+        mock_get.assert_called_once_with(run_id)
+        assert result.awaiting_since == now, (
+            "_row_to_result must populate awaiting_since from the registry "
+            "when status == 'awaiting_decision'"
+        )
+
+    def test_awaiting_since_is_none_for_non_awaiting_rows(self) -> None:
+        """W-1: _row_to_result returns awaiting_since=None for non-awaiting rows.
+
+        concurrency.get_awaiting_since must NOT be called for rows with other
+        statuses — we only read from the registry when status == 'awaiting_decision'.
+        """
+        from app.features.mcp.service import _row_to_result
+
+        for status in ("running", "queued", "completed", "killed", "failed", "timed_out"):
+            row = _make_tool_run_row(status=status)
+            with patch(
+                "app.features.mcp.service.concurrency.get_awaiting_since",
+            ) as mock_get:
+                result = _row_to_result(row)
+
+            if status != "queued":
+                mock_get.assert_not_called()
+            assert result.awaiting_since is None, (
+                f"awaiting_since must be None for status={status!r}"
+            )
+
 
 # ---------------------------------------------------------------------------
 # ToolRunStatus — Slice 06 additions (killed, awaiting_decision)

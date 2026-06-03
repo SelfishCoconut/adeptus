@@ -482,3 +482,28 @@ async def test_execute_tool_run_409_when_paused(
     assert body["error"]["code"] == "conflict"
     # Confirm the error message is human-readable (not a stack trace).
     assert "paused" in body["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_run_404_for_non_member_on_paused_engagement(
+    regular_client: AsyncClient,
+) -> None:
+    """C-2: A non-member POSTing /tool-runs to a paused engagement gets 404, not 409.
+
+    The membership gate runs BEFORE the pause gate (§17.1 — no existence disclosure).
+    If pause were checked first, a non-member would see 409, leaking that the
+    engagement exists AND is paused.  The correct behaviour is 404 — same as if the
+    engagement did not exist at all.
+    """
+    with patch(
+        "app.features.mcp.router.service.execute_tool_run",
+        new=AsyncMock(side_effect=EngagementNotFound("Engagement not found")),
+    ):
+        resp = await regular_client.post("/api/v1/tool-runs", json=_TOOL_RUN_BODY)
+
+    assert resp.status_code == 404, (
+        "Non-member submitting to a paused engagement must receive 404, not 409 "
+        "(§17.1 — no existence/state disclosure)"
+    )
+    body = resp.json()
+    assert body["error"]["code"] == "not_found"

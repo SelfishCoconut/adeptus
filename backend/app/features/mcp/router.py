@@ -43,7 +43,7 @@ codes without an ADR to widen core/):
   TimeoutDecisionConflict → 409 (POST /tool-runs/{id}/timeout-decision; Slice 06 Task 6)
 """
 
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, WebSocket, WebSocketDisconnect, status
@@ -301,7 +301,7 @@ async def submit_timeout_decision(
     body: TimeoutDecision,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> ToolRunResult | JSONResponse:
+) -> ToolRunResult:
     """Answer a pending timeout prompt for a run in state ``awaiting_decision``.
 
     Membership-gated via the same chokepoint as kill_tool_run (§17.1/§4).
@@ -331,9 +331,15 @@ async def submit_timeout_decision(
         )
     except TimeoutDecisionConflict as exc:
         # No core error type maps to HTTP 409; translate inline (same pattern as 503/429).
-        return JSONResponse(
-            status_code=409,
-            content={"error": {"code": "conflict", "message": exc.message}},
+        # FastAPI bypasses serialization for Response subclasses — JSONResponse is passed
+        # through as-is even though the annotation says ToolRunResult.  cast() satisfies
+        # mypy without widening the annotation to ToolRunResult | JSONResponse (W-5).
+        return cast(
+            ToolRunResult,
+            JSONResponse(
+                status_code=409,
+                content={"error": {"code": "conflict", "message": exc.message}},
+            ),
         )
 
 

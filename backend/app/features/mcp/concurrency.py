@@ -252,11 +252,19 @@ class _RunEntry:
     (i.e. it is running, not parked in awaiting-decision).  This is needed so
     pause / kill_run accounting knows whether to cancel the task (running) or
     just resolve the rendezvous (awaiting-decision).
+
+    ``awaiting_since`` is set by ``release_for_decision`` to the UTC timestamp
+    at which the run entered the awaiting-decision state.  It is surfaced by
+    ``_row_to_result`` in service.py when the row's status is
+    ``'awaiting_decision'``, satisfying the OpenAPI contract that documents
+    ``awaiting_since`` as non-null while awaiting.  The value is in-process
+    (not persisted as a DB column — per the slice Data-model section).
     """
 
     engagement_id: UUID
     task: asyncio.Task[None]
     holds_slot: bool = True
+    awaiting_since: datetime | None = None
 
 
 @dataclass
@@ -796,6 +804,27 @@ def unregister_run(tool_run_id: UUID) -> None:
     _registry.pop(tool_run_id, None)
 
 
+def mark_slot_reacquired(tool_run_id: UUID) -> None:
+    """Restore holds_slot=True after a successful re-acquire on extend/wait.
+
+    Called by the streaming task (service.py) IMMEDIATELY AFTER each successful
+    ``concurrency.acquire(...)`` on the extend AND wait paths, BEFORE resuming
+    the stream.  This is the counterpart of ``release_for_decision`` which sets
+    ``holds_slot=False`` when the run parks as awaiting-decision.
+
+    Without this call ``kill_run`` sees ``holds_slot=False`` for a resumed run
+    and routes to the awaiting-decision branch (_submit_decision_internal against
+    an already-cleaned-up rendezvous), returning ``"awaiting"`` silently instead
+    of cancelling the live task — a silent no-op (Risk 7).
+
+    Safe to call if the entry is absent (no-op guard — defensive; the entry
+    should always be present at this point in the streaming task lifecycle).
+    """
+    entry = _registry.get(tool_run_id)
+    if entry is not None:
+        entry.holds_slot = True
+
+
 def kill_run(tool_run_id: UUID) -> Literal["cancelled", "dequeued", "awaiting", "absent"]:
     """Cancel or de-queue a single tool run.
 
@@ -883,26 +912,38 @@ def set_paused(engagement_id: UUID, paused: bool) -> tuple[int, int]:
 
     Setting ``paused=False`` clears the flag only — killed runs are NOT resumed
     (kill is terminal).
-    """
-    state = _get_state(engagement_id)
 
+    Allocation note: when setting ``paused=True`` on an engagement that has no
+    in-process state yet, a new ``_EngagementState`` is created so the flag
+    persists for future ``is_paused`` / ``acquire`` calls (otherwise the flag
+    would be lost because ``is_paused`` returns False for absent state).  When
+    setting ``paused=False`` on an absent state there is nothing to clear —
+    return ``(0, 0)`` without allocating (no leak).
+    """
     if not paused:
-        # Resume — just clear the flag.
-        state.paused = False
+        # Resume — clear the flag if the state exists; if absent, nothing to do.
+        state = _states.get(engagement_id)
+        if state is not None:
+            state.paused = False
         return (0, 0)
 
-    # Pause.
+    # Pause — must ensure the flag persists for future acquire/is_paused calls.
+    state = _get_state(engagement_id)
     state.paused = True
 
     killed_running = 0
     dequeued = 0
 
     # Kill every live running task for this engagement.
+    # Pass msg="engagement paused" so the CancelledError handler in service.py
+    # can distinguish pause-originated kills from per-tool kills and broadcast
+    # the correct cause in the 'killed' WS chunk (spec: "killed by user" vs
+    # "engagement paused").
     for run_id, entry in list(_registry.items()):
         if entry.engagement_id != engagement_id:
             continue
         if entry.holds_slot:
-            entry.task.cancel()
+            entry.task.cancel(msg="engagement paused")
             killed_running += 1
         else:
             # Awaiting-decision run — submit kill to its rendezvous.
@@ -956,9 +997,13 @@ def release_for_decision(
         release(handle)  # Idempotent — sets handle.released = True.
 
     # Mark the run as awaiting-decision (slotless) in the registry.
+    # Record the UTC timestamp at which the run entered this state so that
+    # _row_to_result in service.py can populate awaiting_since in the REST
+    # response (OpenAPI contract: non-null while status == 'awaiting_decision').
     entry = _registry.get(tool_run_id)
     if entry is not None:
         entry.holds_slot = False
+        entry.awaiting_since = datetime.now(UTC)
 
     # Create the decision rendezvous for this run.
     _decisions[tool_run_id] = _DecisionRendezvous()
@@ -1042,6 +1087,23 @@ def cleanup_decision(tool_run_id: UUID) -> None:
     acted upon) to prevent the map from growing without bound.
     """
     _decisions.pop(tool_run_id, None)
+
+
+def get_awaiting_since(tool_run_id: UUID) -> datetime | None:
+    """Return the UTC timestamp at which the run entered awaiting-decision state.
+
+    Returns ``None`` if the run is not in the registry or is not currently
+    awaiting a decision (i.e. ``awaiting_since`` was not set by
+    ``release_for_decision``).
+
+    Used by ``_row_to_result`` in service.py to populate the ``awaiting_since``
+    field of ``ToolRunResult`` when ``status == 'awaiting_decision'`` (the
+    OpenAPI contract documents it as non-null while awaiting).
+    """
+    entry = _registry.get(tool_run_id)
+    if entry is None:
+        return None
+    return entry.awaiting_since
 
 
 # ---------------------------------------------------------------------------
