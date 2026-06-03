@@ -20,7 +20,7 @@ itself — all HTTP mapping is via the registered handlers.
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -178,7 +178,6 @@ async def delete_node(
     node_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-    response: Response,
 ) -> None:
     """Soft-delete a node and cascade to its incident edges (serialized).
 
@@ -271,7 +270,6 @@ async def delete_edge(
     edge_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-    response: Response,
 ) -> None:
     """Soft-delete an edge (serialized).
 

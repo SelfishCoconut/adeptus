@@ -61,7 +61,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import networkx as nx
-from sqlalchemy import desc, select
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -171,7 +171,7 @@ class _Writer:
         # ``deleted`` attribute so warm-start + undo stay consistent.
         self._graph: nx.MultiDiGraph = nx.MultiDiGraph()
         self._warm: bool = False  # True once the graph has been loaded from Postgres.
-        self._task: asyncio.Task[None] = asyncio.get_event_loop().create_task(
+        self._task: asyncio.Task[None] = asyncio.get_running_loop().create_task(
             self._consume(), name=f"writer-{engagement_id}"
         )
 
@@ -412,15 +412,11 @@ class _Writer:
             raise NodeNotFound(f"Node {cmd.node_id} not found or deleted")
 
         # Gather live incident edges before cascade to record their history.
-        from sqlalchemy import and_, or_, select
-
-        from app.features.graph.models import GraphEdge as GE
-
         incident_result = await db.execute(
-            select(GE).where(
+            select(GraphEdge).where(
                 and_(
-                    or_(GE.source_id == cmd.node_id, GE.target_id == cmd.node_id),
-                    GE.deleted.is_(False),
+                    or_(GraphEdge.source_id == cmd.node_id, GraphEdge.target_id == cmd.node_id),
+                    GraphEdge.deleted.is_(False),
                 )
             )
         )
@@ -667,7 +663,7 @@ async def submit_create_node(
 ) -> Node:
     """Enqueue a create-node command and await the result."""
     writer = _get_writer(engagement_id)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     future: asyncio.Future[Node] = loop.create_future()
     await writer._queue.put(
         _CreateNodeCmd(node_type=node_type, label=label, properties=properties, future=future)
@@ -688,7 +684,7 @@ async def submit_update_node(
     existing value.  When ``properties`` is provided it fully replaces the prior blob.
     """
     writer = _get_writer(engagement_id)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     future: asyncio.Future[Node] = loop.create_future()
     await writer._queue.put(
         _UpdateNodeCmd(node_id=node_id, label=label, properties=properties, future=future)
@@ -702,7 +698,7 @@ async def submit_soft_delete_node(
 ) -> None:
     """Enqueue a soft-delete-node command (cascades to incident edges) and await completion."""
     writer = _get_writer(engagement_id)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     future: asyncio.Future[None] = loop.create_future()
     await writer._queue.put(_SoftDeleteNodeCmd(node_id=node_id, future=future))
     await future
@@ -714,7 +710,7 @@ async def submit_undo_node(
 ) -> Node:
     """Enqueue an undo-node command and await the restored node."""
     writer = _get_writer(engagement_id)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     future: asyncio.Future[Node] = loop.create_future()
     await writer._queue.put(_UndoNodeCmd(node_id=node_id, future=future))
     return await future
@@ -735,7 +731,7 @@ async def submit_create_edge(
     Raises ``DuplicateEdge`` (→ HTTP 409) if a live edge with the same triple exists.
     """
     writer = _get_writer(engagement_id)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     future: asyncio.Future[Edge] = loop.create_future()
     await writer._queue.put(
         _CreateEdgeCmd(
@@ -755,7 +751,7 @@ async def submit_soft_delete_edge(
 ) -> None:
     """Enqueue a soft-delete-edge command and await completion."""
     writer = _get_writer(engagement_id)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     future: asyncio.Future[None] = loop.create_future()
     await writer._queue.put(_SoftDeleteEdgeCmd(edge_id=edge_id, future=future))
     await future
@@ -767,7 +763,7 @@ async def submit_undo_edge(
 ) -> Edge:
     """Enqueue an undo-edge command and await the restored edge."""
     writer = _get_writer(engagement_id)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     future: asyncio.Future[Edge] = loop.create_future()
     await writer._queue.put(_UndoEdgeCmd(edge_id=edge_id, future=future))
     return await future
