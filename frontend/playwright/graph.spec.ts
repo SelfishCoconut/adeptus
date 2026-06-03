@@ -1,40 +1,40 @@
 /**
- * E2E journey for Slice 07: Graph data model — node lifecycle.
+ * E2E journeys for the engagement graph.
  *
- * Journey:
- *   1. Log in as admin.
- *   2. Create an engagement and open its workspace.
- *   3. Assert the Graph section shows the empty state.
- *   4. Add a `host` node via NodeEditDialog; assert it appears in the list.
- *   5. Edit the node's label; assert the new label is shown.
- *   6. Delete the node; assert it disappears from the live list.
- *   7. Open History (Show history toggle); assert the deleted node is listed.
- *   8. Click Undo; assert the node reappears in the live list.
+ * Two journeys, both opt-in via E2E_STACK=1 (skipped in unit CI so
+ * `make test-frontend` stays green without a live backend — same pattern as
+ * kill-switch.spec.ts / engagements.spec.ts):
  *
- * Selectors (all role/text — no testids added):
- *   - Graph section:     aria-label="Graph"
- *   - Empty state:       text "No graph entities yet — add one."
- *   - Add node button:   role=button name="Add node"
- *   - Dialog title:      role=heading name="Add Node" / "Edit Node"
- *   - Type select:       label "Type"  (id="node-type")
- *   - Label input:       label "Label" (id="node-label")
- *   - Submit (create):   role=button name="Create"
- *   - Submit (save):     role=button name="Save"
- *   - Edit row button:   role=button name="Edit" (scoped to row)
- *   - Delete row button: role=button name="Delete" (scoped to row)
- *   - Show history btn:  role=button name="Show history"
- *   - History empty:     text "No deleted entities."
- *   - Undo button:       role=button name="Undo" (scoped to history row)
+ *   A. Slice 07 — node lifecycle in the LIST view (add / edit / delete /
+ *      history / undo). Since Slice 08 made the force-directed canvas the
+ *      default view, this journey first toggles to "List" so the Slice 07
+ *      keyboard-accessible affordances (and these selectors) keep working
+ *      (Slice 08 Risk 5 — accessibility must not regress).
  *
- * Guard: set E2E_STACK=1 to opt-in. Without it (unit CI, no backend) the test
- * is skipped so `make test-frontend` stays green without a live stack — the same
- * pattern used by kill-switch.spec.ts and engagements.spec.ts.
+ *   B. Slice 08 — the live Cytoscape canvas: add a node, assert the canvas
+ *      region renders (not the empty state), select the node, pin it, reload
+ *      and confirm the pin persists, then Edit / Delete from the selected-node
+ *      panel. A multi-node render is asserted at the end.
+ *
+ * Note on edges: there is no edge-authoring UI (edge create/delete are
+ * API-only on the Slice 07 surface; canvas-draw edge authoring is deferred —
+ * Slice 22). So these journeys add nodes only, matching the actual UI.
+ *
+ * Canvas selectors (role/text/testid):
+ *   - Graph section:      role=region name="Graph"
+ *   - View toggle:        role=button name="Graph" / "List"
+ *   - Live canvas:        data-testid="graph-canvas"
+ *   - Empty state:        data-testid="graph-canvas-empty" / text "No graph entities yet — add one."
+ *   - Add node button:    role=button name="Add node"   (graph-view toolbar)
+ *   - Selected panel:     data-testid="selected-node-panel"
+ *   - Pin / Unpin:        role=button name="Pin" / "Unpin"
+ *   - Pinned badge:       data-testid="pinned-badge"
  *
  * Prerequisite: `make dev` (compose stack), ADEPTUS_ADMIN_USER /
  * ADEPTUS_ADMIN_PASSWORD env vars set.
  */
 
-import { test, expect, type Page } from '@playwright/test'
+import { test, expect, type Page, type Locator } from '@playwright/test'
 
 // ---------------------------------------------------------------------------
 // Guard
@@ -53,8 +53,6 @@ function requiredPassword(name: string): string {
 const ADMIN_USERNAME = process.env.ADEPTUS_ADMIN_USER ?? 'admin'
 const ADMIN_PASSWORD = requiredPassword('ADEPTUS_ADMIN_PASSWORD')
 
-const ENGAGEMENT_NAME = `Graph E2E ${Date.now()}`
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -67,140 +65,178 @@ async function loginAs(page: Page, username: string, password: string) {
   await page.waitForURL('**/engagements', { timeout: 10_000 })
 }
 
+/** Create an engagement and open its workspace; returns the Graph region. */
+async function createEngagementAndOpenGraph(page: Page, name: string): Promise<Locator> {
+  await page.getByRole('button', { name: /new engagement/i }).click()
+
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await dialog.getByLabel(/name/i).fill(name)
+  await dialog.getByLabel(/scope/i).fill('10.0.0.0/24')
+  await dialog.getByRole('button', { name: /create/i }).click()
+
+  await expect(dialog).not.toBeVisible()
+  await expect(page.getByText(name)).toBeVisible()
+
+  await page.getByRole('link', { name: /open/i }).first().click()
+  await page.waitForURL('**/workspace', { timeout: 10_000 })
+
+  const graphSection = page.getByRole('region', { name: 'Graph' })
+  await expect(graphSection).toBeVisible({ timeout: 8_000 })
+  return graphSection
+}
+
+/** Add a node of `type` with `label` via the graph-view Add-node dialog. */
+async function addNode(page: Page, graphSection: Locator, type: string, label: string) {
+  await graphSection.getByRole('button', { name: 'Add node' }).click()
+  const addDialog = page.getByRole('dialog')
+  await expect(addDialog).toBeVisible()
+  await addDialog.getByLabel('Type').selectOption(type)
+  await addDialog.getByLabel('Label').fill(label)
+  await addDialog.getByRole('button', { name: 'Create' }).click()
+  await expect(addDialog).not.toBeVisible({ timeout: 8_000 })
+}
+
 // ---------------------------------------------------------------------------
-// Journey
+// Journey A — Slice 07 node lifecycle (List view)
 // ---------------------------------------------------------------------------
 
-test.describe('Graph node lifecycle journey', () => {
-  test(
-    'admin adds, edits, deletes, and undoes a graph node',
-    async ({ page }) => {
-      // Guard: skip when the compose + sandbox stack is not available.
-      test.skip(!STACK_AVAILABLE, 'Set E2E_STACK=1 to run against the compose stack')
+test.describe('Graph node lifecycle journey (list view)', () => {
+  test('admin adds, edits, deletes, and undoes a graph node', async ({ page }) => {
+    test.skip(!STACK_AVAILABLE, 'Set E2E_STACK=1 to run against the compose stack')
 
-      // --------------------------------------------------------------------
-      // Step 1: Log in as admin.
-      // --------------------------------------------------------------------
-      await loginAs(page, ADMIN_USERNAME, ADMIN_PASSWORD)
-      await expect(page).toHaveURL(/\/engagements/)
+    await loginAs(page, ADMIN_USERNAME, ADMIN_PASSWORD)
+    const graphSection = await createEngagementAndOpenGraph(
+      page,
+      `Graph E2E list ${Date.now()}`,
+    )
 
-      // --------------------------------------------------------------------
-      // Step 2: Create a new engagement and open its workspace.
-      // --------------------------------------------------------------------
-      await page.getByRole('button', { name: /new engagement/i }).click()
+    // Empty state shows in the default (graph) view, then switch to List so the
+    // Slice 07 row-based affordances are exercised (Risk 5).
+    await expect(
+      graphSection.getByText('No graph entities yet — add one.'),
+    ).toBeVisible({ timeout: 5_000 })
+    await graphSection.getByRole('button', { name: 'List' }).click()
 
-      const dialog = page.getByRole('dialog')
-      await expect(dialog).toBeVisible()
+    // Add a host node.
+    await graphSection.getByRole('button', { name: 'Add node' }).click()
+    const addDialog = page.getByRole('dialog')
+    await expect(addDialog.getByRole('heading', { name: 'Add Node' })).toBeVisible()
+    await addDialog.getByLabel('Type').selectOption('host')
+    await addDialog.getByLabel('Label').fill('10.0.0.5')
+    await addDialog.getByRole('button', { name: 'Create' }).click()
+    await expect(addDialog).not.toBeVisible({ timeout: 8_000 })
+    await expect(graphSection.getByText('10.0.0.5')).toBeVisible({ timeout: 8_000 })
 
-      await dialog.getByLabel(/name/i).fill(ENGAGEMENT_NAME)
-      await dialog.getByLabel(/scope/i).fill('10.0.0.0/24')
-      await dialog.getByRole('button', { name: /create/i }).click()
+    // Edit the node's label.
+    const liveRow = graphSection.getByRole('row').filter({ hasText: '10.0.0.5' })
+    await liveRow.getByRole('button', { name: 'Edit' }).click()
+    const editDialog = page.getByRole('dialog')
+    await expect(editDialog.getByRole('heading', { name: 'Edit Node' })).toBeVisible()
+    const labelInput = editDialog.getByLabel('Label')
+    await labelInput.clear()
+    await labelInput.fill('10.0.0.99')
+    await editDialog.getByRole('button', { name: 'Save' }).click()
+    await expect(editDialog).not.toBeVisible({ timeout: 8_000 })
+    await expect(graphSection.getByText('10.0.0.99')).toBeVisible({ timeout: 8_000 })
 
-      await expect(dialog).not.toBeVisible()
-      await expect(page.getByText(ENGAGEMENT_NAME)).toBeVisible()
+    // Delete the node.
+    const editedRow = graphSection.getByRole('row').filter({ hasText: '10.0.0.99' })
+    await editedRow.getByRole('button', { name: 'Delete' }).click()
+    await expect(graphSection.getByText('10.0.0.99')).not.toBeVisible({ timeout: 8_000 })
 
-      await page.getByRole('link', { name: /open/i }).first().click()
-      await page.waitForURL('**/workspace', { timeout: 10_000 })
+    // History → Undo restores it to the live list.
+    await graphSection.getByRole('button', { name: 'Show history' }).click()
+    await expect(graphSection.getByText('10.0.0.99')).toBeVisible({ timeout: 8_000 })
+    const historyRow = graphSection.getByRole('row').filter({ hasText: '10.0.0.99' })
+    await historyRow.getByRole('button', { name: 'Undo' }).click()
+    await expect(graphSection.getByText('No deleted entities.')).toBeVisible({
+      timeout: 5_000,
+    })
+  })
+})
 
-      // Scope the remaining selectors to the Graph section of the workspace.
-      const graphSection = page.getByRole('region', { name: 'Graph' })
-      await expect(graphSection).toBeVisible({ timeout: 8_000 })
+// ---------------------------------------------------------------------------
+// Journey B — Slice 08 canvas: render, select, pin (persist), edit, delete
+// ---------------------------------------------------------------------------
 
-      // --------------------------------------------------------------------
-      // Step 3: Assert the empty state is shown.
-      // --------------------------------------------------------------------
-      await expect(
-        graphSection.getByText('No graph entities yet — add one.'),
-      ).toBeVisible({ timeout: 5_000 })
+test.describe('Graph canvas visualization journey', () => {
+  test('admin renders, pins (persists), edits and deletes via the canvas', async ({
+    page,
+  }) => {
+    test.skip(!STACK_AVAILABLE, 'Set E2E_STACK=1 to run against the compose stack')
 
-      // --------------------------------------------------------------------
-      // Step 4: Add a host node.
-      // --------------------------------------------------------------------
-      await graphSection.getByRole('button', { name: 'Add node' }).click()
+    await loginAs(page, ADMIN_USERNAME, ADMIN_PASSWORD)
+    const graphSection = await createEngagementAndOpenGraph(
+      page,
+      `Graph E2E canvas ${Date.now()}`,
+    )
 
-      const addDialog = page.getByRole('dialog')
-      await expect(addDialog).toBeVisible()
-      await expect(addDialog.getByRole('heading', { name: 'Add Node' })).toBeVisible()
+    // Default view is the force-directed canvas; empty state first.
+    await expect(graphSection.getByTestId('graph-canvas-empty')).toBeVisible({
+      timeout: 5_000,
+    })
 
-      // Type defaults to "host" — confirm or set explicitly.
-      await addDialog.getByLabel('Type').selectOption('host')
-      await addDialog.getByLabel('Label').fill('10.0.0.5')
-      await addDialog.getByRole('button', { name: 'Create' }).click()
+    // Add a single host node — it becomes the centred node on the canvas.
+    await addNode(page, graphSection, 'host', '10.0.0.5')
 
-      // Dialog closes on success.
-      await expect(addDialog).not.toBeVisible({ timeout: 8_000 })
+    // The live canvas region renders (empty state gone).
+    const canvas = graphSection.getByTestId('graph-canvas')
+    await expect(canvas).toBeVisible({ timeout: 8_000 })
+    await expect(graphSection.getByTestId('graph-canvas-empty')).not.toBeVisible()
+    // Give Cytoscape a beat to lay out + fit the single node to the viewport.
+    await page.waitForTimeout(800)
 
-      // Node appears in the live list.
-      await expect(graphSection.getByText('10.0.0.5')).toBeVisible({ timeout: 8_000 })
+    // Select the centred node by tapping the canvas centre.
+    await canvas.click()
+    const panel = graphSection.getByTestId('selected-node-panel')
+    await expect(panel).toBeVisible({ timeout: 5_000 })
 
-      // Empty state is gone.
-      await expect(
-        graphSection.getByText('No graph entities yet — add one.'),
-      ).not.toBeVisible()
+    // Pin it.
+    await panel.getByRole('button', { name: 'Pin' }).click()
+    await expect(panel.getByTestId('pinned-badge')).toBeVisible()
+    await expect(panel.getByRole('button', { name: 'Unpin' })).toBeVisible()
 
-      // --------------------------------------------------------------------
-      // Step 5: Edit the node's label.
-      // --------------------------------------------------------------------
-      // Click the Edit button in the row that contains "10.0.0.5".
-      const liveRow = graphSection.getByRole('row').filter({ hasText: '10.0.0.5' })
-      await liveRow.getByRole('button', { name: 'Edit' }).click()
+    // Reload — the pin (localStorage) must persist for this engagement.
+    await page.reload()
+    await page.waitForURL('**/workspace', { timeout: 10_000 })
+    const graphSection2 = page.getByRole('region', { name: 'Graph' })
+    const canvas2 = graphSection2.getByTestId('graph-canvas')
+    await expect(canvas2).toBeVisible({ timeout: 8_000 })
+    await page.waitForTimeout(800)
+    await canvas2.click()
+    const panel2 = graphSection2.getByTestId('selected-node-panel')
+    await expect(panel2).toBeVisible({ timeout: 5_000 })
+    await expect(panel2.getByRole('button', { name: 'Unpin' })).toBeVisible()
+    await expect(panel2.getByTestId('pinned-badge')).toBeVisible()
 
-      const editDialog = page.getByRole('dialog')
-      await expect(editDialog).toBeVisible()
-      await expect(editDialog.getByRole('heading', { name: 'Edit Node' })).toBeVisible()
+    // Edit the node's label from the panel (reuses NodeEditDialog).
+    await panel2.getByRole('button', { name: 'Edit' }).click()
+    const editDialog = page.getByRole('dialog')
+    await expect(editDialog.getByRole('heading', { name: 'Edit Node' })).toBeVisible()
+    const labelInput = editDialog.getByLabel('Label')
+    await labelInput.clear()
+    await labelInput.fill('10.0.0.42')
+    await editDialog.getByRole('button', { name: 'Save' }).click()
+    await expect(editDialog).not.toBeVisible({ timeout: 8_000 })
+    await page.waitForTimeout(800)
 
-      // Clear and fill new label.
-      const labelInput = editDialog.getByLabel('Label')
-      await labelInput.clear()
-      await labelInput.fill('10.0.0.99')
-      await editDialog.getByRole('button', { name: 'Save' }).click()
+    // Delete the node from the panel — panel disappears, empty state returns.
+    await canvas2.click()
+    const panel3 = graphSection2.getByTestId('selected-node-panel')
+    await expect(panel3).toBeVisible({ timeout: 5_000 })
+    await panel3.getByRole('button', { name: 'Delete' }).click()
+    await expect(graphSection2.getByTestId('selected-node-panel')).not.toBeVisible({
+      timeout: 8_000,
+    })
+    await expect(graphSection2.getByTestId('graph-canvas-empty')).toBeVisible({
+      timeout: 8_000,
+    })
 
-      // Dialog closes on success.
-      await expect(editDialog).not.toBeVisible({ timeout: 8_000 })
-
-      // New label appears; old label gone.
-      await expect(graphSection.getByText('10.0.0.99')).toBeVisible({ timeout: 8_000 })
-      await expect(graphSection.getByText('10.0.0.5')).not.toBeVisible()
-
-      // --------------------------------------------------------------------
-      // Step 6: Delete the node.
-      // --------------------------------------------------------------------
-      const editedRow = graphSection.getByRole('row').filter({ hasText: '10.0.0.99' })
-      await editedRow.getByRole('button', { name: 'Delete' }).click()
-
-      // Node disappears from the live list.
-      await expect(graphSection.getByText('10.0.0.99')).not.toBeVisible({ timeout: 8_000 })
-
-      // Empty state reappears.
-      await expect(
-        graphSection.getByText('No graph entities yet — add one.'),
-      ).toBeVisible({ timeout: 5_000 })
-
-      // --------------------------------------------------------------------
-      // Step 7: Open History and assert the deleted node is listed.
-      // --------------------------------------------------------------------
-      await graphSection.getByRole('button', { name: 'Show history' }).click()
-
-      // Panel expands; deleted node entry appears.
-      await expect(graphSection.getByText('10.0.0.99')).toBeVisible({ timeout: 8_000 })
-
-      // The history empty state should NOT be shown (there is one deleted node).
-      await expect(graphSection.getByText('No deleted entities.')).not.toBeVisible()
-
-      // --------------------------------------------------------------------
-      // Step 8: Undo — assert the node reappears in the live list.
-      // --------------------------------------------------------------------
-      const historyRow = graphSection.getByRole('row').filter({ hasText: '10.0.0.99' })
-      await historyRow.getByRole('button', { name: 'Undo' }).click()
-
-      // Node reappears in the live list after undo.
-      // The live GraphNodeList re-fetches on mutation success.
-      await expect(graphSection.getByText('10.0.0.99')).toBeVisible({ timeout: 8_000 })
-
-      // The deleted node is no longer in the history panel (history is now empty).
-      await expect(graphSection.getByText('No deleted entities.')).toBeVisible({
-        timeout: 5_000,
-      })
-    },
-  )
+    // Multi-node render: two nodes both land on the canvas.
+    await addNode(page, graphSection2, 'host', 'host-a')
+    await addNode(page, graphSection2, 'service', 'svc-b')
+    await expect(graphSection2.getByTestId('graph-canvas')).toBeVisible({ timeout: 8_000 })
+    await expect(graphSection2.getByTestId('graph-canvas-empty')).not.toBeVisible()
+  })
 })
