@@ -33,7 +33,9 @@ def on_slot_limit_changed(listener: SlotLimitListener) -> None:
 
 def emit_slot_limit_changed(engagement_id: UUID, slot_limit: int) -> None:
     """Notify all registered listeners that *engagement_id*'s slot limit is now *slot_limit*."""
-    for listener in _slot_limit_listeners:
+    # Iterate a snapshot so a listener that (un)registers during dispatch can't
+    # mutate the list mid-iteration.
+    for listener in list(_slot_limit_listeners):
         listener(engagement_id, slot_limit)
 
 

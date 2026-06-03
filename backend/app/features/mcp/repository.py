@@ -35,9 +35,11 @@ async def create_tool_run(
     The caller is responsible for committing (or not) the transaction.
 
     Args:
-        status:      Initial status for the run.  Defaults to ``'completed'`` so
-                     existing callers (sync path) are unaffected.  Pass
-                     ``'running'`` for the async path.
+        status:      Initial status for the run.  The sync path passes
+                     ``'running'`` and the async path passes ``'queued'`` (heavy)
+                     or ``'running'`` (light) so a crash leaves a phantom that
+                     startup reconciliation can fail.  The ``'completed'`` default
+                     is only a fallback for any other call site.
         preset_name: Optional name of the preset the user selected.
     """
     tool_run = ToolRun(
