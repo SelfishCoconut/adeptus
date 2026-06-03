@@ -635,6 +635,11 @@ async def pop_undo_stack(
     returns ``UndoResult(undone=None, ...)`` — NOT an error/422. A pop never
     pushes a new entry (no redo).
 
+    AUDIT SEAM (Slice 10): this is the single chokepoint for "a human graph write
+    was undone" (the counterpart to repository.push_undo_entry). Slice 10 attaches
+    audit emission here. Per Decision 4 NO audit module is imported or called in
+    this slice — the seam is left clean and documented only.
+
     Raises:
         EngagementNotFound: caller not a member or engagement missing (→404).
         EngagementArchived: engagement is archived (→409).

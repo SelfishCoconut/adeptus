@@ -406,8 +406,12 @@ async def push_undo_entry(
 
     This touches ONLY graph_user_undo_stack — never a graph entity — so it cannot
     violate the single-writer invariant (ADR-0001) and does NOT go through the
-    writer queue. Together with pop, this is one of the two chokepoints where
-    Slice 10 will attach audit emission (Decision 4); no audit module is imported.
+    writer queue.
+
+    AUDIT SEAM (Slice 10): this is the single chokepoint for "a human graph write
+    was recorded". Slice 10 attaches audit emission here (and at the pop chokepoint
+    service.pop_undo_stack). Per Decision 4 NO audit module is imported or called
+    in this slice — the seam is left clean and documented only.
     """
     entry = GraphUserUndoStack(
         engagement_id=engagement_id,
