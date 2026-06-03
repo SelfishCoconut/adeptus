@@ -48,6 +48,7 @@ from app.features.mcp.schemas import (
     QueueReason,
     ToolDescriptor,
     ToolPreset,
+    ToolQueueSnapshot,
     ToolRunPage,
     ToolRunResult,
     ToolRunStatus,
@@ -946,6 +947,45 @@ async def authenticate_ws_tool_run(
         return None
 
     return run
+
+
+async def get_tool_queue_snapshot(
+    db: AsyncSession,
+    *,
+    engagement_id: UUID,
+    user_id: UUID,
+) -> ToolQueueSnapshot:
+    """Return the in-process concurrency snapshot for an engagement.
+
+    Membership check (§4/§17.1):
+        Calls the same ``get_engagement_for_member`` chokepoint used by
+        ``execute_tool_run``.  Both "engagement does not exist" and "caller is
+        not a member" raise ``EngagementNotFound`` (→ 404), so a non-member
+        cannot infer that the engagement exists (no existence disclosure).
+
+    ``slot_limit`` is read from the engagement row fetched during the membership
+    check — no second DB round-trip.  If the in-process state has diverged
+    (e.g. the limit was just patched), the DB value is authoritative for this
+    read (the concurrency module is updated lazily on the next ``acquire`` call).
+
+    Returns:
+        ``ToolQueueSnapshot`` — all fields populated from the in-process state,
+        with ``slot_limit`` overridden by the persisted engagement setting.
+
+    Raises:
+        EngagementNotFound: engagement_id does not exist OR user_id is not a
+                            member (404, no existence disclosure).
+    """
+    member_pair = await eng_repo.get_engagement_for_member(db, engagement_id, user_id)
+    if member_pair is None:
+        raise EngagementNotFound(f"Engagement {engagement_id} not found")
+    engagement_obj, _ = member_pair
+
+    snap = concurrency.snapshot(engagement_id)
+    # Override slot_limit with the persisted value so the response always
+    # reflects the canonical DB configuration, not the stale in-process default.
+    snap = snap.model_copy(update={"slot_limit": int(engagement_obj.concurrency_slot_limit)})
+    return snap
 
 
 async def fetch_tool_run_row(db: AsyncSession, tool_run_id: UUID) -> ToolRun | None:

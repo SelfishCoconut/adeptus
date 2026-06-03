@@ -1,21 +1,23 @@
 """FastAPI routes for the MCP feature.
 
 Endpoints:
-  GET  /api/v1/admin/mcp-servers       — admin-only; returns list[McpServerInfo]
-  GET  /api/v1/mcp/tools               — any authenticated session; returns flat
-                                         list[ToolDescriptor] aggregated across all
-                                         registered MCP servers (no engagement scope,
-                                         no admin requirement)
-  POST /api/v1/tool-runs               — requires authenticated session AND explicit
-                                         engagement membership (no admin bypass — §4)
-  GET  /api/v1/tool-runs               — paginated list of tool runs for an engagement;
-                                         requires explicit membership (§4/§17.1)
-  GET  /api/v1/tool-runs/{tool_run_id} — single tool run; requires membership on its
-                                         engagement (§4/§17.1)
-  WS   /ws/tool-runs/{tool_run_id}     — WebSocket; streams live output chunks for
-                                         an async tool run, or replays stored output
-                                         for a completed run; auth via session cookie;
-                                         closes 4003 on auth failure or non-member.
+  GET  /api/v1/admin/mcp-servers
+      Admin-only; returns list[McpServerInfo].
+  GET  /api/v1/mcp/tools
+      Any authenticated session; flat list[ToolDescriptor] (no engagement scope).
+  POST /api/v1/tool-runs
+      Requires authenticated session AND explicit engagement membership (§4).
+  GET  /api/v1/tool-runs
+      Paginated list of tool runs; explicit membership required (§4/§17.1).
+  GET  /api/v1/tool-runs/{tool_run_id}
+      Single tool run; membership on its engagement required (§4/§17.1).
+  GET  /api/v1/engagements/{engagement_id}/tool-queue
+      In-process concurrency snapshot; membership-gated (404 for non-members,
+      no existence disclosure — §17.1/§4); Decision Q3.
+  WS   /ws/tool-runs/{tool_run_id}
+      WebSocket; streams live output chunks for an async tool run, or replays
+      stored output for a completed run; auth via session cookie;
+      closes 4003 on auth failure or non-member.
 
 Most domain exceptions subclass the core error hierarchy and are translated by
 the registered handlers in app.core.errors.handlers:
@@ -47,6 +49,7 @@ from app.features.mcp import service
 from app.features.mcp.schemas import (
     McpServerInfo,
     ToolDescriptor,
+    ToolQueueSnapshot,
     ToolRunCreate,
     ToolRunPage,
     ToolRunResult,
@@ -211,6 +214,48 @@ async def get_tool_run(
     return await service.get_tool_run(
         db,
         tool_run_id=tool_run_id,
+        user_id=current_user.id,  # type: ignore[arg-type]
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/engagements/{engagement_id}/tool-queue
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/api/v1/engagements/{engagement_id}/tool-queue",
+    response_model=ToolQueueSnapshot,
+    operation_id="get_tool_queue",
+    tags=["tools"],
+)
+async def get_tool_queue(
+    engagement_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> ToolQueueSnapshot:
+    """Return the live concurrency snapshot for an engagement's heavy-tool pool.
+
+    Used by the Tool Runner queue strip to display "N running / M queued".
+    Membership-gated via the same ``get_engagement_for_member`` chokepoint used
+    by ``execute_tool_run`` (§4 no-admin-bypass, §17.1 no-existence-disclosure):
+    both a missing engagement and a non-member return 404.
+
+    Decision Q3: this endpoint lives in the mcp feature router under the
+    engagement-scoped path because the queue is a tool-runner concern; its
+    schemas and service logic all live in ``mcp``.
+
+    Returns:
+        ``ToolQueueSnapshot`` — slot_limit from the DB row, running_count and
+        queued_count from the in-process admission manager.
+
+    Raises (translated to HTTP by the registered error handlers):
+        EngagementNotFound (NotFoundError → 404): engagement_id missing or
+            caller is not a member (no existence disclosure per §17.1).
+    """
+    return await service.get_tool_queue_snapshot(
+        db,
+        engagement_id=engagement_id,
         user_id=current_user.id,  # type: ignore[arg-type]
     )
 
