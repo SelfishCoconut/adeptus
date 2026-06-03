@@ -5,6 +5,12 @@ import { ToolRunnerPanel } from './ToolRunnerPanel'
 
 // Stub the children so the panel's wiring (tabs + active run id) is tested in
 // isolation from the form / console / history internals.
+vi.mock('./ToolQueueStrip', () => ({
+  ToolQueueStrip: ({ engagementId }: { engagementId: string }) => (
+    <div data-testid="tool-queue-strip-mock">strip:{engagementId}</div>
+  ),
+}))
+
 vi.mock('./ToolRunnerForm', () => ({
   ToolRunnerForm: ({
     engagementId,
@@ -47,6 +53,21 @@ describe('ToolRunnerPanel', () => {
     expect(screen.getByText(`form:${ENGAGEMENT_ID}`)).toBeInTheDocument()
     expect(screen.getByText('console:none')).toBeInTheDocument()
     expect(screen.queryByText('history')).not.toBeInTheDocument()
+  })
+
+  it('renders ToolQueueStrip in the Runner tab with the engagement id', () => {
+    render(<ToolRunnerPanel engagementId={ENGAGEMENT_ID} />)
+    expect(screen.getByTestId('tool-queue-strip-mock')).toBeInTheDocument()
+    expect(screen.getByTestId('tool-queue-strip-mock')).toHaveTextContent(
+      `strip:${ENGAGEMENT_ID}`,
+    )
+  })
+
+  it('does not render ToolQueueStrip when on the History tab', async () => {
+    const user = userEvent.setup()
+    render(<ToolRunnerPanel engagementId={ENGAGEMENT_ID} />)
+    await user.click(screen.getByRole('tab', { name: 'History' }))
+    expect(screen.queryByTestId('tool-queue-strip-mock')).not.toBeInTheDocument()
   })
 
   it('switches to the History tab', async () => {

@@ -298,6 +298,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/engagements/{engagement_id}/tool-queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Tool Queue
+         * @description Return the live concurrency snapshot for an engagement's heavy-tool pool.
+         *
+         *     Used by the Tool Runner queue strip to display "N running / M queued".
+         *     Membership-gated via the same ``get_engagement_for_member`` chokepoint used
+         *     by ``execute_tool_run`` (§4 no-admin-bypass, §17.1 no-existence-disclosure):
+         *     both a missing engagement and a non-member return 404.
+         *
+         *     Decision Q3: this endpoint lives in the mcp feature router under the
+         *     engagement-scoped path because the queue is a tool-runner concern; its
+         *     schemas and service logic all live in ``mcp``.
+         *
+         *     Returns:
+         *         ``ToolQueueSnapshot`` — slot_limit from the DB row, running_count and
+         *         queued_count from the in-process admission manager.
+         *
+         *     Raises (translated to HTTP by the registered error handlers):
+         *         EngagementNotFound (NotFoundError → 404): engagement_id missing or
+         *             caller is not a member (no existence disclosure per §17.1).
+         */
+        get: operations["get_tool_queue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -360,6 +397,8 @@ export interface components {
              * @enum {string}
              */
             privacy_mode: "local_only" | "cloud_enabled";
+            /** Concurrency Slot Limit */
+            concurrency_slot_limit: number;
         };
         /** EngagementSummary */
         EngagementSummary: {
@@ -395,6 +434,8 @@ export interface components {
         EngagementUpdate: {
             /** Privacy Mode */
             privacy_mode?: ("local_only" | "cloud_enabled") | null;
+            /** Concurrency Slot Limit */
+            concurrency_slot_limit?: number | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -459,6 +500,41 @@ export interface components {
             joined_at: string;
         };
         /**
+         * QueuedRun
+         * @description A single run waiting for admission in the FIFO queue.
+         *
+         *     Returned as part of ``ToolQueueSnapshot``; the ``position`` field is
+         *     1-based (1 = next to admit).  ``target_host`` is ``None`` for tools that
+         *     take no ``target`` arg (they acquire only a slot, no host lock).
+         *     ``enqueued_at`` is the wall-clock time the ticket was created — it lives
+         *     in the in-process queue only and is NOT persisted to the DB.
+         */
+        QueuedRun: {
+            /**
+             * Tool Run Id
+             * Format: uuid
+             */
+            tool_run_id: string;
+            /** Server Name */
+            server_name: string;
+            /** Tool Name */
+            tool_name: string;
+            /** Target Host */
+            target_host: string | null;
+            /** Position */
+            position: number;
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "slot_full" | "target_locked";
+            /**
+             * Enqueued At
+             * Format: date-time
+             */
+            enqueued_at: string;
+        };
+        /**
          * ToolDescriptor
          * @description Enriched descriptor for a tool, including presets and arg schema.
          *
@@ -497,6 +573,24 @@ export interface components {
             args: {
                 [key: string]: unknown;
             };
+        };
+        /**
+         * ToolQueueSnapshot
+         * @description Snapshot of the heavy-tool concurrency pool for one engagement.
+         *
+         *     Returned by ``GET /api/v1/engagements/{engagement_id}/tool-queue``.
+         *     All fields are derived from the in-process admission manager; nothing is
+         *     read from the DB at snapshot time (the DB has status rows but no queue order).
+         */
+        ToolQueueSnapshot: {
+            /** Slot Limit */
+            slot_limit: number;
+            /** Running Count */
+            running_count: number;
+            /** Queued Count */
+            queued_count: number;
+            /** Queued */
+            queued: components["schemas"]["QueuedRun"][];
         };
         /**
          * ToolRunCreate
@@ -544,6 +638,11 @@ export interface components {
         /**
          * ToolRunResult
          * @description Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}.
+         *
+         *     Slice 05 additions:
+         *     - ``status`` gains the ``"queued"`` member (via ``ToolRunStatus``).
+         *     - ``queue_position`` is the 1-based FIFO position while ``status == "queued"``;
+         *       ``None`` once running or terminal, and always ``None`` for light runs.
          */
         ToolRunResult: {
             /**
@@ -577,9 +676,11 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "running" | "completed" | "failed" | "timed_out";
+            status: "queued" | "running" | "completed" | "failed" | "timed_out";
             /** Preset Name */
             preset_name?: string | null;
+            /** Queue Position */
+            queue_position?: number | null;
         };
         /** UserMe */
         UserMe: {
@@ -1093,6 +1194,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ToolRunResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_tool_queue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolQueueSnapshot"];
                 };
             };
             /** @description Validation Error */

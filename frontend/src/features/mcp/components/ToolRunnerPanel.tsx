@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ToolRunnerForm } from './ToolRunnerForm'
 import { ToolOutputConsole } from './ToolOutputConsole'
 import { ToolRunHistory } from './ToolRunHistory'
+import { ToolQueueStrip } from './ToolQueueStrip'
 
 type Tab = 'runner' | 'history'
 
@@ -56,6 +57,7 @@ export function ToolRunnerPanel({ engagementId }: ToolRunnerPanelProps) {
 
       {tab === 'runner' ? (
         <div role="tabpanel" className="flex flex-col gap-4">
+          <ToolQueueStrip engagementId={engagementId} />
           <ToolRunnerForm engagementId={engagementId} onRunStarted={setActiveRunId} />
           <ToolOutputConsole toolRunId={activeRunId} />
         </div>

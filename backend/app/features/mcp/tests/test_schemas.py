@@ -2,11 +2,16 @@
 
 Covers field presence, types, enum membership, and the timeout_seconds
 1–300 range validation on ToolRunCreate.
+
+Also covers the _row_to_result mapping (Task 6): queue_position is populated
+from concurrency.position_of when status == 'queued', and None otherwise.
 """
 
 import uuid
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -386,3 +391,239 @@ class TestWebSocketOutputChunk:
         restored = WebSocketOutputChunk.model_validate(as_dict)
         assert restored.type == "stdout"
         assert restored.data == "line\n"
+
+    def test_queued_type_accepted(self) -> None:
+        chunk = WebSocketOutputChunk(type="queued", queue_position=2, reason="slot_full")
+        assert chunk.type == "queued"
+        assert chunk.queue_position == 2
+        assert chunk.reason == "slot_full"
+
+    def test_started_type_accepted(self) -> None:
+        chunk = WebSocketOutputChunk(type="started")
+        assert chunk.type == "started"
+        assert chunk.queue_position is None
+        assert chunk.reason is None
+
+    def test_reason_target_locked_accepted(self) -> None:
+        chunk = WebSocketOutputChunk(type="queued", queue_position=1, reason="target_locked")
+        assert chunk.reason == "target_locked"
+
+    def test_invalid_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            WebSocketOutputChunk.model_validate({"type": "queued", "reason": "unknown_reason"})
+
+
+# ---------------------------------------------------------------------------
+# ToolRunResult — queue_position field (Task 6)
+# ---------------------------------------------------------------------------
+
+
+class TestToolRunResultQueuePosition:
+    """Verify queue_position field on ToolRunResult schema."""
+
+    def _make(self, **overrides: Any) -> dict[str, Any]:
+        now = datetime.now(tz=UTC)
+        return {
+            "tool_run_id": str(uuid4()),
+            "engagement_id": str(uuid4()),
+            "server_name": "httpx",
+            "tool_name": "run_httpx_heavy",
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": now,
+            "finished_at": None,
+            "status": "queued",
+            **overrides,
+        }
+
+    def test_queue_position_defaults_to_none(self) -> None:
+        result = ToolRunResult.model_validate(self._make())
+        assert result.queue_position is None
+
+    def test_queue_position_accepted(self) -> None:
+        result = ToolRunResult.model_validate(self._make(queue_position=3))
+        assert result.queue_position == 3
+
+    def test_queue_position_none_for_running(self) -> None:
+        result = ToolRunResult.model_validate(self._make(status="running", queue_position=None))
+        assert result.queue_position is None
+
+    def test_queued_status_accepted(self) -> None:
+        result = ToolRunResult.model_validate(self._make(status="queued"))
+        assert result.status == "queued"
+
+
+# ---------------------------------------------------------------------------
+# _row_to_result mapping (Task 6) — queue_position from concurrency.position_of
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_run_row(
+    *,
+    run_id: uuid.UUID | None = None,
+    status: str = "completed",
+) -> MagicMock:
+    """Build a minimal ToolRun-like mock for _row_to_result testing."""
+    now = datetime.now(tz=UTC)
+    row = MagicMock()
+    row.id = run_id or uuid4()
+    row.engagement_id = uuid4()
+    row.server_name = "httpx"
+    row.tool_name = "run_httpx_heavy"
+    row.exit_code = None
+    row.stdout = ""
+    row.stderr = ""
+    row.started_at = now
+    row.finished_at = None
+    row.status = status
+    row.preset_name = None
+    return row
+
+
+class TestRowToResultMapping:
+    """Unit tests for service._row_to_result queue_position population (Task 6)."""
+
+    def setup_method(self) -> None:
+        from app.features.mcp import concurrency
+
+        concurrency._reset()
+
+    def teardown_method(self) -> None:
+        from app.features.mcp import concurrency
+
+        concurrency._reset()
+
+    def test_queued_row_gets_live_position(self) -> None:
+        """A row with status='queued' gets queue_position from concurrency.position_of."""
+        from app.features.mcp.service import _row_to_result
+
+        run_id = uuid4()
+        row = _make_tool_run_row(run_id=run_id, status="queued")
+
+        with patch(
+            "app.features.mcp.service.concurrency.position_of",
+            return_value=2,
+        ) as mock_pos:
+            result = _row_to_result(row)
+
+        mock_pos.assert_called_once_with(run_id)
+        assert result.queue_position == 2
+        assert result.status == "queued"
+
+    def test_queued_row_not_in_queue_returns_none(self) -> None:
+        """A 'queued' row that's no longer in the in-process queue returns None."""
+        from app.features.mcp.service import _row_to_result
+
+        run_id = uuid4()
+        row = _make_tool_run_row(run_id=run_id, status="queued")
+
+        with patch(
+            "app.features.mcp.service.concurrency.position_of",
+            return_value=None,
+        ):
+            result = _row_to_result(row)
+
+        assert result.queue_position is None
+        assert result.status == "queued"
+
+    def test_running_row_has_no_queue_position(self) -> None:
+        """A running row always has queue_position=None; position_of is not called."""
+        from app.features.mcp.service import _row_to_result
+
+        row = _make_tool_run_row(status="running")
+
+        with patch(
+            "app.features.mcp.service.concurrency.position_of",
+        ) as mock_pos:
+            result = _row_to_result(row)
+
+        mock_pos.assert_not_called()
+        assert result.queue_position is None
+        assert result.status == "running"
+
+    def test_completed_row_has_no_queue_position(self) -> None:
+        """A completed row always has queue_position=None."""
+        from app.features.mcp.service import _row_to_result
+
+        row = _make_tool_run_row(status="completed")
+
+        with patch("app.features.mcp.service.concurrency.position_of") as mock_pos:
+            result = _row_to_result(row)
+
+        mock_pos.assert_not_called()
+        assert result.queue_position is None
+
+    def test_failed_row_has_no_queue_position(self) -> None:
+        """A failed row always has queue_position=None."""
+        from app.features.mcp.service import _row_to_result
+
+        row = _make_tool_run_row(status="failed")
+
+        with patch("app.features.mcp.service.concurrency.position_of") as mock_pos:
+            result = _row_to_result(row)
+
+        mock_pos.assert_not_called()
+        assert result.queue_position is None
+
+    def test_timed_out_row_has_no_queue_position(self) -> None:
+        """A timed_out row always has queue_position=None."""
+        from app.features.mcp.service import _row_to_result
+
+        row = _make_tool_run_row(status="timed_out")
+
+        with patch("app.features.mcp.service.concurrency.position_of") as mock_pos:
+            result = _row_to_result(row)
+
+        mock_pos.assert_not_called()
+        assert result.queue_position is None
+
+    def test_queued_position_first_in_queue(self) -> None:
+        """A run at position 1 (front of queue) gets queue_position=1."""
+        from app.features.mcp.service import _row_to_result
+
+        run_id = uuid4()
+        row = _make_tool_run_row(run_id=run_id, status="queued")
+
+        with patch(
+            "app.features.mcp.service.concurrency.position_of",
+            return_value=1,
+        ):
+            result = _row_to_result(row)
+
+        assert result.queue_position == 1
+
+    def test_mapping_preserves_other_fields(self) -> None:
+        """_row_to_result still maps all non-queue fields correctly."""
+        from app.features.mcp.service import _row_to_result
+
+        run_id = uuid4()
+        engagement_id = uuid4()
+        now = datetime.now(tz=UTC)
+        row = MagicMock()
+        row.id = run_id
+        row.engagement_id = engagement_id
+        row.server_name = "httpx"
+        row.tool_name = "run_httpx_heavy"
+        row.exit_code = None
+        row.stdout = "some output"
+        row.stderr = "some error"
+        row.started_at = now
+        row.finished_at = None
+        row.status = "queued"
+        row.preset_name = "my-preset"
+
+        with patch(
+            "app.features.mcp.service.concurrency.position_of",
+            return_value=3,
+        ):
+            result = _row_to_result(row)
+
+        assert result.tool_run_id == run_id
+        assert result.engagement_id == engagement_id
+        assert result.server_name == "httpx"
+        assert result.tool_name == "run_httpx_heavy"
+        assert result.stdout == "some output"
+        assert result.stderr == "some error"
+        assert result.preset_name == "my-preset"
+        assert result.queue_position == 3

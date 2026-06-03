@@ -654,6 +654,51 @@
           }
         }
       }
+    },
+    "/api/v1/engagements/{engagement_id}/tool-queue": {
+      "get": {
+        "tags": [
+          "mcp",
+          "tools"
+        ],
+        "summary": "Get Tool Queue",
+        "description": "Return the live concurrency snapshot for an engagement's heavy-tool pool.\n\nUsed by the Tool Runner queue strip to display \"N running / M queued\".\nMembership-gated via the same ``get_engagement_for_member`` chokepoint used\nby ``execute_tool_run`` (\u00a74 no-admin-bypass, \u00a717.1 no-existence-disclosure):\nboth a missing engagement and a non-member return 404.\n\nDecision Q3: this endpoint lives in the mcp feature router under the\nengagement-scoped path because the queue is a tool-runner concern; its\nschemas and service logic all live in ``mcp``.\n\nReturns:\n    ``ToolQueueSnapshot`` \u2014 slot_limit from the DB row, running_count and\n    queued_count from the in-process admission manager.\n\nRaises (translated to HTTP by the registered error handlers):\n    EngagementNotFound (NotFoundError \u2192 404): engagement_id missing or\n        caller is not a member (no existence disclosure per \u00a717.1).",
+        "operationId": "get_tool_queue",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolQueueSnapshot"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -772,6 +817,10 @@
               "cloud_enabled"
             ],
             "title": "Privacy Mode"
+          },
+          "concurrency_slot_limit": {
+            "type": "integer",
+            "title": "Concurrency Slot Limit"
           }
         },
         "type": "object",
@@ -784,7 +833,8 @@
           "created_at",
           "updated_at",
           "member_role",
-          "privacy_mode"
+          "privacy_mode",
+          "concurrency_slot_limit"
         ],
         "title": "EngagementDetail"
       },
@@ -856,6 +906,19 @@
               }
             ],
             "title": "Privacy Mode"
+          },
+          "concurrency_slot_limit": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 16.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Concurrency Slot Limit"
           }
         },
         "type": "object",
@@ -988,6 +1051,63 @@
         ],
         "title": "MemberEntry"
       },
+      "QueuedRun": {
+        "properties": {
+          "tool_run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tool Run Id"
+          },
+          "server_name": {
+            "type": "string",
+            "title": "Server Name"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "target_host": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Host"
+          },
+          "position": {
+            "type": "integer",
+            "title": "Position"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "slot_full",
+              "target_locked"
+            ],
+            "title": "Reason"
+          },
+          "enqueued_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Enqueued At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tool_run_id",
+          "server_name",
+          "tool_name",
+          "target_host",
+          "position",
+          "reason",
+          "enqueued_at"
+        ],
+        "title": "QueuedRun",
+        "description": "A single run waiting for admission in the FIFO queue.\n\nReturned as part of ``ToolQueueSnapshot``; the ``position`` field is\n1-based (1 = next to admit).  ``target_host`` is ``None`` for tools that\ntake no ``target`` arg (they acquire only a slot, no host lock).\n``enqueued_at`` is the wall-clock time the ticket was created \u2014 it lives\nin the in-process queue only and is NOT persisted to the DB."
+      },
       "ToolDescriptor": {
         "properties": {
           "server_name": {
@@ -1068,6 +1188,38 @@
         ],
         "title": "ToolPreset",
         "description": "A named preset for a tool, bundling a set of default arguments."
+      },
+      "ToolQueueSnapshot": {
+        "properties": {
+          "slot_limit": {
+            "type": "integer",
+            "title": "Slot Limit"
+          },
+          "running_count": {
+            "type": "integer",
+            "title": "Running Count"
+          },
+          "queued_count": {
+            "type": "integer",
+            "title": "Queued Count"
+          },
+          "queued": {
+            "items": {
+              "$ref": "#/components/schemas/QueuedRun"
+            },
+            "type": "array",
+            "title": "Queued"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slot_limit",
+          "running_count",
+          "queued_count",
+          "queued"
+        ],
+        "title": "ToolQueueSnapshot",
+        "description": "Snapshot of the heavy-tool concurrency pool for one engagement.\n\nReturned by ``GET /api/v1/engagements/{engagement_id}/tool-queue``.\nAll fields are derived from the in-process admission manager; nothing is\nread from the DB at snapshot time (the DB has status rows but no queue order)."
       },
       "ToolRunCreate": {
         "properties": {
@@ -1213,6 +1365,7 @@
           "status": {
             "type": "string",
             "enum": [
+              "queued",
               "running",
               "completed",
               "failed",
@@ -1230,6 +1383,17 @@
               }
             ],
             "title": "Preset Name"
+          },
+          "queue_position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Position"
           }
         },
         "type": "object",
@@ -1246,7 +1410,7 @@
           "status"
         ],
         "title": "ToolRunResult",
-        "description": "Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}."
+        "description": "Response body for POST /api/v1/tool-runs and GET /api/v1/tool-runs/{id}.\n\nSlice 05 additions:\n- ``status`` gains the ``\"queued\"`` member (via ``ToolRunStatus``).\n- ``queue_position`` is the 1-based FIFO position while ``status == \"queued\"``;\n  ``None`` once running or terminal, and always ``None`` for light runs."
       },
       "UserMe": {
         "properties": {

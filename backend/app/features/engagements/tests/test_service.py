@@ -31,6 +31,7 @@ def _make_engagement(
     client_info: str | None = "ACME Corp",
     status: str = "active",
     privacy_mode: str = "local_only",
+    concurrency_slot_limit: int = 3,
 ) -> MagicMock:
     eng = MagicMock()
     eng.id = engagement_id or uuid4()
@@ -39,6 +40,7 @@ def _make_engagement(
     eng.client_info = client_info
     eng.status = status
     eng.privacy_mode = privacy_mode
+    eng.concurrency_slot_limit = concurrency_slot_limit
     eng.created_at = NOW
     eng.updated_at = NOW
     return eng
@@ -541,7 +543,9 @@ async def test_update_engagement_owner_changes_mode(db: AsyncMock, caller: Magic
     ):
         result = await service.update_engagement(db, caller, eng_id, data)
 
-    mock_update.assert_awaited_once_with(db, eng_id, privacy_mode="cloud_enabled")
+    mock_update.assert_awaited_once_with(
+        db, eng_id, privacy_mode="cloud_enabled", concurrency_slot_limit=None
+    )
     assert result.privacy_mode == "cloud_enabled"
     assert result.member_role == "owner"
 

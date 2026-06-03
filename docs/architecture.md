@@ -34,6 +34,7 @@ The full operational architecture for how Claude Code builds Adeptus is in `CLAU
 - **Pattern-friction egress** (engagement-level): when cloud is enabled and a message looks like it contains a secret, present a confirmation modal — never silently redact.
 - **Server-side sessions** (ADR-0003): opaque cookie ID, session table in Postgres, instant revocation.
 - **RAG isolation by SQL filter**: every vector query has `WHERE engagement_id = ?`; per-engagement uploads and global curated KB are queried separately.
+- **In-process feature event seam** (ADR-0009): when one feature owns config another feature reacts to, the owner emits and the consumer subscribes at the composition root, keeping the dependency one-directional (e.g. an engagement slot-limit change notifies the mcp concurrency manager).
 
 ## Where to read more
 

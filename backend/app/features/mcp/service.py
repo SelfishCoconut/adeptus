@@ -28,7 +28,6 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
-from urllib.parse import urlparse
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,15 +36,18 @@ from app.core.db import get_sessionmaker
 from app.core.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.features.auth import repository as auth_repo
 from app.features.engagements import repository as eng_repo
+from app.features.mcp import concurrency, subprocess_manager
 from app.features.mcp import repository as mcp_repo
-from app.features.mcp import subprocess_manager
+from app.features.mcp.concurrency import AdmissionHandle
 from app.features.mcp.models import ToolRun
 from app.features.mcp.registry import get_registry
 from app.features.mcp.schemas import (
     McpServerInfo,
     McpToolDeclaration,
+    QueueReason,
     ToolDescriptor,
     ToolPreset,
+    ToolQueueSnapshot,
     ToolRunPage,
     ToolRunResult,
     ToolRunStatus,
@@ -236,9 +238,9 @@ def _enforce_sandbox_guard(args: dict[str, Any]) -> None:
       string: no-op (tools without a ``target`` field, e.g. run_command, are not
       guarded at this layer; run_command guarding is deferred to Slice 16 via the
       approval-gating mechanism — Risk 5).
-    - Otherwise extract the hostname from ``target`` (handles full URLs such as
-      ``http://localhost:3000`` and bare host[:port] strings such as ``localhost``),
-      strip any port suffix, lowercase, and check against ``_SANDBOX_HOSTS``.
+    - Otherwise extract the hostname from ``target`` using ``concurrency.parse_host``
+      (the same URL-parsing logic used by the per-target lock so that the guard host
+      and the lock host can never drift — Risk 5 deduplication).
 
     Reconciliation note: the slice task text mentions guarding both ``target``
     (run_httpx) and ``command`` (run_command).  Risk 5 in the same spec clarifies
@@ -262,27 +264,9 @@ def _enforce_sandbox_guard(args: dict[str, Any]) -> None:
     if not isinstance(target, str) or not target:
         return  # Nothing to guard for tools without a target.
 
-    # Extract the hostname from the target value.
-    # urlparse handles full URLs: ``http://localhost:3000`` → netloc ``localhost:3000``.
-    # For bare strings like ``localhost`` or ``juice-shop:3000``, urlparse treats
-    # them as ``scheme:path`` (scheme="localhost", path="3000") so netloc is empty.
-    # In that case parse the raw target string directly: split on ``:`` and take the
-    # first component to strip any port, then strip any path suffix.
-    parsed = urlparse(target)
-    if parsed.netloc:
-        # Full URL with scheme: use parsed.hostname which already strips the port
-        # AND any ``user:pass@`` userinfo (so ``http://localhost@evil.com`` → evil.com).
-        host = parsed.hostname or ""
-    else:
-        # Bare host[:port][/path] — urlparse gives no netloc. Re-parse with a
-        # synthetic ``//`` so the stdlib parser extracts the true authority. This
-        # is what defeats userinfo smuggling: a naive ``split(':')[0]`` reads
-        # ``localhost:3000@evil.com`` as the sandbox host ``localhost``, but the
-        # httpx binary would actually scan ``evil.com``. urlparse('//...').hostname
-        # correctly returns ``evil.com`` here, so the guard blocks it.
-        host = urlparse(f"//{target}").hostname or ""
-
-    host = host.lower()
+    # Delegate host extraction to the canonical concurrency.parse_host so that
+    # the guard host and the per-target lock host are always identical (Risk 5).
+    host = concurrency.parse_host(target)
 
     if host not in _SANDBOX_HOSTS:
         raise SandboxGuardViolation(
@@ -438,8 +422,11 @@ async def execute_tool_run(
     # get_engagement_for_member returns None when the engagement is missing OR the
     # caller has no explicit member row; both collapse to 404 so a non-member
     # cannot infer the engagement exists. Role is never consulted (§4 no-bypass).
-    if await eng_repo.get_engagement_for_member(db, engagement_id, user_id) is None:
+    member_pair = await eng_repo.get_engagement_for_member(db, engagement_id, user_id)
+    if member_pair is None:
         raise EngagementNotFound(f"Engagement {engagement_id} not found")
+    engagement_obj, _ = member_pair
+    slot_limit: int = cast(int, engagement_obj.concurrency_slot_limit)
 
     # Step 2: server name validation.
     registry = get_registry()
@@ -452,15 +439,40 @@ async def execute_tool_run(
     # See ``_enforce_sandbox_guard`` docstring for the Risk-5 reconciliation note.
     _enforce_sandbox_guard(args)
 
+    # Step 2c: resolve tool weight.  Admission control is weight-gated: light tools
+    # bypass the concurrency pool entirely; heavy tools acquire a slot + host lock.
+    # Branch on weight BEFORE any DB write so a light run is never charged a slot.
+    server_config = registry[server_name]
+    tool_config = next((t for t in server_config.tools if t.name == tool_name), None)
+    weight: str = tool_config.weight if tool_config is not None else "light"
+    is_heavy: bool = weight == "heavy"
+    target_host: str | None = (
+        concurrency.resolve_target_host(server_name, tool_name, args) if is_heavy else None
+    )
+
     if async_mode:
-        # Async path: insert running row, commit, launch background task, return partial.
+        # Async path: insert row, commit, launch background task, return 202.
+        # Heavy runs begin as 'queued'; the background task flips to 'running' on
+        # admission (Decision 6: started_at = admission time, not insert time).
+        # Light runs insert as 'running' — no admission step needed.
+
+        # SECURITY: pre-flight capacity check for heavy runs.  Must run BEFORE
+        # create_tool_run / db.commit() / asyncio.create_task() so that a full
+        # queue surfaces as HTTP 429 with NO row created and NO task spawned.
+        # The existing cap inside concurrency.acquire() is kept as defence-in-depth
+        # for the residual TOCTOU window, but the gross amplification is eliminated
+        # here.  Light runs are never queued so no check is needed for them.
+        if is_heavy:
+            concurrency.check_queue_capacity(engagement_id)
+
+        initial_status: ToolRunStatus = "queued" if is_heavy else "running"
         tool_run = await mcp_repo.create_tool_run(
             db,
             engagement_id=engagement_id,
             server_name=server_name,
             tool_name=tool_name,
             args=args,
-            status="running",
+            status=initial_status,
             preset_name=preset_name,
         )
         # Commit so the row is durable before we return 202 and hand off to the task.
@@ -471,10 +483,14 @@ async def execute_tool_run(
         task = asyncio.create_task(
             _stream_to_channel(
                 tool_run_id=tool_run_id,
+                engagement_id=engagement_id,
                 server_name=server_name,
                 tool_name=tool_name,
                 args=args,
                 timeout_seconds=float(timeout_seconds),
+                is_heavy=is_heavy,
+                slot_limit=slot_limit,
+                target_host=target_host,
             )
         )
         _background_tasks.add(task)
@@ -490,28 +506,71 @@ async def execute_tool_run(
             stderr="",
             started_at=tool_run.started_at,
             finished_at=None,
-            status="running",
+            status=initial_status,
             preset_name=preset_name,
         )
 
     # Step 3: insert in-flight ToolRun row (sync path).
+    # Pre-flight capacity check for heavy sync runs (same defence as async path).
+    if is_heavy:
+        concurrency.check_queue_capacity(engagement_id)
+    # Insert as 'running', not the default 'completed': a heavy sync run can
+    # block in concurrency.acquire() for a long time before it executes, and a
+    # crash/restart during that window must leave a phantom that startup
+    # reconciliation can fail (it only targets 'queued'/'running').  The terminal
+    # status is set unconditionally by update_tool_run_result below (Finding W3).
     tool_run = await mcp_repo.create_tool_run(
         db,
         engagement_id=engagement_id,
         server_name=server_name,
         tool_name=tool_name,
         args=args,
+        status="running",
         preset_name=preset_name,
     )
 
     # Step 4: call the MCP subprocess.
+    # For heavy sync runs: wrap in acquire/release so concurrent sync heavy runs
+    # against the same engagement also serialize (Decision 4).  The HTTP request
+    # simply blocks until admitted; no queue-position payload is returned (the
+    # response only ever reflects the terminal state).
     # McpServerDown propagates to the router; the row is left with exit_code NULL.
-    raw = await subprocess_manager.send_tool_call(
-        server_name=server_name,
-        tool_name=tool_name,
-        args=args,
-        timeout_seconds=float(timeout_seconds),
-    )
+    if is_heavy:
+        handle: AdmissionHandle | None = None
+        try:
+            # Sync callbacks are no-ops: the HTTP response only shows the final state.
+            def _sync_on_queued(position: int, reason: QueueReason) -> None:
+                pass
+
+            def _sync_on_started() -> None:
+                pass
+
+            handle = await concurrency.acquire(
+                engagement_id=engagement_id,
+                slot_limit=slot_limit,
+                tool_run_id=cast(UUID, tool_run.id),
+                target_host=target_host,
+                server_name=server_name,
+                tool_name=tool_name,
+                on_queued=_sync_on_queued,
+                on_started=_sync_on_started,
+            )
+            raw = await subprocess_manager.send_tool_call(
+                server_name=server_name,
+                tool_name=tool_name,
+                args=args,
+                timeout_seconds=float(timeout_seconds),
+            )
+        finally:
+            if handle is not None:
+                concurrency.release(handle)
+    else:
+        raw = await subprocess_manager.send_tool_call(
+            server_name=server_name,
+            tool_name=tool_name,
+            args=args,
+            timeout_seconds=float(timeout_seconds),
+        )
 
     # Step 5: update the row with the final result.
     finished_at = datetime.now(tz=UTC)
@@ -547,26 +606,105 @@ async def execute_tool_run(
 async def _stream_to_channel(
     *,
     tool_run_id: UUID,
+    engagement_id: UUID,
     server_name: str,
     tool_name: str,
     args: dict[str, Any],
     timeout_seconds: float,
+    is_heavy: bool = False,
+    slot_limit: int = 3,
+    target_host: str | None = None,
 ) -> None:
     """Background task: stream MCP output to the pub/sub channel and persist the result.
 
     Opens a FRESH database session (independent of the request session) so it can
     safely commit after the request has returned 202.
 
+    For heavy tools: calls ``concurrency.acquire`` before streaming, which blocks
+    (suspends the coroutine, not the thread) until a slot + host lock are available.
+    The ``on_queued`` callback broadcasts a ``queued`` WebSocketOutputChunk and
+    updates the DB row to ``status='queued'``; the ``on_started`` callback broadcasts
+    a ``started`` chunk and updates the row to ``status='running'`` with
+    ``started_at=now`` (Decision 6: started_at = admission time, not insert time).
+    The admission handle is ALWAYS released in the ``finally`` block (Risk 3).
+
+    For light tools: admission is skipped entirely; the existing streaming loop runs
+    unchanged.
+
     On StreamDone → updates the DB row to completed/timed_out status, broadcasts
     a 'done' chunk, and returns.
 
     On any exception → updates the DB row to 'failed', broadcasts an 'error' chunk.
 
-    In all cases the channel is discarded in the finally block so late WebSocket
-    subscribers fall back to the persisted row.
+    In all cases the channel is discarded and the admission handle (if any) is
+    released in the finally block.
     """
     async with get_sessionmaker()() as session:
+        # Admission handle for heavy runs.  Initialised to None so the finally
+        # block can guard against releasing a handle that was never acquired
+        # (e.g. if acquire() itself raised before returning).  Risk 3.
+        admission_handle: AdmissionHandle | None = None
+
         try:
+            if is_heavy:
+                # --- Async-path admission callbacks ---
+
+                async def _on_queued(position: int, reason: QueueReason) -> None:
+                    """Called when the run is enqueued and cannot be admitted yet."""
+                    broadcast_tool_run_output(
+                        tool_run_id,
+                        WebSocketOutputChunk(
+                            type="queued",
+                            queue_position=position,
+                            reason=reason,
+                        ),
+                    )
+                    try:
+                        await mcp_repo.update_tool_run_status(
+                            session,
+                            tool_run_id,
+                            status="queued",
+                        )
+                        await session.commit()
+                    except Exception:  # noqa: BLE001 — best-effort; don't break the waiter
+                        logger.exception(
+                            "Failed to persist 'queued' status for tool_run_id=%s",
+                            tool_run_id,
+                        )
+
+                async def _on_started() -> None:
+                    """Called when the run is admitted (slot + host lock acquired)."""
+                    now = datetime.now(tz=UTC)
+                    broadcast_tool_run_output(
+                        tool_run_id,
+                        WebSocketOutputChunk(type="started"),
+                    )
+                    try:
+                        await mcp_repo.update_tool_run_status(
+                            session,
+                            tool_run_id,
+                            status="running",
+                            started_at=now,
+                        )
+                        await session.commit()
+                    except Exception:  # noqa: BLE001 — best-effort; streaming still proceeds
+                        logger.exception(
+                            "Failed to persist 'running' status for tool_run_id=%s",
+                            tool_run_id,
+                        )
+
+                admission_handle = await concurrency.acquire(
+                    engagement_id=engagement_id,
+                    slot_limit=slot_limit,
+                    tool_run_id=tool_run_id,
+                    target_host=target_host,
+                    server_name=server_name,
+                    tool_name=tool_name,
+                    on_queued=_on_queued,
+                    on_started=_on_started,
+                )
+
+            # --- Streaming loop (identical for light and heavy) ---
             async for ev in subprocess_manager.stream_tool_call(
                 server_name=server_name,
                 tool_name=tool_name,
@@ -629,6 +767,13 @@ async def _stream_to_channel(
             )
 
         finally:
+            # Release the admission handle FIRST so the next queued run can be
+            # admitted before the channel is discarded.  Guard against double-release
+            # (handle.released flag) and against a handle that was never acquired
+            # (admission_handle is None when acquire() raised or tool is light).
+            # Risk 3: a leaked slot would permanently block the engagement.
+            if admission_handle is not None:
+                concurrency.release(admission_handle)
             _discard_channel(tool_run_id)
 
 
@@ -804,6 +949,45 @@ async def authenticate_ws_tool_run(
     return run
 
 
+async def get_tool_queue_snapshot(
+    db: AsyncSession,
+    *,
+    engagement_id: UUID,
+    user_id: UUID,
+) -> ToolQueueSnapshot:
+    """Return the in-process concurrency snapshot for an engagement.
+
+    Membership check (§4/§17.1):
+        Calls the same ``get_engagement_for_member`` chokepoint used by
+        ``execute_tool_run``.  Both "engagement does not exist" and "caller is
+        not a member" raise ``EngagementNotFound`` (→ 404), so a non-member
+        cannot infer that the engagement exists (no existence disclosure).
+
+    ``slot_limit`` is read from the engagement row fetched during the membership
+    check — no second DB round-trip.  If the in-process state has diverged
+    (e.g. the limit was just patched), the DB value is authoritative for this
+    read (the concurrency module is updated lazily on the next ``acquire`` call).
+
+    Returns:
+        ``ToolQueueSnapshot`` — all fields populated from the in-process state,
+        with ``slot_limit`` overridden by the persisted engagement setting.
+
+    Raises:
+        EngagementNotFound: engagement_id does not exist OR user_id is not a
+                            member (404, no existence disclosure).
+    """
+    member_pair = await eng_repo.get_engagement_for_member(db, engagement_id, user_id)
+    if member_pair is None:
+        raise EngagementNotFound(f"Engagement {engagement_id} not found")
+    engagement_obj, _ = member_pair
+
+    snap = concurrency.snapshot(engagement_id)
+    # Override slot_limit with the persisted value so the response always
+    # reflects the canonical DB configuration, not the stale in-process default.
+    snap = snap.model_copy(update={"slot_limit": int(engagement_obj.concurrency_slot_limit)})
+    return snap
+
+
 async def fetch_tool_run_row(db: AsyncSession, tool_run_id: UUID) -> ToolRun | None:
     """Re-read the current ToolRun row.
 
@@ -822,9 +1006,25 @@ async def fetch_tool_run_row(db: AsyncSession, tool_run_id: UUID) -> ToolRun | N
 
 
 def _row_to_result(row: ToolRun) -> ToolRunResult:
-    """Map a ToolRun ORM row to a ToolRunResult schema."""
+    """Map a ToolRun ORM row to a ToolRunResult schema.
+
+    ``queue_position`` is derived from the in-process concurrency state: it is
+    the 1-based FIFO position returned by ``concurrency.position_of`` when the
+    row's status is ``'queued'``, and ``None`` for all other statuses (running,
+    completed, failed, timed_out) and for light runs (which are never enqueued).
+
+    The in-process queue is the authoritative source for position — there is no
+    persistent ``queue_position`` column.  If the run has already been admitted
+    (status flipped to ``'running'``) but ``position_of`` still returns a value
+    (a transient race), we return ``None`` per the contract.
+    """
+    raw_status: str | None = getattr(row, "status", None)
+    run_id = cast(UUID, row.id)
+    queue_position: int | None = None
+    if raw_status == "queued":
+        queue_position = concurrency.position_of(run_id)
     return ToolRunResult(
-        tool_run_id=cast(UUID, row.id),
+        tool_run_id=run_id,
         engagement_id=cast(UUID, row.engagement_id),
         server_name=row.server_name,
         tool_name=row.tool_name,
@@ -833,6 +1033,7 @@ def _row_to_result(row: ToolRun) -> ToolRunResult:
         stderr=row.stderr or "",
         started_at=row.started_at,
         finished_at=row.finished_at,
-        status=cast(ToolRunStatus, row.status),
+        status=cast(ToolRunStatus, raw_status) if raw_status else "completed",
         preset_name=row.preset_name,
+        queue_position=queue_position,
     )

@@ -282,6 +282,54 @@ async def test_execute_tool_run_happy_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_tool_run_inserts_row_as_running() -> None:
+    """The sync path inserts the in-flight row as 'running', not the default 'completed'.
+
+    A crash before update_tool_run_result must leave a row that startup
+    reconciliation can fail (it only targets 'queued'/'running') — Finding W3.
+    """
+    engagement_id = uuid4()
+    user_id = uuid4()
+
+    tool_run = _make_tool_run(engagement_id=engagement_id)
+    raw = McpRawResult(exit_code=0, stdout="hello\n", stderr="")
+    db = _make_db_with_engagement(_make_engagement_mock())
+    create_mock = AsyncMock(return_value=tool_run)
+
+    with (
+        patch(
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
+            new_callable=AsyncMock,
+            return_value=(_make_engagement_mock(), _make_member_mock()),
+        ),
+        patch("app.features.mcp.service.get_registry", return_value=_make_registry()),
+        patch("app.features.mcp.service.mcp_repo.create_tool_run", create_mock),
+        patch(
+            "app.features.mcp.service.subprocess_manager.send_tool_call",
+            new_callable=AsyncMock,
+            return_value=raw,
+        ),
+        patch(
+            "app.features.mcp.service.mcp_repo.update_tool_run_result",
+            new_callable=AsyncMock,
+            return_value=tool_run,
+        ),
+    ):
+        await execute_tool_run(
+            db,
+            engagement_id=engagement_id,
+            server_name=_SERVER_NAME,
+            tool_name=_TOOL_NAME,
+            args=_ARGS,
+            timeout_seconds=_TIMEOUT,
+            user_id=user_id,
+        )
+
+    assert create_mock.await_args is not None
+    assert create_mock.await_args.kwargs["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_execute_tool_run_calls_send_tool_call_with_correct_args() -> None:
     """execute_tool_run forwards server_name, tool_name, args, timeout to send_tool_call."""
     engagement_id = uuid4()

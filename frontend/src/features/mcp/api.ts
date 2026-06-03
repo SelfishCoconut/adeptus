@@ -3,6 +3,7 @@ import {
   api,
   type McpServerInfo,
   type ToolDescriptor,
+  type ToolQueueSnapshot,
   type ToolRunCreate,
   type ToolRunPage,
   type ToolRunResult,
@@ -15,6 +16,10 @@ export const mcpToolsKey = ['mcp', 'tools'] as const
 
 export function toolRunsKey(engagementId: string) {
   return ['tool-runs', engagementId] as const
+}
+
+export function toolQueueKey(engagementId: string) {
+  return ['mcp', 'tool-queue', engagementId] as const
 }
 
 // --- Queries ---
@@ -99,6 +104,30 @@ export function useExecuteToolRunAsync() {
         body: { ...body, async_mode: true },
       })
       if (error || !data) throw new Error('Failed to execute tool run')
+      return data
+    },
+  })
+}
+
+/**
+ * Poll the heavy-tool concurrency snapshot for an engagement every 2 s while
+ * the component is mounted. Decision 7: poll, do NOT open a second WebSocket.
+ *
+ * Returns the `ToolQueueSnapshot` directly from the generated OpenAPI client —
+ * no hand-written response type. The query is disabled until `engagementId` is
+ * truthy so callers can pass an empty string before the engagement is known.
+ */
+export function useToolQueue(engagementId: string) {
+  return useQuery<ToolQueueSnapshot>({
+    queryKey: toolQueueKey(engagementId),
+    enabled: !!engagementId,
+    refetchInterval: 2_000,
+    queryFn: async () => {
+      const { data, error } = await api.GET(
+        '/api/v1/engagements/{engagement_id}/tool-queue',
+        { params: { path: { engagement_id: engagementId } } },
+      )
+      if (error || !data) throw new Error('Failed to load tool queue')
       return data
     },
   })

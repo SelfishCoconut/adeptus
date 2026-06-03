@@ -147,6 +147,7 @@ function setupMembershipDefaults(memberRole: 'owner' | 'member' = 'owner') {
       updated_at: '2026-01-01T00:00:00Z',
       member_role: memberRole,
       privacy_mode: 'local_only' as const,
+      concurrency_slot_limit: 3,
     },
     isLoading: false,
     isError: false,
@@ -367,6 +368,7 @@ describe('EngagementWorkspacePage', () => {
         updated_at: '2026-01-01T00:00:00Z',
         member_role: 'owner' as const,
         privacy_mode: 'cloud_enabled' as const,
+        concurrency_slot_limit: 3,
       },
       isLoading: false,
       isError: false,
@@ -450,5 +452,104 @@ describe('EngagementWorkspacePage', () => {
     renderPage()
 
     expect(screen.queryByRole('switch')).not.toBeInTheDocument()
+  })
+
+  it('owner sees the concurrency slot limit input with default value 3', () => {
+    mockedUseMe.mockReturnValue({
+      data: ADMIN_USER,
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    // setupMembershipDefaults sets concurrency_slot_limit: 3 and member_role: 'owner'
+
+    renderPage()
+
+    const slotInput = screen.getByRole('spinbutton', { name: /concurrent tool slots/i })
+    expect(slotInput).toBeInTheDocument()
+    expect(slotInput).toHaveValue(3)
+  })
+
+  it('non-owner cannot see the concurrency slot limit input', () => {
+    mockedUseMe.mockReturnValue({
+      data: { ...ADMIN_USER, role: 'user' as const },
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    setupMembershipDefaults('member')
+
+    renderPage()
+
+    expect(
+      screen.queryByRole('spinbutton', { name: /concurrent tool slots/i }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('clearing the slot limit input does not store NaN (falls back to server value)', async () => {
+    const user = userEvent.setup()
+    const mutate = vi.fn()
+    mockedUseMe.mockReturnValue({
+      data: ADMIN_USER,
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    mockedUseUpdateEngagement.mockReturnValue(updateMutation({ mutate }))
+
+    renderPage()
+
+    const slotInput = screen.getByRole('spinbutton', { name: /concurrent tool slots/i })
+    // Clear the input entirely — valueAsNumber becomes NaN.
+    await user.clear(slotInput)
+
+    // The input should not show 'NaN' and the value should remain a valid number
+    // (the server value 3, since no draft was set).
+    // HTML number inputs show blank when cleared rather than 'NaN', but the
+    // internal React state must not hold NaN (we verify indirectly: no NaN
+    // attribute on the element and no mutation fired yet).
+    expect(slotInput).not.toHaveValue(NaN)
+
+    // Blurring a cleared (and thus NaN) input must NOT fire the mutation —
+    // the range-validation guard (value < 1) rejects it.
+    await user.tab()
+    // If NaN were stored, Number.isInteger(NaN) is false → mutation not called.
+    // Either way, mutation should not be called with NaN.
+    const nanCalls = mutate.mock.calls.filter(
+      (args) => typeof args[0]?.concurrency_slot_limit === 'number' &&
+        Number.isNaN(args[0].concurrency_slot_limit)
+    )
+    expect(nanCalls).toHaveLength(0)
+  })
+
+  it('changing the slot limit input and blurring calls updateEngagement mutation once with the new value', async () => {
+    const user = userEvent.setup()
+    const mutate = vi.fn()
+    mockedUseMe.mockReturnValue({
+      data: ADMIN_USER,
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+    } as unknown as ReturnType<typeof useMe>)
+    mockedUseLogout.mockReturnValue(logoutMutation())
+    mockedUseUpdateEngagement.mockReturnValue(updateMutation({ mutate }))
+
+    renderPage()
+
+    const slotInput = screen.getByRole('spinbutton', { name: /concurrent tool slots/i })
+    // Type a valid value directly by clicking to focus then using keyboard to
+    // replace the current value.  Avoid user.clear() which fires onChange with NaN
+    // (the NaN fix means that no longer updates the draft, so a subsequent type()
+    // would append to the server value instead of replacing it).
+    await user.click(slotInput)
+    await user.keyboard('{Control>}a{/Control}5')
+    await user.tab() // blur the input
+
+    // mutate should have been called exactly once with concurrency_slot_limit: 5
+    expect(mutate).toHaveBeenCalledWith({ concurrency_slot_limit: 5 })
+    expect(mutate).toHaveBeenCalledOnce()
   })
 })
