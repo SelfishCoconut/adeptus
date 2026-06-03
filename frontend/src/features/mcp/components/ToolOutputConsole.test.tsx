@@ -85,4 +85,71 @@ describe('ToolOutputConsole', () => {
     render(<ToolOutputConsole toolRunId={TOOL_RUN_ID} />)
     expect(scrollIntoView).toHaveBeenCalled()
   })
+
+  // --- Queued state tests ---
+
+  it('shows a "Queued — position N" badge when the run is queued', () => {
+    mockedUseToolRunStream.mockReturnValue(
+      streamResult({ queued: true, queuePosition: 1, queueReason: 'slot_full' }),
+    )
+    render(<ToolOutputConsole toolRunId={TOOL_RUN_ID} />)
+
+    expect(screen.getByRole('status')).toHaveTextContent('Queued — position 1')
+    // Running spinner and output pane must not be shown
+    expect(screen.queryByText(/running…/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('tool-output')).not.toBeInTheDocument()
+  })
+
+  it('shows "Queued" without a position number when queuePosition is null', () => {
+    mockedUseToolRunStream.mockReturnValue(
+      streamResult({ queued: true, queuePosition: null, queueReason: 'slot_full' }),
+    )
+    render(<ToolOutputConsole toolRunId={TOOL_RUN_ID} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Queued')
+    expect(screen.getByRole('status')).not.toHaveTextContent('position')
+  })
+
+  it('shows "waiting for a free slot" reason for slot_full', () => {
+    mockedUseToolRunStream.mockReturnValue(
+      streamResult({ queued: true, queuePosition: 2, queueReason: 'slot_full' }),
+    )
+    render(<ToolOutputConsole toolRunId={TOOL_RUN_ID} />)
+    expect(screen.getByTestId('queue-reason')).toHaveTextContent('waiting for a free slot')
+  })
+
+  it('shows "waiting on the target host lock" reason for target_locked', () => {
+    mockedUseToolRunStream.mockReturnValue(
+      streamResult({ queued: true, queuePosition: 1, queueReason: 'target_locked' }),
+    )
+    render(<ToolOutputConsole toolRunId={TOOL_RUN_ID} />)
+    expect(screen.getByTestId('queue-reason')).toHaveTextContent('waiting on the target host lock')
+  })
+
+  it('transitions from queued badge to streaming output when started', () => {
+    // First render: queued state
+    mockedUseToolRunStream.mockReturnValue(
+      streamResult({ queued: true, queuePosition: 1, queueReason: 'slot_full' }),
+    )
+    const { rerender } = render(<ToolOutputConsole toolRunId={TOOL_RUN_ID} />)
+
+    expect(screen.getByRole('status')).toHaveTextContent('Queued — position 1')
+    expect(screen.queryByTestId('tool-output')).not.toBeInTheDocument()
+
+    // Second render: started — queued cleared, output streaming
+    mockedUseToolRunStream.mockReturnValue(
+      streamResult({
+        queued: false,
+        queuePosition: null,
+        queueReason: null,
+        lines: [{ stream: 'stdout', text: 'scan started' }],
+      }),
+    )
+    rerender(<ToolOutputConsole toolRunId={TOOL_RUN_ID} />)
+
+    // Badge is gone; output pane and running spinner appear
+    expect(screen.queryByText(/queued/i)).not.toBeInTheDocument()
+    expect(screen.getByTestId('tool-output')).toBeInTheDocument()
+    expect(screen.getByText('scan started')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent(/running/i)
+  })
 })
