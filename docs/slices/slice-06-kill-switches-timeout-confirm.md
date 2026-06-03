@@ -447,3 +447,4 @@ No. This slice does not touch auth (it reuses the existing session-cookie + `get
 - 2026-06-03T15:14:54Z — 6dcfac1 chore(plan): flip slice 05 in-review → done (#18)
 - 2026-06-03T15:16:14Z — 6dcfac1 chore(plan): flip slice 05 in-review → done (#18)
 - 2026-06-03T16:39:00Z — df76703 feat(slice-06): add pause/resume controls with banner and 409 handling (task 13)
+- 2026-06-03T17:33:01Z — ecc1d27 chore(plan): mark slice 06 in-progress → in-review
