@@ -11,8 +11,10 @@ from app.core.db import get_sessionmaker
 from app.core.errors import register_error_handlers
 from app.features.auth import service as auth_service
 from app.features.auth.router import router as auth_router
+from app.features.engagements import events as engagement_events
 from app.features.engagements.router import router as engagements_router
 from app.features.health.router import router as health_router
+from app.features.mcp import concurrency as mcp_concurrency
 from app.features.mcp import repository as mcp_repo
 from app.features.mcp import subprocess_manager
 from app.features.mcp.registry import ConfigError, load_registry
@@ -94,6 +96,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 def create_app() -> FastAPI:
     app = FastAPI(title="Adeptus", lifespan=lifespan)
     register_error_handlers(app)
+    # Composition-root wiring: an engagement slot-limit change notifies the
+    # in-process concurrency manager.  Registered here (not inside either feature)
+    # so the engagements feature stays ignorant of mcp; the dependency flows
+    # mcp → engagements via the events seam.  Idempotent across create_app() calls.
+    engagement_events.on_slot_limit_changed(mcp_concurrency.set_slot_limit)
     # feature routers
     app.include_router(health_router)
     app.include_router(auth_router)

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
+from app.features.engagements import events
 from app.features.engagements import repository as repo
 from app.features.engagements.schemas import (
     AddMemberRequest,
@@ -31,7 +32,6 @@ from app.features.engagements.schemas import (
     EngagementUpdate,
     MemberEntry,
 )
-from app.features.mcp import concurrency as mcp_concurrency
 
 
 async def create_engagement(
@@ -134,11 +134,12 @@ async def update_engagement(
         if updated is None:  # extremely unlikely race; handle defensively
             raise NotFoundError("Engagement not found")
         engagement = updated
-        # If the slot limit changed, propagate immediately to the in-process
-        # admission manager so a raise re-scans and promptly admits eligible
-        # waiters (Finding W2: slot-limit wiring).
+        # If the slot limit changed, emit an event so the in-process admission
+        # manager (registered as a listener at app startup) re-scans and promptly
+        # admits eligible waiters.  The engagements feature stays ignorant of mcp;
+        # the dependency flows mcp → engagements via this seam (Finding W1).
         if data.concurrency_slot_limit is not None:
-            mcp_concurrency.set_slot_limit(
+            events.emit_slot_limit_changed(
                 engagement_id, cast(int, engagement.concurrency_slot_limit)
             )
 

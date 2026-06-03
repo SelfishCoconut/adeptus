@@ -238,7 +238,7 @@ def _enforce_sandbox_guard(args: dict[str, Any]) -> None:
       string: no-op (tools without a ``target`` field, e.g. run_command, are not
       guarded at this layer; run_command guarding is deferred to Slice 16 via the
       approval-gating mechanism — Risk 5).
-    - Otherwise extract the hostname from ``target`` using ``concurrency._parse_host``
+    - Otherwise extract the hostname from ``target`` using ``concurrency.parse_host``
       (the same URL-parsing logic used by the per-target lock so that the guard host
       and the lock host can never drift — Risk 5 deduplication).
 
@@ -264,9 +264,9 @@ def _enforce_sandbox_guard(args: dict[str, Any]) -> None:
     if not isinstance(target, str) or not target:
         return  # Nothing to guard for tools without a target.
 
-    # Delegate host extraction to the canonical concurrency._parse_host so that
+    # Delegate host extraction to the canonical concurrency.parse_host so that
     # the guard host and the per-target lock host are always identical (Risk 5).
-    host = concurrency._parse_host(target)
+    host = concurrency.parse_host(target)
 
     if host not in _SANDBOX_HOSTS:
         raise SandboxGuardViolation(
@@ -514,12 +514,18 @@ async def execute_tool_run(
     # Pre-flight capacity check for heavy sync runs (same defence as async path).
     if is_heavy:
         concurrency.check_queue_capacity(engagement_id)
+    # Insert as 'running', not the default 'completed': a heavy sync run can
+    # block in concurrency.acquire() for a long time before it executes, and a
+    # crash/restart during that window must leave a phantom that startup
+    # reconciliation can fail (it only targets 'queued'/'running').  The terminal
+    # status is set unconditionally by update_tool_run_result below (Finding W3).
     tool_run = await mcp_repo.create_tool_run(
         db,
         engagement_id=engagement_id,
         server_name=server_name,
         tool_name=tool_name,
         args=args,
+        status="running",
         preset_name=preset_name,
     )
 

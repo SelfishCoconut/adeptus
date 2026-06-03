@@ -190,7 +190,7 @@ def _get_state(engagement_id: UUID) -> _EngagementState:
 # ---------------------------------------------------------------------------
 
 
-def _parse_host(raw: str) -> str:
+def parse_host(raw: str) -> str:
     """Extract the lowercase hostname from a raw target string.
 
     Handles:
@@ -198,8 +198,8 @@ def _parse_host(raw: str) -> str:
     - Bare host[:port]: ``localhost:3000`` → ``localhost``
     - Userinfo smuggling: ``localhost:3000@evil.com`` → ``evil.com``
 
-    This is the exact logic from ``service._enforce_sandbox_guard`` factored out
-    so that the lock host and the sandbox-guard host are always identical (Risk 5).
+    Public so ``service._enforce_sandbox_guard`` can share the exact same logic,
+    keeping the lock host and the sandbox-guard host always identical (Risk 5).
     """
     parsed = urlparse(raw)
     if parsed.netloc:
@@ -229,7 +229,7 @@ def resolve_target_host(
     target = args.get("target")
     if not isinstance(target, str) or not target:
         return None
-    return _parse_host(target)
+    return parse_host(target)
 
 
 # ---------------------------------------------------------------------------

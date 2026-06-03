@@ -20,6 +20,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from app.features.engagements import events as engagement_events
 from app.features.engagements import service
 from app.features.engagements.schemas import EngagementCreate, EngagementUpdate
 from app.features.mcp import concurrency as mcp_concurrency
@@ -219,6 +220,10 @@ async def test_raise_slot_limit_admits_queued_waiter() -> None:
     - The queued waiter must be admitted (its on_started fires).
     """
     mcp_concurrency._reset()
+    # Register the slot-limit listener exactly as create_app() does at startup,
+    # so emit_slot_limit_changed propagates to the in-process admission manager.
+    engagement_events._reset()
+    engagement_events.on_slot_limit_changed(mcp_concurrency.set_slot_limit)
 
     eng_id = uuid4()
     db = AsyncMock()
@@ -284,3 +289,4 @@ async def test_raise_slot_limit_admits_queued_waiter() -> None:
     mcp_concurrency.release(handle)
     mcp_concurrency.release(waiter_handle)
     mcp_concurrency._reset()
+    engagement_events._reset()
