@@ -44,8 +44,10 @@ from app.features.engagements.models import Engagement
 from app.features.graph import repository as repo
 from app.features.graph import writer
 from app.features.graph.errors import (
+    EdgeNotFound,
     EngagementArchived,
     NodeNotFound,
+    NoHistory,
 )
 from app.features.graph.models import (
     GraphEdge,
@@ -62,6 +64,9 @@ from app.features.graph.schemas import (
     NodeCreate,
     NodeHistoryEntry,
     NodeUpdate,
+    UndoResult,
+    UndoStack,
+    UndoStackEntry,
 )
 
 # ---------------------------------------------------------------------------
@@ -529,3 +534,135 @@ async def undo_edge(
     engagement = await _require_member(db, engagement_id, user_id)
     _require_writable(engagement)
     return await writer.submit_undo_edge(engagement_id, edge_id)
+
+
+# ---------------------------------------------------------------------------
+# Personal undo stack (Slice 09) — get + pop
+# ---------------------------------------------------------------------------
+
+
+async def _current_entity(
+    db: AsyncSession,
+    entry: GraphUserUndoStack,
+) -> GraphNode | GraphEdge | None:
+    """Read the entry's target entity (node or edge) for a staleness check."""
+    entity_id = cast(UUID, entry.entity_id)
+    if entry.entity_kind == "node":
+        return await repo.get_node(db, entity_id)
+    return await repo.get_edge(db, entity_id)
+
+
+def _to_entry(row: GraphUserUndoStack, *, stale: bool) -> UndoStackEntry:
+    """Map an ORM stack row to the API entry, setting the computed stale flag."""
+    entry = UndoStackEntry.model_validate(row)
+    entry.stale = stale
+    return entry
+
+
+async def _build_stack(
+    db: AsyncSession,
+    engagement_id: UUID,
+    user_id: UUID,
+) -> UndoStack:
+    """Assemble the owner's current active stack (newest-first) with stale flags."""
+    rows = await repo.list_active_undo_stack(db, engagement_id, user_id)
+    entries: list[UndoStackEntry] = []
+    for row in rows:
+        current = await _current_entity(db, row)
+        entries.append(_to_entry(row, stale=_is_entry_stale(row, current)))
+    return UndoStack(depth=len(entries), entries=entries)
+
+
+async def _apply_inverse(engagement_id: UUID, row: GraphUserUndoStack) -> None:
+    """Apply the inverse of a recorded write through the single writer (ADR-0001).
+
+    No new write primitive is added — the inverse composes the Slice 07
+    ``writer.submit_*`` calls:
+      create_node → soft-delete the created node
+      update_node / delete_node → submit_undo_node (one step back through history)
+      create_edge → soft-delete the created edge
+      delete_edge → submit_undo_edge
+    """
+    op_type = row.op_type
+    entity_id = cast(UUID, row.entity_id)
+    if op_type == "create_node":
+        await writer.submit_soft_delete_node(engagement_id, entity_id)
+    elif op_type in ("update_node", "delete_node"):
+        await writer.submit_undo_node(engagement_id, entity_id)
+    elif op_type == "create_edge":
+        await writer.submit_soft_delete_edge(engagement_id, entity_id)
+    elif op_type == "delete_edge":
+        await writer.submit_undo_edge(engagement_id, entity_id)
+
+
+async def get_undo_stack(
+    db: AsyncSession,
+    engagement_id: UUID,
+    user_id: UUID,
+) -> UndoStack:
+    """Return the caller's personal undo stack for this engagement (newest-first).
+
+    READ path — no archived guard; stale entries are flagged (not dropped). Each
+    entry's ``stale`` flag is computed against current graph state (Decision 1).
+
+    Raises:
+        EngagementNotFound: caller not a member or engagement missing (→404).
+    """
+    await _require_member(db, engagement_id, user_id)
+    return await _build_stack(db, engagement_id, user_id)
+
+
+async def pop_undo_stack(
+    db: AsyncSession,
+    engagement_id: UUID,
+    user_id: UUID,
+) -> UndoResult:
+    """Undo the caller's most recent still-valid personal write (write — the
+    inverse is serialized through the single writer).
+
+    Walks the active stack newest-first. Stale entries (a teammate — or the owner
+    — modified the target since, per Decision 1) are dropped and surfaced in
+    ``skipped_stale``; they are NEVER silently applied (§8.2). The first fresh
+    entry is undone via ``_apply_inverse`` and returned. If the entity has since
+    vanished or has no prior state, that entry is treated as stale too.
+
+    Per Decision 2, an empty stack (or one where every remaining entry was stale)
+    returns ``UndoResult(undone=None, ...)`` — NOT an error/422. A pop never
+    pushes a new entry (no redo).
+
+    Raises:
+        EngagementNotFound: caller not a member or engagement missing (→404).
+        EngagementArchived: engagement is archived (→409).
+    """
+    engagement = await _require_member(db, engagement_id, user_id)
+    _require_writable(engagement)
+
+    skipped: list[UndoStackEntry] = []
+    rows = await repo.list_active_undo_stack(db, engagement_id, user_id)
+
+    for row in rows:  # newest-first
+        current = await _current_entity(db, row)
+        if _is_entry_stale(row, current):
+            await repo.mark_undo_entry_undone(db, row)
+            skipped.append(_to_entry(row, stale=True))
+            continue
+
+        # Fresh entry — apply the inverse through the single writer.
+        try:
+            await _apply_inverse(engagement_id, row)
+        except (NodeNotFound, EdgeNotFound, NoHistory):
+            # Entity vanished or no prior state — drop as stale, keep walking.
+            await repo.mark_undo_entry_undone(db, row)
+            skipped.append(_to_entry(row, stale=True))
+            continue
+
+        await repo.mark_undo_entry_undone(db, row)
+        undone = _to_entry(row, stale=False)
+        await db.commit()
+        stack = await _build_stack(db, engagement_id, user_id)
+        return UndoResult(undone=undone, skipped_stale=skipped, stack=stack)
+
+    # Nothing applied: empty stack, or every remaining entry was stale (Decision 2).
+    await db.commit()
+    stack = await _build_stack(db, engagement_id, user_id)
+    return UndoResult(undone=None, skipped_stale=skipped, stack=stack)
