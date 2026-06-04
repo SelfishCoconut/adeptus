@@ -76,13 +76,8 @@ async def app_and_db(
 
     ip_col: Column = models.Session.__table__.c.ip  # type: ignore[assignment]
     ip_col.type = Text()
-
-    # login/logout now emit audit entries (Slice 10): patch AuditEntry.id's
-    # gen_random_uuid() default so the audit insert works on SQLite.
-    from app.features.audit import models as audit_models
-
-    audit_id_col: Column = audit_models.AuditEntry.__table__.c.id  # type: ignore[assignment]
-    audit_id_col.default = ColumnDefault(uuid4)
+    # AuditEntry.id's gen_random_uuid() default is patched centrally for SQLite in
+    # app/features/conftest.py (login/logout emit audit entries since Slice 10).
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:

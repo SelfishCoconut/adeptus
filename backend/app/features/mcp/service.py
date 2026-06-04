@@ -36,6 +36,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_sessionmaker
 from app.core.errors import AdeptusError, BadRequestError, ForbiddenError, NotFoundError
+from app.features.audit import service as audit_service
+from app.features.audit.schemas import AuditAction
 from app.features.auth import repository as auth_repo
 from app.features.engagements import repository as eng_repo
 from app.features.mcp import concurrency, subprocess_manager
@@ -502,6 +504,23 @@ async def execute_tool_run(
             status=initial_status,
             preset_name=preset_name,
         )
+        # §14 audit: record the tool invocation atomically with the run row (Slice 10).
+        # (Completion auditing on the async/background path is a deferred follow-up —
+        # ToolRun has no attribution column and _stream_to_channel lacks the user_id.)
+        await audit_service.record(
+            db,
+            action=AuditAction.TOOL_RUN,
+            actor_user_id=user_id,
+            engagement_id=engagement_id,
+            target_type="tool_run",
+            target_id=str(tool_run.id),
+            payload={
+                "server": server_name,
+                "tool": tool_name,
+                "target": args.get("target"),
+                "status": initial_status,
+            },
+        )
         # Commit so the row is durable before we return 202 and hand off to the task.
         # The background task opens its own session and must see the committed row.
         await db.commit()
@@ -618,6 +637,36 @@ async def execute_tool_run(
     # in-memory object; the sync path always ends in "completed", so fall back safely.
     raw_status: str | None = getattr(updated, "status", None)
     result_status = cast(ToolRunStatus, raw_status) if raw_status else "completed"
+
+    # §14 audit (Slice 10): emit invocation + completion AFTER the subprocess returns —
+    # never before, so the audit_chain_head lock is not held across the (possibly
+    # minutes-long) tool run (Risk 7). Both commit with the result in the router's
+    # transaction. McpServerDown propagates earlier, so a run that never produced a row
+    # also produces no audit entry (consistent).
+    audit_payload = {
+        "server": server_name,
+        "tool": tool_name,
+        "target": args.get("target"),
+    }
+    await audit_service.record(
+        db,
+        action=AuditAction.TOOL_RUN,
+        actor_user_id=user_id,
+        engagement_id=engagement_id,
+        target_type="tool_run",
+        target_id=str(updated.id),
+        payload={**audit_payload, "status": "running"},
+    )
+    await audit_service.record(
+        db,
+        action=AuditAction.TOOL_RUN_COMPLETED,
+        actor_user_id=user_id,
+        engagement_id=engagement_id,
+        target_type="tool_run",
+        target_id=str(updated.id),
+        payload={**audit_payload, "status": result_status, "exit_code": raw.exit_code},
+    )
+
     return ToolRunResult(
         tool_run_id=cast(UUID, updated.id),
         engagement_id=cast(UUID, updated.engagement_id),
