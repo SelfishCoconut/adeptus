@@ -16,7 +16,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.features.audit.hashing import AuditContent, compute_entry_hash
+from app.features.audit.hashing import GENESIS_HASH, AuditContent, compute_entry_hash
 from app.features.audit.models import AuditChainHead, AuditEntry
 
 
@@ -49,10 +49,18 @@ async def append_entry(
     server-side ``now()`` default is never used for an actual append (it would not be
     knowable at hash-compute time). The ``FOR UPDATE`` lock is held until the caller's
     commit, which is what serializes concurrent appenders.
+
+    The genesis head row is seeded by the migration in production; we self-seed it here
+    if absent so a caller's first append never fails on a fresh/test DB. The singleton
+    ``CHECK(id = 1)`` + PK keep this idempotent.
     """
     head = (
         await db.execute(select(AuditChainHead).where(AuditChainHead.id == 1).with_for_update())
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if head is None:
+        head = AuditChainHead(id=1, last_seq=0, head_hash=GENESIS_HASH)
+        db.add(head)
+        await db.flush()
 
     seq = head.last_seq + 1
     created_at = datetime.now(UTC)

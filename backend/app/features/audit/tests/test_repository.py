@@ -163,6 +163,19 @@ async def test_iter_chain_ordered_ascending(db_session: AsyncSession) -> None:
     assert seqs == [1, 2, 3, 4]
 
 
+async def test_append_self_seeds_missing_head(db_session: AsyncSession) -> None:
+    from sqlalchemy import delete
+
+    from app.features.audit.models import AuditChainHead
+
+    await db_session.execute(delete(AuditChainHead))
+    await db_session.commit()
+
+    e = await _append(db_session, action="login", actor_user_id=uuid4())
+    assert e.seq == 1  # type: ignore[attr-defined]
+    assert e.prev_hash == GENESIS_HASH  # type: ignore[attr-defined]
+
+
 def test_append_only_no_update_delete() -> None:
     public = {n for n in dir(repository) if not n.startswith("_")}
     forbidden = {n for n in public if any(k in n for k in ("update", "delete", "remove"))}
