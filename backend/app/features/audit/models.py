@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy import (
     CHAR,
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -28,6 +29,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from app.core.db import Base
+
+# JSONB on Postgres (production + migrations); generic JSON on SQLite so the
+# in-memory unit-test engine can render the DDL. Same idiom as graph/mcp models.
+_PAYLOAD_JSON = JSONB().with_variant(JSON(), "sqlite")
 
 # Canonical, DB-level source of truth for the audit action vocabulary. The
 # Pydantic ``AuditAction`` StrEnum in schemas.py is checked against this tuple
@@ -98,7 +103,7 @@ class AuditEntry(Base):
     # §5.2 — NULL except on approval_granted/approval_rejected (populated by Slice 16).
     self_approved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+        _PAYLOAD_JSON, nullable=False, server_default=text("'{}'")
     )
     # Hex SHA-256 of the previous row's entry_hash; genesis == 64 zeros.
     prev_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
