@@ -5,12 +5,22 @@ invoke it after their own state change, within the SAME transaction (Decision 1,
 atomic): the audit row commits or rolls back with the originating action, so there
 are no silent gaps and no orphaned entries (§14 "records *every* ...").
 
-Reserved seams (defined in the action enum, accepted by ``record()``, NO caller in
-this slice — see task 10's comment block below):
+Live callers wired by this slice (Slice 10):
+  * auth.router — ``login`` / ``logout`` / ``login_failed``.
+  * mcp.service.execute_tool_run — ``tool_run`` (both paths) + ``tool_run_completed``
+    (sync path; async/background completion is a documented follow-up).
+  * graph.service — ``graph_node_*`` / ``graph_edge_*`` at the ``_push_undo`` chokepoint
+    (every ordinary node/edge write) AND at ``pop_undo_stack`` for undo-applied inverses.
+    This wires the Slice 09 audit seams (its ``push_undo_entry`` / ``pop_undo_stack``
+    chokepoints): an undo-applied write bypasses the public mutators (it goes straight
+    through the single writer), so it is recorded once at ``pop_undo_stack`` and is NOT
+    double-counted by the ``_push_undo`` emission.
+
+Reserved seams — defined in ``AuditAction``, accepted by ``record()``, with NO caller in
+this slice (downstream slices add the caller; this module imports neither feature):
   * Slice 16 (approval flow) → ``record(action=AuditAction.APPROVAL_GRANTED |
     APPROVAL_REJECTED, self_approved=<initiator == approver>, ...)`` (§5.2).
   * Slice 11+ (AI integration) → ``record(action=AuditAction.AI_CALL, ...)``.
-This module imports neither of those (non-existent) features.
 """
 
 import base64
