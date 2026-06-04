@@ -20,6 +20,16 @@ from app.features.audit.hashing import AuditContent, compute_entry_hash
 from app.features.audit.models import AuditChainHead, AuditEntry
 
 
+async def get_chain_head(db: AsyncSession) -> AuditChainHead | None:
+    """Return the singleton chain-head row (authoritative last_seq + head_hash), or None.
+
+    Read-only — used by the verifier to detect tail truncation (the head still points
+    at a seq/hash that no longer exists in audit_entries)."""
+    return (
+        await db.execute(select(AuditChainHead).where(AuditChainHead.id == 1))
+    ).scalar_one_or_none()
+
+
 async def append_entry(
     db: AsyncSession,
     *,
@@ -131,8 +141,13 @@ async def iter_chain_ordered(db: AsyncSession) -> AsyncIterator[AuditEntry]:
     """Stream every entry in ascending ``seq`` order — the verifier's input.
 
     Streamed (server-side cursor on Postgres) so verifying a long chain does not
-    load the whole table into memory.
+    load the whole table into memory. ``populate_existing`` forces each row to reflect
+    authoritative DB state rather than any cached identity-map instance — a verifier
+    must hash what is actually stored, not a stale in-session copy.
     """
-    result = await db.stream(select(AuditEntry).order_by(AuditEntry.seq.asc()))
+    stmt = (
+        select(AuditEntry).order_by(AuditEntry.seq.asc()).execution_options(populate_existing=True)
+    )
+    result = await db.stream(stmt)
     async for entry in result.scalars():
         yield entry
