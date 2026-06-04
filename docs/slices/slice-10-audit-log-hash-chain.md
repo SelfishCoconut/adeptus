@@ -145,7 +145,10 @@ components:
       type: string
       enum:
         - login
-        - tool_run
+        - logout
+        - login_failed
+        - tool_run                # tool invocation (run row created)
+        - tool_run_completed      # tool run reached a terminal status
         - graph_node_created
         - graph_node_updated
         - graph_node_deleted
@@ -210,8 +213,8 @@ Two new tables. **No columns added to any existing table** (anti-pattern guard �
   - `id` UUID PK (`gen_random_uuid()`)
   - `seq` BIGINT NOT NULL UNIQUE — gap-free monotonic chain position (assigned under the head lock, not a bare `SERIAL`, which can gap on rollback). Indexed for ordered scans.
   - `action` VARCHAR(32) NOT NULL — CHECK IN the `AuditAction` enum values.
-  - `actor_user_id` UUID NULL REFERENCES `users(id)` ON DELETE **RESTRICT** — attribution must not vanish if a user is deleted; the audit log is the source of truth (§17.4). (User deletion is admin-only and rare; RESTRICT protects the forensic record. See Open Questions if SET NULL is preferred.)
-  - `engagement_id` UUID NULL REFERENCES `engagements(id)` ON DELETE **RESTRICT** — same rationale: do not let an engagement delete erase its audit trail. NULL for instance-global events (login).
+  - `actor_user_id` UUID NULL — **no foreign key** (Open Question 2, RESOLVED). An immutable, denormalized, **hashed** attribution value. Deleting a user must never touch or break the audit row, and the field must stay tamper-evident; a hard FK (`RESTRICT`/`SET NULL`/`CASCADE`) cannot satisfy both, so there is no `REFERENCES`. NULL only for system/anonymous events (e.g. `login_failed`).
+  - `engagement_id` UUID NULL — **no foreign key**, same rationale: immutable, denormalized, **hashed**. NULL for instance-global events (login/logout/login_failed).
   - `target_type` VARCHAR(32) NULL
   - `target_id` VARCHAR(64) NULL — string (not FK): targets span heterogeneous tables and may be hard-deleted; the audit row must survive.
   - `self_approved` BOOLEAN NULL — §5.2; NULL except on approval actions.
@@ -255,10 +258,10 @@ Numbered continuously across the whole slice. Every commit subject cites its tas
 
 8. **[M]** Add `app/features/audit/verify.py` — the `verify-chain` CLI (`python -m app.features.audit.verify`). Opens a DB session, streams `iter_chain_ordered`, recomputes each `entry_hash` via `hashing.compute_entry_hash`, asserts `prev_hash` linkage and gap-free `seq`. Prints `audit chain OK — N entries verified` + exit `0` on success; on the first break, prints the offending `seq`/`id`/expected-vs-actual hash and the failure kind (content-tamper | broken-link | seq-gap | reorder) and exits `1`. Tests in `tests/test_verify.py`: `test_verify_clean_chain_exit_zero`, `test_verify_detects_field_tamper`, `test_verify_detects_deleted_middle_row` (seq gap / broken link), `test_verify_detects_reordered_rows`, `test_verify_empty_chain_ok`. **[Risky — this is the §14 tamper-detection guarantee.]**
 
-9. **[M]** Wire the three live callers (each its own small commit), calling `audit.service.record` **after** the originating state change commits:
-   - `auth.router.login` → `record(action=login, actor_user_id=user.id)`. Test `test_login_writes_audit_entry`.
-   - `mcp.service.execute_tool_run` → `record(action=tool_run, engagement_id, actor_user_id, target_type="tool_run", target_id=tool_run_id, payload={server, tool, target, status})`. Test `test_tool_run_writes_audit_entry`. (Emit on the synchronous admission path; for async/background runs emit once the run row is created so a tool invocation is always recorded — see Open Questions on background completion.)
-   - `graph.service` create/update/delete node & edge → `record(action=graph_*_*, engagement_id, actor_user_id, target_type, target_id)`. Tests `test_create_node_writes_audit_entry`, `test_update_node_writes_audit_entry`, `test_delete_edge_writes_audit_entry`, and `test_one_audit_entry_per_graph_mutation` (no double-count, incl. via the Slice 09 undo-apply path).
+9. **[M]** Wire the live callers (each its own small commit), calling `audit.service.record` **after** the originating state change commits (Open Question 1 resolved: same transaction):
+   - `auth.router` → `login` on success (`actor_user_id=user.id`), `logout` (`actor_user_id=session user`), and `login_failed` on `AuthenticationError` (`actor_user_id=NULL`, `payload={username}`, committed in its own transaction then the error re-raised). Tests `test_login_writes_audit_entry`, `test_logout_writes_audit_entry`, `test_failed_login_writes_audit_entry`.
+   - `mcp.service.execute_tool_run` → `tool_run` at run-row creation (both sync and async paths), `payload={server, tool, target, status}`, `target_type="tool_run"`, `target_id=tool_run_id`; and `tool_run_completed` when the terminal status is set — after `update_tool_run_result` on the sync path and in the `_stream_to_channel` completion handling on the async/background path — `payload={..., status, exit_code}`. Tests `test_tool_run_writes_invocation_entry`, `test_tool_run_writes_completion_entry`.
+   - `graph.service` create/update/delete node & edge → `record(action=graph_*_*, engagement_id, actor_user_id=user_id, target_type, target_id)`, emitted in the request session alongside `_push_undo` (the Slice-09 seam) so it commits with the undo row after the writer has committed the entity. Tests `test_create_node_writes_audit_entry`, `test_update_node_writes_audit_entry`, `test_delete_edge_writes_audit_entry`, and `test_one_audit_entry_per_graph_mutation` (no double-count, incl. via the Slice 09 undo-apply path).
 
 10. **[S]** **Reserved-seam documentation (no emission).** Add a module docstring + short comment block in `audit/service.py` documenting the two un-wired callers for downstream slices: Slice 16 calls `record(action=approval_granted|approval_rejected, self_approved=...)`; Slice 11+ calls `record(action=ai_call, ...)`. Do NOT import or depend on those (non-existent) features. Reference the Slice 09 audit seam (its `push_undo_entry`/`pop_undo_stack` chokepoints) and note that graph-edit emission in task 9 covers undo-applied writes.
 
@@ -322,12 +325,41 @@ Numbering continues from the backend tasks. The audit log is primarily an admin/
 - **Risk 7 — Append throughput / lock contention.** The single-row head lock serializes all appends. For a 2–5 person team this is negligible, but a burst of graph edits + tool runs could queue briefly. Acceptable for v1; noted so a future slice can revisit if needed. No mitigation beyond documenting the trade-off.
 - **Risk 8 — Audit data exposure.** Audit payloads may contain sensitive target detail. Mitigation: engagement-scoped reads require membership; global reads require admin; no public/unauthenticated path; no write/edit/delete API. Reviewer confirms the read authorization matches §17.1.
 
-## Open questions for the human
+## Open questions for the human — RESOLVED 2026-06-05
 
-1. **Recording transaction policy (Risk 3).** Should `record()` run in the **same DB transaction** as the originating action (atomic: no audit gaps, but an audit-write failure rolls back the user action) — the spec's default — or in a **separate transaction** (the action survives an audit-write failure, but a gap is possible)? Default chosen: same-transaction/atomic, because §14 says "every" action is recorded and a tamper-evident log with silent gaps is worse than a failed action. Confirm or override.
-2. **FK on-delete policy (Risk 5).** `ON DELETE RESTRICT` on `actor_user_id` / `engagement_id` protects the forensic record but means admin user/engagement deletion must first reckon with audit rows. Acceptable, or do you prefer `SET NULL` (keep the entry, lose the link) — which would also require recomputing/accepting that nulling a hashed field is itself a "tamper" the verifier would flag? (If `SET NULL`, the actor/engagement fields must be **excluded** from the hash, or deletion breaks the chain — a meaningful design change.) Default: `RESTRICT`.
-3. **Background tool-run emission point (Risk 6).** Emit the `tool_run` audit entry at **invocation** (run-row creation) only, or also a second entry at **completion** (with exit status)? Default: invocation only for this slice; completion-audit deferred. Confirm.
-4. **Login-only vs. logout/failed-login.** §14 lists "login". This slice emits successful `login`. Should `logout` and **failed** login attempts also be audited now (useful for security forensics), or is that a follow-up? Default: successful `login` only this slice.
+All four resolved by the human before implementation. Choices recorded here so the
+code-reviewer and security-reviewer check the code against the decided design.
+
+1. **Recording transaction policy (Risk 3).** **DECIDED: same DB transaction (atomic).**
+   `record()` writes the audit row in the same transaction as the originating action so
+   they commit/roll back together — no silent gaps; an audit-write failure fails the
+   action. (For graph mutations the entity is committed by the single writer in its own
+   session; the audit row is committed in the request session alongside the Slice-09 undo
+   push — the closest atomic analogue. See Design note.)
+2. **FK on-delete policy (Risk 5).** **DECIDED: no enforced FK; immutable, hashed columns.**
+   The user chose `SET NULL` semantics for deletability, which conflicts with hashing the
+   actor/engagement (nulling a hashed column would itself break the chain — see the
+   contradiction note below). Resolved by dropping the FK entirely: `actor_user_id` and
+   `engagement_id` are plain nullable UUID columns **with no `REFERENCES`**, stored as
+   immutable denormalized values that **stay inside the hash**. Deleting a user/engagement
+   never touches (or breaks) the audit row — the row keeps a now-dangling id, which is
+   exactly what a forensic source-of-truth log should do (§17.4). Rewriting `actor_user_id`
+   in SQL is still caught by the verifier (it is hashed). The demo and acceptance criteria
+   (rewrite `actor_user_id` → caught) are preserved unchanged.
+
+   > **Why not `SET NULL` + FK:** a column cannot be both tamper-protected (hashed,
+   > immutable) and nulled-on-delete (mutated by the FK action). `SET NULL` on a hashed
+   > column makes a legitimate delete look like tampering; excluding the column from the
+   > hash to fix that would make rewriting `actor_user_id` undetectable, contradicting the
+   > demo + acceptance step 2. Dropping the FK keeps both deletability and tamper-evidence.
+3. **Tool-run emission point (Risk 6).** **DECIDED: invocation AND completion.** Emit
+   `tool_run` when the run row is created (both sync and async paths) and `tool_run_completed`
+   when the terminal status is set (after `update_tool_run_result` on the sync path; in the
+   `_stream_to_channel` completion handling on the async/background path). The completion
+   entry carries the final `status` and `exit_code` in its payload.
+4. **Auth events.** **DECIDED: login + logout + failed-login.** This slice audits successful
+   `login`, `logout`, and `login_failed` (the last with `actor_user_id=NULL` and the
+   attempted `username` in the payload — useful for security forensics).
 
 ## Security review required?
 
@@ -345,3 +377,5 @@ Numbering continues from the backend tasks. The audit log is primarily an admin/
 ## Progress
 
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
+- 2026-06-04T22:43:22Z — 0246cfc docs(slice-10): add slice spec, mark in-progress
+- 2026-06-04T22:43:51Z — 0246cfc docs(slice-10): add slice spec, mark in-progress
