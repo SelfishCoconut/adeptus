@@ -21,12 +21,13 @@ import pytest_asyncio
 from argon2 import PasswordHasher
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import Column, ColumnDefault, Text
+from sqlalchemy import Column, ColumnDefault, Text, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
 from app.core.db import Base, get_db
 from app.core.errors import register_error_handlers
+from app.features.audit.models import AuditEntry
 from app.features.auth import models  # noqa: F401 — registers ORM metadata
 from app.features.auth import repository as repo
 from app.features.auth.router import router as auth_router
@@ -75,6 +76,13 @@ async def app_and_db(
 
     ip_col: Column = models.Session.__table__.c.ip  # type: ignore[assignment]
     ip_col.type = Text()
+
+    # login/logout now emit audit entries (Slice 10): patch AuditEntry.id's
+    # gen_random_uuid() default so the audit insert works on SQLite.
+    from app.features.audit import models as audit_models
+
+    audit_id_col: Column = audit_models.AuditEntry.__table__.c.id  # type: ignore[assignment]
+    audit_id_col.default = ColumnDefault(uuid4)
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
@@ -347,3 +355,65 @@ async def test_accept_terms_sets_timestamp(
         assert accept_resp.status_code == 200
         body = accept_resp.json()
         assert body["terms_accepted_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Audit emission (Slice 10 task 9): login / logout / failed-login
+# ---------------------------------------------------------------------------
+
+
+async def _audit_rows(factory: async_sessionmaker[AsyncSession], action: str) -> list[AuditEntry]:
+    async with factory() as session:
+        result = await session.execute(select(AuditEntry).where(AuditEntry.action == action))
+        return list(result.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_login_writes_audit_entry(
+    app_and_db: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+    admin_user: models.User,
+) -> None:
+    app, factory = app_and_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
+        resp = await client.post(
+            "/api/v1/auth/login", json={"username": "admin", "password": "correcthorse"}
+        )
+        assert resp.status_code == 200
+
+    rows = await _audit_rows(factory, "login")
+    assert len(rows) == 1
+    assert rows[0].actor_user_id == admin_user.id
+    assert rows[0].engagement_id is None
+
+
+@pytest.mark.asyncio
+async def test_logout_writes_audit_entry(
+    authenticated_client: AsyncClient,
+    app_and_db: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+    admin_user: models.User,
+) -> None:
+    _, factory = app_and_db
+    resp = await authenticated_client.post("/api/v1/auth/logout")
+    assert resp.status_code == 204
+
+    rows = await _audit_rows(factory, "logout")
+    assert len(rows) == 1
+    assert rows[0].actor_user_id == admin_user.id
+
+
+@pytest.mark.asyncio
+async def test_failed_login_writes_audit_entry(
+    app_and_db: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+    admin_user: models.User,
+) -> None:
+    app, factory = app_and_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
+        resp = await client.post(
+            "/api/v1/auth/login", json={"username": "admin", "password": "wrongpassword"}
+        )
+        assert resp.status_code == 401
+
+    rows = await _audit_rows(factory, "login_failed")
+    assert len(rows) == 1
+    assert rows[0].actor_user_id is None
+    assert rows[0].payload["username"] == "admin"
