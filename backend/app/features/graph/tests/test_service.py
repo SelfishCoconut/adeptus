@@ -26,6 +26,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.features.audit.schemas import AuditAction
 from app.features.graph import service
 from app.features.graph.errors import (
     DuplicateEdge,
@@ -1151,3 +1152,149 @@ async def test_pop_does_not_push(db: AsyncMock) -> None:
         await service.pop_undo_stack(db, engagement_id, user_id)
 
     push.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# §14 audit emission (Slice 10): one attributed entry per graph mutation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_node_writes_audit_entry(db: AsyncMock, mock_audit_record: AsyncMock) -> None:
+    engagement_id, user_id = uuid4(), uuid4()
+    eng = _make_engagement(engagement_id=engagement_id, status="active")
+    member = _make_member(engagement_id=engagement_id, user_id=user_id)
+    node = _make_node(engagement_id=engagement_id)
+    payload = NodeCreate(type=NodeType.host, label="10.0.0.5")
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch(
+            "app.features.graph.service.writer.submit_create_node",
+            new=AsyncMock(return_value=node),
+        ),
+        patch("app.features.graph.service.repo.push_undo_entry", new=AsyncMock()),
+    ):
+        await service.create_node(db, engagement_id, user_id, payload)
+
+    mock_audit_record.assert_awaited_once()
+    assert mock_audit_record.await_args is not None
+    kwargs = mock_audit_record.await_args.kwargs
+    assert kwargs["action"] is AuditAction.GRAPH_NODE_CREATED
+    assert kwargs["actor_user_id"] == user_id
+    assert kwargs["engagement_id"] == engagement_id
+    assert kwargs["target_type"] == "node"
+    assert kwargs["target_id"] == str(node.id)
+
+
+@pytest.mark.asyncio
+async def test_update_node_writes_audit_entry(db: AsyncMock, mock_audit_record: AsyncMock) -> None:
+    engagement_id, user_id, node_id = uuid4(), uuid4(), uuid4()
+    eng = _make_engagement(engagement_id=engagement_id, status="active")
+    member = _make_member(engagement_id=engagement_id, user_id=user_id)
+    node = _make_node(node_id=node_id, engagement_id=engagement_id)
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch(
+            "app.features.graph.service.writer.submit_update_node",
+            new=AsyncMock(return_value=node),
+        ),
+        patch("app.features.graph.service.repo.push_undo_entry", new=AsyncMock()),
+    ):
+        await service.update_node(db, engagement_id, node_id, user_id, NodeUpdate(label="x"))
+
+    assert mock_audit_record.await_args is not None
+    assert mock_audit_record.await_args.kwargs["action"] is AuditAction.GRAPH_NODE_UPDATED
+
+
+@pytest.mark.asyncio
+async def test_delete_edge_writes_audit_entry(db: AsyncMock, mock_audit_record: AsyncMock) -> None:
+    engagement_id, user_id, edge_id = uuid4(), uuid4(), uuid4()
+    eng = _make_engagement(engagement_id=engagement_id, status="active")
+    member = _make_member(engagement_id=engagement_id, user_id=user_id)
+    deleted = SimpleNamespace(id=edge_id, relation="runs", updated_at=NOW + timedelta(seconds=2))
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch("app.features.graph.service.writer.submit_soft_delete_edge", new=AsyncMock()),
+        patch("app.features.graph.service.repo.get_edge", new=AsyncMock(return_value=deleted)),
+        patch("app.features.graph.service.repo.push_undo_entry", new=AsyncMock()),
+    ):
+        await service.delete_edge(db, engagement_id, edge_id, user_id)
+
+    assert mock_audit_record.await_args is not None
+    kwargs = mock_audit_record.await_args.kwargs
+    assert kwargs["action"] is AuditAction.GRAPH_EDGE_DELETED
+    assert kwargs["target_type"] == "edge"
+    assert kwargs["target_id"] == str(edge_id)
+
+
+@pytest.mark.asyncio
+async def test_one_audit_entry_per_graph_mutation(
+    db: AsyncMock, mock_audit_record: AsyncMock
+) -> None:
+    """Exactly one audit entry per ordinary write — no double-count."""
+    engagement_id, user_id = uuid4(), uuid4()
+    eng = _make_engagement(engagement_id=engagement_id, status="active")
+    member = _make_member(engagement_id=engagement_id, user_id=user_id)
+    node = _make_node(engagement_id=engagement_id)
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch(
+            "app.features.graph.service.writer.submit_create_node",
+            new=AsyncMock(return_value=node),
+        ),
+        patch("app.features.graph.service.repo.push_undo_entry", new=AsyncMock()),
+    ):
+        await service.create_node(
+            db, engagement_id, user_id, NodeCreate(type=NodeType.host, label="h")
+        )
+
+    assert mock_audit_record.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_undo_apply_writes_audit_entry(db: AsyncMock, mock_audit_record: AsyncMock) -> None:
+    """Undoing a create_node (soft-delete) records a graph_node_deleted audit entry."""
+    engagement_id, user_id, nid = uuid4(), uuid4(), uuid4()
+    eng, member = _active_eng(engagement_id, user_id)
+    row = _undo_row(op_type="create_node", entity_id=nid, target_updated_at=NOW)
+
+    with (
+        patch(
+            "app.features.graph.service.eng_repo.get_engagement_for_member",
+            new=AsyncMock(return_value=(eng, member)),
+        ),
+        patch(
+            "app.features.graph.service.repo.list_active_undo_stack",
+            new=AsyncMock(return_value=[row]),
+        ),
+        patch(
+            "app.features.graph.service.repo.get_node",
+            new=AsyncMock(return_value=SimpleNamespace(updated_at=NOW)),
+        ),
+        patch("app.features.graph.service.repo.mark_undo_entry_undone", new=AsyncMock()),
+        patch("app.features.graph.service.writer.submit_soft_delete_node", new=AsyncMock()),
+    ):
+        await service.pop_undo_stack(db, engagement_id, user_id)
+
+    mock_audit_record.assert_awaited_once()
+    assert mock_audit_record.await_args is not None
+    kwargs = mock_audit_record.await_args.kwargs
+    assert kwargs["action"] is AuditAction.GRAPH_NODE_DELETED
+    assert kwargs["actor_user_id"] == user_id
+    assert kwargs["target_id"] == str(nid)

@@ -15,9 +15,11 @@ SQLite does support partial unique indexes with a WHERE clause; the partial uniq
 index on ``graph_edges`` (``uq_graph_edges_live_triple``) is exercised in tests.
 """
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import Column, ColumnDefault, Text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -26,6 +28,19 @@ from app.core.db import Base
 from app.features.auth import models as auth_models  # noqa: F401 — registers users/sessions
 from app.features.engagements import models as eng_models  # noqa: F401 — registers engagements
 from app.features.graph import models as graph_models  # noqa: F401 — registers graph tables
+
+
+@pytest.fixture(autouse=True)
+def mock_audit_record() -> Iterator[AsyncMock]:
+    """Stub the Slice-10 audit emission for graph tests.
+
+    Graph service tests drive the mutators with a *mocked* db session, so the real
+    ``audit_service.record`` (which runs SQL) cannot execute. Replace it with an
+    AsyncMock; the graph-edit audit tests request this fixture to assert ``record`` was
+    called with the right action/target.
+    """
+    with patch("app.features.graph.service.audit_service.record", new_callable=AsyncMock) as mock:
+        yield mock
 
 
 @pytest_asyncio.fixture
