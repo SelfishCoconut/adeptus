@@ -55,6 +55,7 @@ export function ChatPanel({ engagementId, archived = false }: ChatPanelProps) {
           streamingId={streamingId}
           streamingText={stream.text}
           streamError={stream.error}
+          streamingPlan={stream.plan}
         />
       </div>
       <ChatComposer

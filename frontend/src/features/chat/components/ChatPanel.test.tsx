@@ -116,6 +116,46 @@ describe('ChatPanel', () => {
     })
   })
 
+  it('shows the Plan panel when the stream done frame delivers a plan, then from history', async () => {
+    const user = userEvent.setup()
+    const userMsg = msg('u1', 'user', 'how should I test the login flow?')
+    const pending = msg('a1', 'assistant', '', 'pending')
+    mockPost.mockImplementation(async () => {
+      serverItems = [userMsg, pending]
+      return {
+        data: { user_message: userMsg, assistant_message: pending },
+        response: { status: 201 },
+      } as never
+    })
+
+    renderPanel()
+    await user.type(screen.getByLabelText(/message the ai/i), 'how should I test the login flow?')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+
+    // The settled history row carries the parsed plan (ChatMessageRead.plan).
+    serverItems = [
+      userMsg,
+      { ...msg('a1', 'assistant', 'Here is the approach.'), plan: [
+        { step: 'Enumerate the login endpoint', status: 'done' },
+        { step: 'Test for SQL injection', status: 'in_progress' },
+      ] },
+    ]
+    act(() => {
+      FakeWebSocket.instances[0].emit({
+        type: 'done',
+        plan: [
+          { step: 'Enumerate the login endpoint', status: 'done' },
+          { step: 'Test for SQL injection', status: 'in_progress' },
+        ],
+      })
+    })
+
+    await waitFor(() => expect(screen.getByTestId('plan-panel')).toBeInTheDocument())
+    expect(screen.getByText('Test for SQL injection')).toBeInTheDocument()
+  })
+
   it('shows the unreachable banner when the stream errors', async () => {
     const user = userEvent.setup()
     const userMsg = msg('u1', 'user', 'hi')

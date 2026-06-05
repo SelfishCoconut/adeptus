@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import type { ChatMessage, Claim } from '@/shared/api'
+import type { ChatMessage, Claim, PlanStep } from '@/shared/api'
 import { AiDebugPanel } from './AiDebugPanel'
 import { CertaintyBadge } from './CertaintyBadge'
+import { PlanPanel } from './PlanPanel'
 
 interface ChatMessageListProps {
   /** The engagement these messages belong to (for the per-turn debug panel). */
@@ -15,6 +16,8 @@ interface ChatMessageListProps {
   streamingText: string
   /** Stable reason when the streaming turn failed/offline (§5.1), else null. */
   streamError: string | null
+  /** The running plan from the just-finished stream's done frame (§5.3), empty otherwise. */
+  streamingPlan?: PlanStep[]
 }
 
 const OFFLINE_TEXT = 'AI is unreachable — local model is offline'
@@ -72,16 +75,24 @@ function FinalizedAssistantTurn({
   messageId,
   isDebugOpen,
   onToggleDebug,
+  plan,
   children,
 }: {
   engagementId: string
   messageId: string
   isDebugOpen: boolean
   onToggleDebug: () => void
+  /** When provided (latest turn only), the Plan panel renders above the reply (§5.3). */
+  plan?: PlanStep[]
   children: React.ReactNode
 }) {
   return (
     <div className="flex flex-col items-start gap-1">
+      {plan !== undefined ? (
+        <div className="w-full max-w-[80%]">
+          <PlanPanel plan={plan} />
+        </div>
+      ) : null}
       <AssistantRow>{children}</AssistantRow>
       <button
         type="button"
@@ -112,8 +123,12 @@ export function ChatMessageList({
   streamingId,
   streamingText,
   streamError,
+  streamingPlan = [],
 }: ChatMessageListProps) {
   const endRef = useRef<HTMLDivElement | null>(null)
+  // The AI's plan is shown for the LATEST assistant turn only (the "running" plan, §5.3);
+  // older turns keep their plan in the debug panel (task 13) but don't crowd the pane.
+  const latestAssistantId = [...messages].reverse().find((m) => m.role === 'assistant')?.id ?? null
   // The single assistant turn whose debug panel is open (one at a time), or null.
   const [openDebugId, setOpenDebugId] = useState<string | null>(null)
   const toggleDebug = (id: string) =>
@@ -154,12 +169,21 @@ export function ChatMessageList({
         }
 
         if (isStreaming) {
+          // The plan arrives on the stream's done frame (before the refetch finalizes the
+          // row); show it above the still-streaming bubble the moment it lands (§5.3).
           return (
-            <AssistantRow key={message.id}>
-              <div aria-live="polite" className="whitespace-pre-wrap">
-                {streamingText || <span className="text-muted-foreground">…</span>}
-              </div>
-            </AssistantRow>
+            <div key={message.id} className="flex flex-col items-start gap-1">
+              {streamingPlan.length > 0 ? (
+                <div className="w-full max-w-[80%]">
+                  <PlanPanel plan={streamingPlan} />
+                </div>
+              ) : null}
+              <AssistantRow>
+                <div aria-live="polite" className="whitespace-pre-wrap">
+                  {streamingText || <span className="text-muted-foreground">…</span>}
+                </div>
+              </AssistantRow>
+            </div>
           )
         }
 
@@ -192,6 +216,7 @@ export function ChatMessageList({
             messageId={message.id}
             isDebugOpen={openDebugId === message.id}
             onToggleDebug={() => toggleDebug(message.id)}
+            plan={message.id === latestAssistantId ? (message.plan ?? []) : undefined}
           >
             <div className="space-y-2 [&_code]:rounded [&_code]:bg-background [&_code]:px-1">
               <ReactMarkdown>{message.content}</ReactMarkdown>

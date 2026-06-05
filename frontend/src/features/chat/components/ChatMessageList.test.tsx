@@ -47,6 +47,7 @@ function renderList(props: Partial<Parameters<typeof ChatMessageList>[0]> = {}) 
       streamingId={props.streamingId ?? null}
       streamingText={props.streamingText ?? ''}
       streamError={props.streamError ?? null}
+      streamingPlan={props.streamingPlan ?? []}
     />,
     { wrapper: Wrapper },
   )
@@ -160,5 +161,41 @@ describe('ChatMessageList', () => {
   it('renders no claim badges when the turn has none', () => {
     renderList({ messages: [msg('a1', 'assistant', 'plain answer')] })
     expect(screen.queryByTestId('claim-badges')).not.toBeInTheDocument()
+  })
+
+  it('renders the Plan panel for the latest assistant turn from history', () => {
+    const assistant: ChatMessage = {
+      ...msg('a1', 'assistant', 'an answer'),
+      plan: [{ step: 'Enumerate the login endpoint', status: 'done' }],
+    }
+    renderList({ messages: [assistant] })
+    expect(screen.getByTestId('plan-panel')).toBeInTheDocument()
+    expect(screen.getByText('Enumerate the login endpoint')).toBeInTheDocument()
+  })
+
+  it('shows the Plan panel only for the LATEST assistant turn', () => {
+    const earlier: ChatMessage = {
+      ...msg('a1', 'assistant', 'first answer'),
+      plan: [{ step: 'old plan step', status: 'done' }],
+    }
+    const latest: ChatMessage = {
+      ...msg('a2', 'assistant', 'second answer'),
+      plan: [{ step: 'current plan step', status: 'in_progress' }],
+    }
+    renderList({ messages: [earlier, latest] })
+    expect(screen.getByText('current plan step')).toBeInTheDocument()
+    expect(screen.queryByText('old plan step')).not.toBeInTheDocument()
+  })
+
+  it('shows the live plan above the still-streaming bubble on done', () => {
+    renderList({
+      messages: [msg('u1', 'user', 'hi'), msg('a1', 'assistant', '', 'pending')],
+      streamingId: 'a1',
+      streamingText: 'Working…',
+      streamingPlan: [{ step: 'Test SQLi', status: 'in_progress' }],
+    })
+    expect(screen.getByTestId('plan-panel')).toBeInTheDocument()
+    expect(screen.getByText('Test SQLi')).toBeInTheDocument()
+    expect(screen.getByText('Working…')).toBeInTheDocument()
   })
 })
