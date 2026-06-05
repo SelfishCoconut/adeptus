@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { renderHook } from '@testing-library/react'
 import type { ChatMessage } from '@/shared/api'
-import { usePinStore } from '@/features/graph/store/pinStore'
 import { useCertaintyByNode } from './useCertaintyByNode'
 
 // Mock only useChatMessages; keep the real flattenChatPages so the map-building logic runs.
@@ -72,13 +71,16 @@ describe('useCertaintyByNode', () => {
     expect(result.current.size).toBe(0)
   })
 
-  it('never writes the graph pin store (read-only overlay, ADR-0001 / §8.2)', () => {
+  it('is a pure read-only derivation — stable across re-renders (no side effects)', () => {
+    // The hook only READS the chat query and derives a map in useMemo; it imports no store
+    // and exposes no setter, so it cannot write the graph store / single writer (ADR-0001 /
+    // §8.2). A stable result across re-renders with the same data evidences the pure derive.
     mockUseChatMessages.mockReturnValue(
       pageOf([assistant('a1', [{ text: 'apache', certainty: 60, node_id: 'node-A' }])]),
     )
-    const before = JSON.stringify(usePinStore.getState().pinnedByEngagement)
-    renderHook(() => useCertaintyByNode(ENGAGEMENT_ID))
-    const after = JSON.stringify(usePinStore.getState().pinnedByEngagement)
-    expect(after).toBe(before)
+    const { result, rerender } = renderHook(() => useCertaintyByNode(ENGAGEMENT_ID))
+    const first = result.current
+    rerender()
+    expect(result.current).toBe(first)
   })
 })

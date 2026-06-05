@@ -135,7 +135,11 @@ def _coerce_status(raw: Any) -> PlanStepStatus:
 
 
 def _coerce_certainty(raw: Any) -> int | None:
-    """Coerce a certainty to an int clamped to 0–100, or ``None`` if it isn't a number."""
+    """Coerce a certainty to an int clamped to 0–100, or ``None`` if it isn't a number.
+
+    Accepts an int/float, or a string parseable as a decimal float (e.g. ``"60"``,
+    ``"60.0"``); a non-numeric string like ``"60%"`` or ``"high"`` yields ``None`` so the
+    claim is dropped (no usable certainty)."""
     if isinstance(raw, bool):  # bool is an int subclass — never a certainty
         return None
     value: float

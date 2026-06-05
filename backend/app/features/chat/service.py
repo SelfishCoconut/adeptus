@@ -128,6 +128,14 @@ def _user_id(user: User) -> UUID:
     return cast(UUID, user.id)
 
 
+def _as_uuid(value: object) -> UUID:
+    """Normalize a model id column to ``uuid.UUID`` (mirrors ``subset_builder._uuid``).
+
+    ``load_live_graph`` returns ``uuid.UUID`` at runtime; this keeps both mypy configs happy
+    without scattering ``cast`` at each use."""
+    return value if isinstance(value, UUID) else UUID(str(value))
+
+
 # ---------------------------------------------------------------------------
 # send_message
 # ---------------------------------------------------------------------------
@@ -315,7 +323,7 @@ def _build_prompt(
 # ---------------------------------------------------------------------------
 
 
-async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would obscure it
+async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream loop (see docstring)
     *,
     message: ChatMessage,
 ) -> AsyncGenerator[WebSocketChatChunk, None]:
@@ -330,6 +338,11 @@ async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would
         content/status + emit the ``ai_call`` audit entry (atomic), then ``done``; on
         ``LlmUnreachableError`` (or a wedged socket) persist ``failed``, emit ``ai_call``
         with ``status=failed``, and ``error``.
+
+    The ``noqa: C901`` is retained because the irreducible core is a yielding token loop
+    whose failure branch must ``return`` from *this* generator (it cannot be hoisted into a
+    helper without losing the early-return semantics). The finalize/parse/persist/audit work
+    is already extracted to ``_finalize_complete_turn``.
     """
     settings = get_settings()
     model_name = settings.ADEPTUS_LLM_MODEL
@@ -421,42 +434,79 @@ async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would
         if not block_started and emitted < len(full):
             yield WebSocketChatChunk(type="token", data=full[emitted:])
 
-        # Parse the metadata block off the full reply, validate claim node_ids against the
-        # engagement's live graph (drop foreign/unknown ids, §17.1), and persist the
-        # block-stripped prose as content + the plan/claims into the per-turn JSONB blob.
-        prose, plan, claims = plan_parser.extract(full)
-        claims = _validate_claim_node_ids(claims, live_node_ids)
-        graph_context = _finalize_record(debug_record, plan=plan, claims=claims, model_output=full)
-
-        finalized = await chat_repo.finalize_assistant(
+        # Parse, validate, persist, and audit the completed turn (extracted to keep this
+        # generator readable); then deliver the parsed plan/claims on the done frame.
+        plan, claims = await _finalize_complete_turn(
             session,
             message_id=message_id,
-            content=prose,
-            status="complete",
-            model=model_name,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            graph_context=graph_context,
+            actor_user_id=user_id,
+            engagement_id=engagement_id,
+            model_name=model_name,
+            prompt_count=len(prompt),
+            full_reply=full,
+            debug_record=debug_record,
+            live_node_ids=live_node_ids,
+            subset=subset,
+            usage=usage,
         )
-        # Emit the audit entry only when THIS call won the pending→terminal transition;
-        # a racing socket that already finalized the row gets None and must not re-emit
-        # (Risk 6 — exactly one ai_call per turn).
-        if finalized is not None:
-            await _emit_ai_call(
-                session,
-                actor_user_id=user_id,
-                engagement_id=engagement_id,
-                message_id=message_id,
-                model_name=model_name,
-                prompt_count=len(prompt),
-                status="complete",
-                nodes_injected=subset.nodes_injected,
-                edges_injected=subset.edges_injected,
-                plan_steps=len(plan),
-                claims_count=len(claims),
-            )
-        await session.commit()
         yield WebSocketChatChunk(type="done", plan=plan, claims=claims)
+
+
+async def _finalize_complete_turn(
+    session: AsyncSession,
+    *,
+    message_id: UUID,
+    actor_user_id: UUID,
+    engagement_id: UUID,
+    model_name: str,
+    prompt_count: int,
+    full_reply: str,
+    debug_record: dict[str, Any],
+    live_node_ids: set[UUID],
+    subset: subset_builder.GraphSubset,
+    usage: OllamaUsage,
+) -> tuple[list[PlanStep], list[Claim]]:
+    """Parse, validate, persist, and audit a completed turn; return its plan + claims.
+
+    Splits the §5.3 metadata block off ``full_reply``, validates each claim's ``node_id``
+    against the engagement's live graph (foreign/unknown dropped, §17.1), persists the
+    block-stripped prose as ``content`` plus plan/claims/unstripped-output into the per-turn
+    JSONB (merging the Slice-12 keys, Risk 6), and emits exactly one ``ai_call`` — only when
+    this call won the pending→terminal transition (a racing socket gets ``None`` and must
+    not re-emit, Risk 6). The caller yields the returned plan/claims on the ``done`` frame.
+    """
+    prose, plan, claims = plan_parser.extract(full_reply)
+    claims = _validate_claim_node_ids(claims, live_node_ids)
+    graph_context = _finalize_record(
+        debug_record, plan=plan, claims=claims, model_output=full_reply
+    )
+
+    finalized = await chat_repo.finalize_assistant(
+        session,
+        message_id=message_id,
+        content=prose,
+        status="complete",
+        model=model_name,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        graph_context=graph_context,
+    )
+    if finalized is not None:
+        await _emit_ai_call(
+            session,
+            actor_user_id=actor_user_id,
+            engagement_id=engagement_id,
+            message_id=message_id,
+            model_name=model_name,
+            prompt_count=prompt_count,
+            status="complete",
+            nodes_injected=subset.nodes_injected,
+            edges_injected=subset.edges_injected,
+            plan_steps=len(plan),
+            claims_count=len(claims),
+        )
+    await session.commit()
+    return plan, claims
 
 
 async def _finalize_failed(
@@ -626,7 +676,7 @@ async def _build_turn_subset(
         n_recent=settings.ADEPTUS_GRAPH_CONTEXT_RECENT_LIMIT,
         k_mentioned=settings.ADEPTUS_GRAPH_CONTEXT_MENTIONED_LIMIT,
     )
-    live_node_ids = {n_id if isinstance(n_id := n.id, UUID) else UUID(str(n_id)) for n in nodes}
+    live_node_ids = {_as_uuid(n.id) for n in nodes}
     return subset, live_node_ids
 
 

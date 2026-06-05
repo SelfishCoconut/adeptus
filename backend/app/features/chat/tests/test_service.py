@@ -851,6 +851,40 @@ async def test_claim_node_id_validated_against_graph(
 
 
 @pytest.mark.asyncio
+async def test_stream_truncated_block_no_leak_and_consistent_persist(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that opens <adeptus-meta> but never closes it (truncated stream): the
+    sentinel must not leak into the streamed tokens, and the stored content must equal the
+    pre-marker prose (streamed tokens and persisted prose stay consistent — W4 / Risk 2)."""
+    truncated = "Visible answer.\n\n" + plan_parser.START_MARKER + '\n{"plan": [{"step": "half'
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(_chunk(truncated, 5)))
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    token_data = "".join(c.data or "" for c in chunks if c.type == "token")
+    assert "adeptus-meta" not in token_data  # sentinel never leaked
+    # The streamed prose is exactly the pre-marker prose (no block fragment, no prose lost);
+    # it agrees with the stored content modulo the trailing whitespace extract() strips.
+    assert token_data.strip() == "Visible answer."
+    done = chunks[-1]
+    assert done.type == "done"
+    assert done.plan == [] and done.claims == []
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    # Streamed prose and stored content agree — no prose lost, no block fragment kept.
+    assert row.content == "Visible answer."
+    assert "adeptus-meta" not in row.content
+
+
+@pytest.mark.asyncio
 async def test_no_block_yields_empty_plan_and_clean_prose(
     db_factory: async_sessionmaker[AsyncSession],
     mock_audit_record: AsyncMock,
