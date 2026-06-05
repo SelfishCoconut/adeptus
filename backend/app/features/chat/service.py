@@ -59,6 +59,7 @@ from app.features.chat.schemas import (
 )
 from app.features.engagements import repository as eng_repo
 from app.features.graph import repository as graph_repo
+from app.features.personas.seed import GENERAL_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +71,12 @@ RECENT_WINDOW = 20
 # progressing model is never aborted (§5.1 / Risk 4).
 NO_PROGRESS_TIMEOUT_SECONDS = 600.0
 
-# Open Question 4: single neutral general-style system prompt until personas (Slice 15).
-SYSTEM_PROMPT = (
-    "You are a penetration-testing assistant embedded in the Adeptus platform. "
-    "Help the operator reason about their authorized engagement: explain techniques, "
-    "interpret tool output, and suggest next steps. Be concise and technical."
-)
+# Slice 15 (resolved Open Question 3): the base system prompt is now the ``general``
+# built-in persona's prompt, kept as the single source of truth in ``personas.seed`` and
+# re-imported here so the no-persona default stays byte-identical (the ``general`` built-in
+# IS the default). A turn with a selected persona replaces this base (Decision 4); a turn
+# with no persona resolves to ``general`` and so uses exactly this text.
+SYSTEM_PROMPT = GENERAL_SYSTEM_PROMPT
 
 # Slice 13 (§5.3): the structured-output instruction. Appended AFTER the base prompt and
 # the Slice-12 graph context block so the model emits a trailing, machine-readable metadata
