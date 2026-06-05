@@ -49,12 +49,16 @@ async def _seed_user(db: AsyncSession, username: str) -> User:
     return user
 
 
-async def _seed_engagement(db: AsyncSession, owner_id: UUID, *, archived: bool = False) -> UUID:
+async def _seed_engagement(
+    db: AsyncSession, owner_id: UUID, *, archived: bool = False, cloud: bool = False
+) -> UUID:
     engagement = await eng_repo.create_engagement(
         db, name="Eng", scope="https://example.com", client_info=None, owner_id=owner_id
     )
     if archived:
         engagement.status = "archived"
+    if cloud:
+        engagement.privacy_mode = "cloud_enabled"
     await db.commit()
     await db.refresh(engagement)
     return cast(UUID, engagement.id)
@@ -160,6 +164,140 @@ async def test_send_message_archived_409(db_session: AsyncSession) -> None:
 
     with pytest.raises(ConflictError):
         await service.send_message(db_session, engagement_id=eng_id, requester=user, content="hi")
+
+
+# ---------------------------------------------------------------------------
+# send_message — §5.1 cloud egress pattern-friction gate (Slice 14)
+# ---------------------------------------------------------------------------
+
+# Synthetic test vectors (not real secrets); each carries gitleaks:allow.
+_SECRET = "my key AKIAIOSFODNN7EXAMPLE and password=hunter2"  # gitleaks:allow
+
+
+async def _stash_of(db: AsyncSession, message_id: UUID, user_id: UUID) -> dict:
+    row = await chat_repo.get_message_for_owner(db, message_id=message_id, user_id=user_id)
+    assert row is not None
+    return cast(dict, row.graph_context)
+
+
+@pytest.mark.asyncio
+async def test_send_cloud_enabled_secret_unconfirmed_raises_egress_409(
+    db_session: AsyncSession,
+) -> None:
+    """A cloud send matching a secret without confirmation is refused before the row exists."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    with pytest.raises(service.EgressConfirmationRequiredError):
+        await service.send_message(
+            db_session, engagement_id=eng_id, requester=user, content=_SECRET
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_cloud_enabled_secret_confirmed_persists_pair(db_session: AsyncSession) -> None:
+    """With confirmed_egress=True the friction is satisfied and the pair persists."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    result = await service.send_message(
+        db_session,
+        engagement_id=eng_id,
+        requester=user,
+        content=_SECRET,
+        confirmed_egress=True,
+    )
+    await db_session.commit()
+    assert result.user_message.status == "complete"
+    assert result.assistant_message.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_send_cloud_enabled_clean_text_no_friction(db_session: AsyncSession) -> None:
+    """An ordinary cloud message (no secret) sends with no friction and is not flagged."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    result = await service.send_message(
+        db_session, engagement_id=eng_id, requester=user, content="what is SQL injection?"
+    )
+    await db_session.commit()
+    stash = await _stash_of(db_session, result.assistant_message.id, cast(UUID, user.id))
+    assert stash["egress"]["secret_flagged"] is False
+    assert stash["egress"]["match_categories"] == []
+
+
+@pytest.mark.asyncio
+async def test_send_local_only_secret_never_scanned(db_session: AsyncSession) -> None:
+    """A secret on a local_only engagement persists with no friction — no egress to gate (§5.5)."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id))  # local_only (default)
+
+    result = await service.send_message(
+        db_session, engagement_id=eng_id, requester=user, content=_SECRET
+    )
+    await db_session.commit()
+    stash = await _stash_of(db_session, result.assistant_message.id, cast(UUID, user.id))
+    # Never scanned: the local path has no cloud egress, so nothing is flagged.
+    assert stash["egress"]["secret_flagged"] is False
+    assert stash["egress"]["match_categories"] == []
+
+
+@pytest.mark.asyncio
+async def test_egress_decision_stashed_on_pending_row(db_session: AsyncSession) -> None:
+    """A confirmed flagged send stashes the egress decision for the streamer's audit payload."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    result = await service.send_message(
+        db_session,
+        engagement_id=eng_id,
+        requester=user,
+        content=_SECRET,
+        confirmed_egress=True,
+    )
+    await db_session.commit()
+    egress = (await _stash_of(db_session, result.assistant_message.id, cast(UUID, user.id)))[
+        "egress"
+    ]
+    assert egress["secret_flagged"] is True
+    assert egress["confirmed"] is True
+    assert "aws_access_key" in egress["match_categories"]
+    assert "password_assignment" in egress["match_categories"]
+
+
+@pytest.mark.asyncio
+async def test_egress_409_body_carries_category_names_not_values(db_session: AsyncSession) -> None:
+    """The 409 error carries category NAMES only — never the matched secret value (§5.5)."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    with pytest.raises(service.EgressConfirmationRequiredError) as exc:
+        await service.send_message(
+            db_session, engagement_id=eng_id, requester=user, content=_SECRET
+        )
+    categories = exc.value.matched_categories
+    assert "aws_access_key" in categories
+    # The secret value must not appear anywhere in the raised error.
+    assert "AKIAIOSFODNN7EXAMPLE" not in str(exc.value)  # gitleaks:allow
+    assert "AKIAIOSFODNN7EXAMPLE" not in "".join(categories)  # gitleaks:allow
+
+
+@pytest.mark.asyncio
+async def test_content_not_redacted_on_confirmed_send(db_session: AsyncSession) -> None:
+    """The persisted user content is byte-for-byte the input — never redacted (§5.5 / Risk 2)."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    result = await service.send_message(
+        db_session,
+        engagement_id=eng_id,
+        requester=user,
+        content=_SECRET,
+        confirmed_egress=True,
+    )
+    await db_session.commit()
+    assert result.user_message.content == _SECRET
 
 
 # ---------------------------------------------------------------------------

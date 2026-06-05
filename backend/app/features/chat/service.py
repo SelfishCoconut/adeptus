@@ -33,7 +33,7 @@ from app.features.audit import service as audit_service
 from app.features.audit.schemas import AuditAction
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
-from app.features.chat import ollama_client, plan_parser, subset_builder
+from app.features.chat import egress_scan, ollama_client, plan_parser, subset_builder
 from app.features.chat import repository as chat_repo
 from app.features.chat.models import ChatMessage
 from app.features.chat.ollama_client import LlmUnreachableError, OllamaUsage
@@ -92,6 +92,10 @@ PLAN_CERTAINTY_INSTRUCTION = (
 # Stable, non-leaky reason surfaced to the client (matches the demo copy).
 UNREACHABLE_MESSAGE = "AI is unreachable — local model is offline"
 
+# Slice 14 (§5.1): a cloud_enabled turn whose engagement has no configured key fails rather
+# than silently using local (no auto-fallback). Same shape as UNREACHABLE_MESSAGE.
+CLOUD_NOT_CONFIGURED_MESSAGE = "Cloud LLM is not configured for this engagement"
+
 
 class EngagementArchivedError(ConflictError):
     """Raised when a new chat message targets an archived engagement (§4 read-only).
@@ -102,6 +106,20 @@ class EngagementArchivedError(ConflictError):
 
     def __init__(self, message: str = "Engagement is archived (read-only)") -> None:
         super().__init__(message)
+
+
+class EgressConfirmationRequiredError(ConflictError):
+    """Raised when a cloud_enabled send matched a likely-secret pattern without confirmation.
+
+    The §5.1 pattern-friction gate (Decision 1): server-authoritative, fired at the POST
+    before the pending row exists and before any token can leave the machine. Subclasses
+    ``ConflictError`` (→ 409); the router renders the matched category NAMES (never the secret
+    value, §5.5) into the friction modal body. Carries only the category names.
+    """
+
+    def __init__(self, *, matched_categories: list[str]) -> None:
+        self.matched_categories = matched_categories
+        super().__init__("Message may contain a secret; egress confirmation required")
 
 
 # ---------------------------------------------------------------------------
@@ -150,17 +168,25 @@ async def send_message(
     pinned_node_ids: Sequence[UUID] = (),
     recent_node_ids: Sequence[UUID] = (),
     mentioned_node_ids: Sequence[UUID] = (),
+    confirmed_egress: bool = False,
 ) -> SendChatMessageResult:
     """Persist the user message + an empty ``pending`` assistant placeholder.
 
     Membership chokepoint (404 for non-members/missing, §17.1), then an archived-
-    engagement guard (409, §4). The assistant reply is streamed separately over
-    ``WS /ws/chat/{assistant_message_id}``. The caller (router) commits.
+    engagement guard (409, §4), then — on a ``cloud_enabled`` engagement only — the §5.1
+    pattern-friction egress gate (Decision 1): the content is re-scanned server-side
+    (authoritative; the client scan is only UX), and a secret-matching send that was NOT
+    confirmed raises ``EgressConfirmationRequiredError`` (409) *before* the pending row exists
+    and before any token can leave the machine. A ``local_only`` send is never scanned (no
+    egress to gate, §5.5). The content is NEVER modified (§5.5) — the scan only flags.
 
-    The three id lists are the client-supplied §5.3 union inputs (Slice 12). They are
-    stashed verbatim onto the pending assistant row (Decision 4) so the WS streamer can
-    resolve them against the live graph at stream time; the streamer overwrites the stash
-    with the canonical subset at finalize. They are NOT resolved or trusted here.
+    The assistant reply is streamed separately over ``WS /ws/chat/{assistant_message_id}``.
+    The caller (router) commits.
+
+    The three id lists are the client-supplied §5.3 union inputs (Slice 12); the egress
+    decision (Slice 14) is stashed alongside them on the pending assistant row (Decision 4)
+    so the WS streamer can record it in the ``ai_call`` audit payload at finalize. They are
+    NOT resolved or trusted here.
     """
     member = await eng_repo.get_engagement_for_member(db, engagement_id, _user_id(requester))
     if member is None:
@@ -169,17 +195,44 @@ async def send_message(
     if engagement.status == "archived":
         raise EngagementArchivedError()
 
+    egress = _evaluate_egress(engagement.privacy_mode, content, confirmed_egress)
+
     user_message, assistant_message = await chat_repo.insert_user_and_pending_assistant(
         db,
         engagement_id=engagement_id,
         user_id=_user_id(requester),
         content=content,
-        graph_context=_input_stash(pinned_node_ids, recent_node_ids, mentioned_node_ids),
+        graph_context=_input_stash(
+            pinned_node_ids, recent_node_ids, mentioned_node_ids, egress=egress
+        ),
     )
     return SendChatMessageResult(
         user_message=ChatMessageRead.model_validate(user_message),
         assistant_message=ChatMessageRead.model_validate(assistant_message),
     )
+
+
+def _evaluate_egress(privacy_mode: str, content: str, confirmed_egress: bool) -> dict[str, Any]:
+    """Run the §5.1 pattern-friction gate for one send; return the egress decision to stash.
+
+    On a ``cloud_enabled`` engagement the content is scanned for likely-secret patterns
+    (``egress_scan``, server-authoritative — Risk 3). A match that was NOT confirmed raises
+    ``EgressConfirmationRequiredError`` (the friction 409) carrying the category NAMES only
+    (never the value, §5.5). A ``local_only`` send is never scanned — there is no cloud egress
+    to gate (§5.5). The scan only flags; the content is never modified (§5.5 / Risk 2).
+    """
+    if privacy_mode != "cloud_enabled":
+        return {"secret_flagged": False, "confirmed": False, "match_categories": []}
+    categories = egress_scan.category_names(content)
+    if categories and not confirmed_egress:
+        raise EgressConfirmationRequiredError(matched_categories=categories)
+    flagged = bool(categories)
+    return {
+        "secret_flagged": flagged,
+        # A confirmed send is audited as confirmed; a clean send has nothing to confirm.
+        "confirmed": flagged and confirmed_egress,
+        "match_categories": categories,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -609,20 +662,30 @@ async def _aclose_quiet(agen: AsyncIterator[str]) -> None:
 
 
 def _input_stash(
-    pinned: Sequence[UUID], recent: Sequence[UUID], mentioned: Sequence[UUID]
+    pinned: Sequence[UUID],
+    recent: Sequence[UUID],
+    mentioned: Sequence[UUID],
+    *,
+    egress: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Serialize the client-supplied §5.3 union inputs for the pending-row stash (Decision 4).
 
     Stored as JSON-safe id strings under ``inputs`` so the streamer can re-resolve them
     against the live graph at stream time; overwritten with the canonical subset at finalize.
+    The Slice-14 ``egress`` decision (``secret_flagged``/``confirmed``/``match_categories`` —
+    category NAMES only, §5.5) rides alongside under ``egress`` so the streamer can write it
+    into the ``ai_call`` audit payload before the stash is replaced at finalize.
     """
-    return {
+    stash: dict[str, Any] = {
         "inputs": {
             "pinned_node_ids": [str(x) for x in pinned],
             "recent_node_ids": [str(x) for x in recent],
             "mentioned_node_ids": [str(x) for x in mentioned],
         }
     }
+    if egress is not None:
+        stash["egress"] = egress
+    return stash
 
 
 def _triggering_user_text(window: Sequence[ChatMessage]) -> str:
