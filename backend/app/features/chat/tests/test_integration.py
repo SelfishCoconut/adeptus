@@ -177,15 +177,32 @@ async def _seed_user(factory: async_sessionmaker[AsyncSession], username: str) -
 
 
 async def _seed_engagement(
-    factory: async_sessionmaker[AsyncSession], owner_id: uuid.UUID
+    factory: async_sessionmaker[AsyncSession], owner_id: uuid.UUID, *, cloud: bool = False
 ) -> uuid.UUID:
     async with factory() as db:
         engagement = await eng_repo.create_engagement(
             db, name="Eng", scope="https://example.com", client_info=None, owner_id=owner_id
         )
+        if cloud:
+            engagement.privacy_mode = "cloud_enabled"
         await db.commit()
         await db.refresh(engagement)
         return cast(uuid.UUID, engagement.id)
+
+
+def _boom_stream() -> FakeStream:
+    """A stream_chat that fails the test if iterated — asserts the OTHER backend ran."""
+
+    async def _gen(
+        *,
+        messages: Sequence[OllamaChatMessage],
+        model: str | None = None,
+        usage: OllamaUsage | None = None,
+    ) -> AsyncIterator[str]:
+        raise AssertionError("this backend must not be called")
+        yield ""  # pragma: no cover
+
+    return _gen
 
 
 # ---------------------------------------------------------------------------
@@ -725,3 +742,259 @@ async def test_plan_private_per_user(
     other_claims = [c for m in other_page.items for c in m.claims]
     assert "owner-only-step" not in other_steps
     assert other_claims == []
+
+
+# ---------------------------------------------------------------------------
+# Slice 14 — cloud backend + pattern-friction egress (§5.1 / §5.5 / §14)
+# ---------------------------------------------------------------------------
+
+# Synthetic secret vector (not a real credential); carries gitleaks:allow.
+_SECRET = "deploy with AKIAIOSFODNN7EXAMPLE and password=hunter2"  # gitleaks:allow
+
+
+def _set_cloud_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADEPTUS_ANTHROPIC_API_KEY", "sk-ant-it-key")  # gitleaks:allow
+    get_settings.cache_clear()
+
+
+async def _ai_call_rows(
+    factory: async_sessionmaker[AsyncSession], user_id: uuid.UUID
+) -> list[AuditEntry]:
+    async with factory() as db:
+        return list(
+            (
+                await db.execute(
+                    select(AuditEntry).where(
+                        AuditEntry.action == "ai_call", AuditEntry.actor_user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+async def test_cloud_turn_routes_to_anthropic_and_audits(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Headline §5.1 cloud happy-path: a clean cloud send streams from Claude + audits cloud."""
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _fake_stream(["Cloud ", "reply."]))
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom_stream())
+
+    user = await _seed_user(pg_factory, "owner")
+    user_id = cast(uuid.UUID, user.id)
+    eng_id = await _seed_engagement(pg_factory, user_id, cloud=True)
+
+    async with pg_factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=user, content="what is sqli?"
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+
+    async with pg_factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=user_id
+        )
+    assert message is not None
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+    assert [c.type for c in chunks] == ["token", "token", "done"]
+    assert "".join(c.data or "" for c in chunks if c.type == "token") == "Cloud reply."
+
+    async with pg_factory() as db:
+        row = await chat_repo.get_message_for_owner(db, message_id=assistant_id, user_id=user_id)
+        assert row is not None
+        assert row.status == "complete"
+        assert row.content == "Cloud reply."
+        assert row.model == "claude-sonnet-4-6"
+
+    rows = await _ai_call_rows(pg_factory, user_id)
+    assert len(rows) == 1
+    assert rows[0].payload["backend"] == "cloud"
+    assert rows[0].payload["egress_secret_flagged"] is False
+
+
+async def test_cloud_secret_unconfirmed_blocks_then_confirmed_sends_unmodified(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Headline §5.1 friction + §5.5 no-redaction: blocked unconfirmed, then sent byte-for-byte."""
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _fake_stream(["ok"]))
+
+    user = await _seed_user(pg_factory, "owner")
+    user_id = cast(uuid.UUID, user.id)
+    eng_id = await _seed_engagement(pg_factory, user_id, cloud=True)
+
+    # Unconfirmed secret-bearing send → friction 409, and nothing is persisted.
+    async with pg_factory() as db:
+        with pytest.raises(service.EgressConfirmationRequiredError) as exc:
+            await service.send_message(db, engagement_id=eng_id, requester=user, content=_SECRET)
+        await db.rollback()
+    assert "aws_access_key" in exc.value.matched_categories
+
+    async with pg_factory() as db:
+        page = await service.list_messages(
+            db, engagement_id=eng_id, requester=user, cursor=None, limit=50
+        )
+    assert page.items == []  # nothing persisted on the blocked send
+
+    # Re-send confirmed → persisted byte-for-byte (no redaction, §5.5).
+    async with pg_factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=user, content=_SECRET, confirmed_egress=True
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+    assert result.user_message.content == _SECRET  # byte-for-byte
+
+    async with pg_factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=user_id
+        )
+    assert message is not None
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with pg_factory() as db:
+        row = await chat_repo.get_message_for_owner(db, message_id=assistant_id, user_id=user_id)
+        assert row is not None
+        # The stored USER content is byte-for-byte the input.
+        user_row = await chat_repo.get_message_for_owner(
+            db, message_id=result.user_message.id, user_id=user_id
+        )
+        assert user_row is not None
+        assert user_row.content == _SECRET
+
+    rows = await _ai_call_rows(pg_factory, user_id)
+    assert len(rows) == 1
+    assert rows[0].payload["egress_secret_flagged"] is True
+    assert rows[0].payload["egress_confirmed"] is True
+    # Category NAMES only — never the matched value (§5.5 / Risk 7).
+    assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(rows[0].payload)  # gitleaks:allow
+
+
+async def test_local_only_secret_sends_without_friction(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret on a local_only engagement POSTs with no friction and routes to local."""
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["local"]))
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _boom_stream())
+
+    user = await _seed_user(pg_factory, "owner")
+    user_id = cast(uuid.UUID, user.id)
+    eng_id = await _seed_engagement(pg_factory, user_id)  # local_only
+
+    async with pg_factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=user, content=_SECRET
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+
+    async with pg_factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=user_id
+        )
+    assert message is not None
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    rows = await _ai_call_rows(pg_factory, user_id)
+    assert len(rows) == 1
+    assert rows[0].payload["backend"] == "local"
+    assert rows[0].payload["egress_secret_flagged"] is False
+
+
+async def test_cloud_without_key_marks_failed_no_fallback(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cloud_enabled + no key: the WS turn fails; the local client is never called (§5.1)."""
+    monkeypatch.delenv("ADEPTUS_ANTHROPIC_API_KEY", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom_stream())
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _boom_stream())
+
+    user = await _seed_user(pg_factory, "owner")
+    user_id = cast(uuid.UUID, user.id)
+    eng_id = await _seed_engagement(pg_factory, user_id, cloud=True)
+
+    async with pg_factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=user, content="ordinary question"
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+
+    async with pg_factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=user_id
+        )
+    assert message is not None
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+    assert [c.type for c in chunks] == ["error"]
+    assert chunks[0].message == service.CLOUD_NOT_CONFIGURED_MESSAGE
+
+    async with pg_factory() as db:
+        row = await chat_repo.get_message_for_owner(db, message_id=assistant_id, user_id=user_id)
+        assert row is not None
+        assert row.status == "failed"
+
+    rows = await _ai_call_rows(pg_factory, user_id)
+    assert len(rows) == 1
+    assert rows[0].payload["status"] == "failed"
+    assert rows[0].payload["backend"] == "cloud"
+
+
+async def test_cloud_flip_after_local_post_rescans_and_refuses_secret(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TOCTOU guard (Risk 1) end-to-end: a secret POSTed under local_only then streamed after a
+    flip to cloud_enabled is re-scanned at the egress point and refused — the turn fails, neither
+    client is iterated, and the ai_call honestly records the flagged cloud failure."""
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _boom_stream())
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom_stream())
+
+    user = await _seed_user(pg_factory, "owner")
+    user_id = cast(uuid.UUID, user.id)
+    eng_id = await _seed_engagement(pg_factory, user_id)  # local_only — no friction at POST
+
+    async with pg_factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=user, content=_SECRET
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+
+    # Owner flips the engagement to cloud_enabled AFTER the secret was persisted.
+    async with pg_factory() as db:
+        member = await eng_repo.get_engagement_for_member(db, eng_id, user_id)
+        assert member is not None
+        member[0].privacy_mode = "cloud_enabled"
+        await db.commit()
+
+    async with pg_factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=user_id
+        )
+    assert message is not None
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+    assert [c.type for c in chunks] == ["error"]
+    assert chunks[0].message == service.EGRESS_UNCONFIRMED_MESSAGE
+
+    async with pg_factory() as db:
+        row = await chat_repo.get_message_for_owner(db, message_id=assistant_id, user_id=user_id)
+        assert row is not None
+        assert row.status == "failed"
+
+    rows = await _ai_call_rows(pg_factory, user_id)
+    assert len(rows) == 1
+    assert rows[0].payload["status"] == "failed"
+    assert rows[0].payload["backend"] == "cloud"
+    assert rows[0].payload["egress_secret_flagged"] is True
+    assert rows[0].payload["egress_confirmed"] is False
+    assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(rows[0].payload)  # gitleaks:allow

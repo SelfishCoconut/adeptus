@@ -11,9 +11,12 @@ Endpoints:
       Stream the assistant reply token-by-token (or replay a completed/failed turn).
       Auth via session cookie on the upgrade; closes 4003 on ANY auth/authz failure.
 
-Domain exceptions translate via the registered handlers (app.core.errors.handlers):
-  NotFoundError            → 404  (engagement missing OR caller not a member, §17.1)
-  EngagementArchivedError  → 409  (subclass of ConflictError; archived = read-only, §4)
+Domain exceptions translate via the registered handlers (app.core.errors.handlers), EXCEPT
+the POST 409s, which the route translates inline to the EgressConfirmationRequired body so
+the single 409 carries a machine-readable reason (Slice 14, task 7):
+  NotFoundError                   → 404  (engagement missing OR caller not a member, §17.1)
+  EngagementArchivedError         → 409  reason=engagement_archived (archived = read-only, §4)
+  EgressConfirmationRequiredError → 409  reason=egress_secret_flagged + matched categories (§5.1)
 """
 
 from contextlib import aclosing
@@ -21,6 +24,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -32,6 +36,8 @@ from app.features.chat.schemas import (
     ChatMessageCreate,
     ChatMessagePage,
     ChatTurnDebug,
+    EgressConfirmationRequired,
+    EgressRefusalReason,
     SendChatMessageResult,
 )
 
@@ -71,29 +77,57 @@ async def list_chat_messages(
     response_model=SendChatMessageResult,
     operation_id="send_chat_message",
     status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_409_CONFLICT: {
+            "model": EgressConfirmationRequired,
+            "description": (
+                "Either the engagement is archived (read-only, §4), OR the engagement is "
+                "cloud-enabled and the message matched a likely-secret pattern but was not "
+                "confirmed (§5.1 pattern-friction). The body's reason distinguishes the two; "
+                "clients re-send with confirmed_egress=true to proceed past the friction case."
+            ),
+        },
+    },
 )
 async def send_chat_message(
     engagement_id: UUID,
     body: ChatMessageCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> SendChatMessageResult:
+) -> SendChatMessageResult | JSONResponse:
     """Persist a user message and an empty pending assistant message, then return both.
 
     Stream the assistant reply over ``WS /ws/chat/{assistant_message_id}``. Requires
-    membership (404); an archived engagement is read-only (409, §4).
+    membership (404). The two 409 cases are translated inline to the EgressConfirmationRequired
+    body (Slice 14): an archived engagement (§4) → ``engagement_archived``; a cloud-enabled
+    secret-matching send without ``confirmed_egress`` → ``egress_secret_flagged`` with the
+    matched category NAMES (never the secret value, §5.5).
     """
-    result = await service.send_message(
-        db,
-        engagement_id=engagement_id,
-        requester=current_user,
-        content=body.content,
-        pinned_node_ids=body.pinned_node_ids,
-        recent_node_ids=body.recent_node_ids,
-        mentioned_node_ids=body.mentioned_node_ids,
-    )
+    try:
+        result = await service.send_message(
+            db,
+            engagement_id=engagement_id,
+            requester=current_user,
+            content=body.content,
+            pinned_node_ids=body.pinned_node_ids,
+            recent_node_ids=body.recent_node_ids,
+            mentioned_node_ids=body.mentioned_node_ids,
+            confirmed_egress=body.confirmed_egress,
+        )
+    except service.EgressConfirmationRequiredError as exc:
+        return _conflict_body(EgressRefusalReason.EGRESS_SECRET_FLAGGED, exc.matched_categories)
+    except service.EngagementArchivedError:
+        return _conflict_body(EgressRefusalReason.ENGAGEMENT_ARCHIVED, [])
     await db.commit()
     return result
+
+
+def _conflict_body(reason: EgressRefusalReason, categories: list[str]) -> JSONResponse:
+    """Render the POST 409 as the EgressConfirmationRequired body (Slice 14, task 7)."""
+    payload = EgressConfirmationRequired(reason=reason, matched_categories=categories)
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT, content=payload.model_dump(mode="json")
+    )
 
 
 @router.get(

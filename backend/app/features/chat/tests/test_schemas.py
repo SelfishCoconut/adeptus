@@ -15,6 +15,8 @@ from app.features.chat.schemas import (
     ChatRole,
     ChatTurnDebug,
     Claim,
+    EgressConfirmationRequired,
+    EgressRefusalReason,
     GraphSubsetEdge,
     GraphSubsetNode,
     GraphSubsetReason,
@@ -43,6 +45,34 @@ def test_content_over_max_rejected() -> None:
     """Content longer than MAX_MESSAGE_CHARS is rejected."""
     with pytest.raises(ValidationError):
         ChatMessageCreate(content="x" * (MAX_MESSAGE_CHARS + 1))
+
+
+def test_confirmed_egress_defaults_false() -> None:
+    """The Slice-14 egress-confirmation flag defaults False (friction is opt-out-by-acknowledge)."""
+    assert ChatMessageCreate(content="hi").confirmed_egress is False
+
+
+def test_confirmed_egress_accepts_true() -> None:
+    """A client that saw the modal sends confirmed_egress=true (§5.1)."""
+    assert ChatMessageCreate(content="hi", confirmed_egress=True).confirmed_egress is True
+
+
+def test_egress_confirmation_required_round_trips() -> None:
+    """EgressConfirmationRequired round-trips with reason + category NAMES (never values, §5.5)."""
+    body = EgressConfirmationRequired(
+        reason=EgressRefusalReason.EGRESS_SECRET_FLAGGED,
+        matched_categories=["aws_access_key", "password_assignment"],
+    )
+    again = EgressConfirmationRequired.model_validate(body.model_dump())
+    assert again == body
+    assert again.reason == EgressRefusalReason.EGRESS_SECRET_FLAGGED
+    assert again.matched_categories == ["aws_access_key", "password_assignment"]
+
+
+def test_egress_confirmation_required_categories_default_empty() -> None:
+    """The archived reason carries no categories — the list defaults empty."""
+    body = EgressConfirmationRequired(reason=EgressRefusalReason.ENGAGEMENT_ARCHIVED)
+    assert body.matched_categories == []
 
 
 def test_content_at_max_accepted() -> None:

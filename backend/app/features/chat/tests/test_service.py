@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime
 import json
 from collections.abc import AsyncIterator, Callable, Sequence
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
@@ -18,6 +18,7 @@ import pytest
 from argon2 import PasswordHasher
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.config import get_settings
 from app.core.errors import ConflictError, NotFoundError
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
@@ -49,12 +50,16 @@ async def _seed_user(db: AsyncSession, username: str) -> User:
     return user
 
 
-async def _seed_engagement(db: AsyncSession, owner_id: UUID, *, archived: bool = False) -> UUID:
+async def _seed_engagement(
+    db: AsyncSession, owner_id: UUID, *, archived: bool = False, cloud: bool = False
+) -> UUID:
     engagement = await eng_repo.create_engagement(
         db, name="Eng", scope="https://example.com", client_info=None, owner_id=owner_id
     )
     if archived:
         engagement.status = "archived"
+    if cloud:
+        engagement.privacy_mode = "cloud_enabled"
     await db.commit()
     await db.refresh(engagement)
     return cast(UUID, engagement.id)
@@ -160,6 +165,140 @@ async def test_send_message_archived_409(db_session: AsyncSession) -> None:
 
     with pytest.raises(ConflictError):
         await service.send_message(db_session, engagement_id=eng_id, requester=user, content="hi")
+
+
+# ---------------------------------------------------------------------------
+# send_message — §5.1 cloud egress pattern-friction gate (Slice 14)
+# ---------------------------------------------------------------------------
+
+# Synthetic test vectors (not real secrets); each carries gitleaks:allow.
+_SECRET = "my key AKIAIOSFODNN7EXAMPLE and password=hunter2"  # gitleaks:allow
+
+
+async def _stash_of(db: AsyncSession, message_id: UUID, user_id: UUID) -> dict:
+    row = await chat_repo.get_message_for_owner(db, message_id=message_id, user_id=user_id)
+    assert row is not None
+    return cast(dict, row.graph_context)
+
+
+@pytest.mark.asyncio
+async def test_send_cloud_enabled_secret_unconfirmed_raises_egress_409(
+    db_session: AsyncSession,
+) -> None:
+    """A cloud send matching a secret without confirmation is refused before the row exists."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    with pytest.raises(service.EgressConfirmationRequiredError):
+        await service.send_message(
+            db_session, engagement_id=eng_id, requester=user, content=_SECRET
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_cloud_enabled_secret_confirmed_persists_pair(db_session: AsyncSession) -> None:
+    """With confirmed_egress=True the friction is satisfied and the pair persists."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    result = await service.send_message(
+        db_session,
+        engagement_id=eng_id,
+        requester=user,
+        content=_SECRET,
+        confirmed_egress=True,
+    )
+    await db_session.commit()
+    assert result.user_message.status == "complete"
+    assert result.assistant_message.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_send_cloud_enabled_clean_text_no_friction(db_session: AsyncSession) -> None:
+    """An ordinary cloud message (no secret) sends with no friction and is not flagged."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    result = await service.send_message(
+        db_session, engagement_id=eng_id, requester=user, content="what is SQL injection?"
+    )
+    await db_session.commit()
+    stash = await _stash_of(db_session, result.assistant_message.id, cast(UUID, user.id))
+    assert stash["egress"]["secret_flagged"] is False
+    assert stash["egress"]["match_categories"] == []
+
+
+@pytest.mark.asyncio
+async def test_send_local_only_secret_never_scanned(db_session: AsyncSession) -> None:
+    """A secret on a local_only engagement persists with no friction — no egress to gate (§5.5)."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id))  # local_only (default)
+
+    result = await service.send_message(
+        db_session, engagement_id=eng_id, requester=user, content=_SECRET
+    )
+    await db_session.commit()
+    stash = await _stash_of(db_session, result.assistant_message.id, cast(UUID, user.id))
+    # Never scanned: the local path has no cloud egress, so nothing is flagged.
+    assert stash["egress"]["secret_flagged"] is False
+    assert stash["egress"]["match_categories"] == []
+
+
+@pytest.mark.asyncio
+async def test_egress_decision_stashed_on_pending_row(db_session: AsyncSession) -> None:
+    """A confirmed flagged send stashes the egress decision for the streamer's audit payload."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    result = await service.send_message(
+        db_session,
+        engagement_id=eng_id,
+        requester=user,
+        content=_SECRET,
+        confirmed_egress=True,
+    )
+    await db_session.commit()
+    egress = (await _stash_of(db_session, result.assistant_message.id, cast(UUID, user.id)))[
+        "egress"
+    ]
+    assert egress["secret_flagged"] is True
+    assert egress["confirmed"] is True
+    assert "aws_access_key" in egress["match_categories"]
+    assert "password_assignment" in egress["match_categories"]
+
+
+@pytest.mark.asyncio
+async def test_egress_409_body_carries_category_names_not_values(db_session: AsyncSession) -> None:
+    """The 409 error carries category NAMES only — never the matched secret value (§5.5)."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    with pytest.raises(service.EgressConfirmationRequiredError) as exc:
+        await service.send_message(
+            db_session, engagement_id=eng_id, requester=user, content=_SECRET
+        )
+    categories = exc.value.matched_categories
+    assert "aws_access_key" in categories
+    # The secret value must not appear anywhere in the raised error.
+    assert "AKIAIOSFODNN7EXAMPLE" not in str(exc.value)  # gitleaks:allow
+    assert "AKIAIOSFODNN7EXAMPLE" not in "".join(categories)  # gitleaks:allow
+
+
+@pytest.mark.asyncio
+async def test_content_not_redacted_on_confirmed_send(db_session: AsyncSession) -> None:
+    """The persisted user content is byte-for-byte the input — never redacted (§5.5 / Risk 2)."""
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), cloud=True)
+
+    result = await service.send_message(
+        db_session,
+        engagement_id=eng_id,
+        requester=user,
+        content=_SECRET,
+        confirmed_egress=True,
+    )
+    await db_session.commit()
+    assert result.user_message.content == _SECRET
 
 
 # ---------------------------------------------------------------------------
@@ -1112,3 +1251,285 @@ async def test_pre_slice_row_reads_empty_plan(db_session: AsyncSession) -> None:
     assert debug.plan == []
     assert debug.claims == []
     assert debug.model_output == "old answer"  # fallback to content for pre-slice row
+
+
+# ---------------------------------------------------------------------------
+# stream_assistant_reply — Slice 14 backend selection (cloud vs local, §5.1)
+# ---------------------------------------------------------------------------
+
+_CLOUD_KEY = "sk-ant-test-streamkey"  # gitleaks:allow — synthetic test key, not real
+# Synthetic secret vector; carries gitleaks:allow.
+_CLOUD_SECRET = "deploy creds AKIAIOSFODNN7EXAMPLE password=hunter2"  # gitleaks:allow
+
+
+def _boom_stream() -> FakeStream:
+    """A stream_chat that fails the test if it is ever iterated (asserts the OTHER backend)."""
+
+    async def _gen(
+        *,
+        messages: Sequence[OllamaChatMessage],
+        model: str | None = None,
+        usage: OllamaUsage | None = None,
+    ) -> AsyncIterator[str]:
+        raise AssertionError("this backend must not be called")
+        yield ""  # pragma: no cover — makes _gen a generator
+
+    return _gen
+
+
+async def _seed_cloud_pending(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    content: str = "what is sqli?",
+    confirmed_egress: bool = False,
+) -> ChatMessage:
+    """Seed a pending turn on a cloud_enabled engagement via the real send_message path.
+
+    Goes through the POST gate so the egress stash is populated exactly as in production."""
+    async with factory() as s:
+        owner = await _seed_user(s, f"owner-{uuid4().hex[:8]}")
+        eng_id = await _seed_engagement(s, cast(UUID, owner.id), cloud=True)
+        result = await service.send_message(
+            s,
+            engagement_id=eng_id,
+            requester=owner,
+            content=content,
+            confirmed_egress=confirmed_egress,
+        )
+        await s.commit()
+        assistant = await chat_repo.get_message_for_owner(
+            s, message_id=result.assistant_message.id, user_id=cast(UUID, owner.id)
+        )
+        assert assistant is not None
+        return assistant
+
+
+def _set_cloud_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADEPTUS_ANTHROPIC_API_KEY", _CLOUD_KEY)
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_stream_cloud_engagement_uses_anthropic_client(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _fake_stream(["Hel", "lo"]))
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom_stream())
+    message = await _seed_cloud_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert [c.data for c in chunks if c.type == "token"] == ["Hel", "lo"]
+    assert chunks[-1].type == "done"
+    # The row + audit reflect the real backend (Claude model, not qwen).
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.model == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_stream_local_engagement_uses_ollama_client(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_cloud_key(monkeypatch)  # key present, but the engagement is local_only → still local
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["lo", "cal"]))
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _boom_stream())
+    message = await _seed_pending(db_factory)  # local_only (default)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert [c.data for c in chunks if c.type == "token"] == ["lo", "cal"]
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.model == "qwen3.5:9b"
+
+
+@pytest.mark.asyncio
+async def test_stream_cloud_without_key_finalizes_failed_no_fallback(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cloud_enabled + no key → the turn fails; it never silently uses local (§5.1, Risk 6)."""
+    monkeypatch.delenv("ADEPTUS_ANTHROPIC_API_KEY", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom_stream())
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _boom_stream())
+    message = await _seed_cloud_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert len(chunks) == 1
+    assert chunks[0].type == "error"
+    assert chunks[0].message == service.CLOUD_NOT_CONFIGURED_MESSAGE
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.status == "failed"
+    # Exactly one ai_call, status=failed, backend=cloud — and neither client was iterated.
+    mock_audit_record.assert_awaited_once()
+    payload = mock_audit_record.await_args.kwargs["payload"]  # type: ignore[union-attr]
+    assert payload["status"] == "failed"
+    assert payload["backend"] == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_ai_call_payload_records_backend_and_egress_decision(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _fake_stream(["ok"]))
+    message = await _seed_cloud_pending(db_factory, content=_CLOUD_SECRET, confirmed_egress=True)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    mock_audit_record.assert_awaited_once()
+    payload = mock_audit_record.await_args.kwargs["payload"]  # type: ignore[union-attr]
+    assert payload["backend"] == "cloud"
+    assert payload["egress_secret_flagged"] is True
+    assert payload["egress_confirmed"] is True
+    assert "aws_access_key" in payload["egress_match_categories"]
+    # The category NAMES are recorded — never the matched secret value (§5.5 / Risk 7).
+    assert "AKIAIOSFODNN7EXAMPLE" not in str(payload)  # gitleaks:allow
+
+
+@pytest.mark.asyncio
+async def test_cloud_turn_records_token_counts(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(
+        service.anthropic_client,
+        "stream_chat",
+        _fake_stream(["hi"], prompt_tokens=42, completion_tokens=7),
+    )
+    message = await _seed_cloud_pending(db_factory)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.prompt_tokens == 42
+    assert row.completion_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_cloud_path_does_not_redact_content(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window passed to the cloud client is the verbatim user content (§5.5 / Risk 2)."""
+    _set_cloud_key(monkeypatch)
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    message = await _seed_cloud_pending(db_factory, content=_CLOUD_SECRET, confirmed_egress=True)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    # The secret-bearing user turn reaches the cloud client byte-for-byte (never redacted).
+    user_turns = [m.content for m in captured[0] if m.role == "user"]
+    assert any(_CLOUD_SECRET in c for c in user_turns)
+
+
+async def _set_privacy_mode(
+    factory: async_sessionmaker[AsyncSession],
+    engagement_id: UUID,
+    user_id: UUID,
+    mode: Literal["local_only", "cloud_enabled"],
+) -> None:
+    """Flip an engagement's privacy mode mid-flight (mimics the owner PATCH, Slice 02)."""
+    async with factory() as s:
+        member = await eng_repo.get_engagement_for_member(s, engagement_id, user_id)
+        assert member is not None
+        member[0].privacy_mode = mode
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_stream_cloud_flip_rescans_and_refuses_unconfirmed_secret(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TOCTOU guard (Risk 1): a secret POSTed under local_only then streamed after a flip to
+    cloud_enabled is re-scanned at the egress point and refused — it never reaches the cloud,
+    and the audit honestly records the flagged failure."""
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _boom_stream())
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom_stream())
+
+    async with db_factory() as s:
+        owner = await _seed_user(s, f"owner-{uuid4().hex[:8]}")
+        owner_id = cast(UUID, owner.id)
+        eng_id = await _seed_engagement(s, owner_id)  # local_only — no friction at POST
+        result = await service.send_message(
+            s, engagement_id=eng_id, requester=owner, content=_CLOUD_SECRET
+        )
+        await s.commit()
+        assistant_id = result.assistant_message.id
+
+    # Owner flips the engagement to cloud_enabled AFTER the secret was persisted.
+    await _set_privacy_mode(db_factory, eng_id, owner_id, "cloud_enabled")
+
+    async with db_factory() as s:
+        assistant = await chat_repo.get_message_for_owner(
+            s, message_id=assistant_id, user_id=owner_id
+        )
+    assert assistant is not None
+    chunks = [c async for c in service.stream_assistant_reply(message=assistant)]
+
+    # Refused before any token left the machine; neither client was iterated (_boom_stream).
+    assert [c.type for c in chunks] == ["error"]
+    assert chunks[0].message == service.EGRESS_UNCONFIRMED_MESSAGE
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(s, message_id=assistant_id, user_id=owner_id)
+    assert row is not None
+    assert row.status == "failed"
+
+    # The audit honestly records the flagged, unconfirmed cloud refusal (category NAMES only).
+    mock_audit_record.assert_awaited_once()
+    payload = mock_audit_record.await_args.kwargs["payload"]  # type: ignore[union-attr]
+    assert payload["status"] == "failed"
+    assert payload["backend"] == "cloud"
+    assert payload["egress_secret_flagged"] is True
+    assert payload["egress_confirmed"] is False
+    assert "aws_access_key" in payload["egress_match_categories"]
+    assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(payload)  # gitleaks:allow
+
+
+@pytest.mark.asyncio
+async def test_stream_cloud_flip_allows_confirmed_secret(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret CONFIRMED at the POST (cloud_enabled) still streams after the re-scan — the
+    re-check refuses only UNCONFIRMED matches, so confirmed sends are not double-gated."""
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _fake_stream(["ok"]))
+    message = await _seed_cloud_pending(db_factory, content=_CLOUD_SECRET, confirmed_egress=True)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+    assert chunks[-1].type == "done"

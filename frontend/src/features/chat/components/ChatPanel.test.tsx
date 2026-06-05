@@ -56,7 +56,7 @@ function renderPanel() {
   const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   )
-  render(<ChatPanel engagementId={ENGAGEMENT_ID} />, { wrapper: Wrapper })
+  render(<ChatPanel engagementId={ENGAGEMENT_ID} privacyMode="local_only" />, { wrapper: Wrapper })
 }
 
 beforeEach(() => {
@@ -181,5 +181,35 @@ describe('ChatPanel', () => {
     })
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/unreachable/i)
+  })
+
+  it('renders the "Cloud LLM is not configured" error frame verbatim (Slice 14)', async () => {
+    // The cloud-not-configured failure (§5.1 no auto-fallback) surfaces as a normal WS error
+    // frame; the hook passes the message through verbatim and the list renders it, exactly like
+    // the local-unreachable case — the WS surface is unchanged by Slice 14.
+    const user = userEvent.setup()
+    const userMsg = msg('u1', 'user', 'hi')
+    const pending = msg('a1', 'assistant', '', 'pending')
+    mockPost.mockImplementation(async () => {
+      serverItems = [userMsg, pending]
+      return {
+        data: { user_message: userMsg, assistant_message: pending },
+        response: { status: 201 },
+      } as never
+    })
+
+    renderPanel()
+    await user.type(screen.getByLabelText(/message the ai/i), 'hi')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    act(() => {
+      FakeWebSocket.instances[0].emit({
+        type: 'error',
+        message: 'Cloud LLM is not configured for this engagement',
+      })
+    })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/cloud llm is not configured/i)
   })
 })

@@ -61,7 +61,11 @@ async def _seed_session(factory: async_sessionmaker[AsyncSession], user_id: UUID
 
 
 async def _seed_engagement(
-    factory: async_sessionmaker[AsyncSession], owner_id: UUID, *, archived: bool = False
+    factory: async_sessionmaker[AsyncSession],
+    owner_id: UUID,
+    *,
+    archived: bool = False,
+    cloud: bool = False,
 ) -> UUID:
     async with factory() as s:
         engagement = await eng_repo.create_engagement(
@@ -69,6 +73,8 @@ async def _seed_engagement(
         )
         if archived:
             engagement.status = "archived"
+        if cloud:
+            engagement.privacy_mode = "cloud_enabled"
         await s.commit()
         await s.refresh(engagement)
         return cast(UUID, engagement.id)
@@ -204,6 +210,96 @@ async def test_post_message_409_when_archived(
             cookies={_SESSION_COOKIE: sid},
         )
     assert resp.status_code == 409
+
+
+# Synthetic secret vector for the egress-friction POST tests; carries gitleaks:allow.
+_SECRET_MESSAGE = "creds AKIAIOSFODNN7EXAMPLE password=hunter2"  # gitleaks:allow
+
+
+@pytest.mark.asyncio
+async def test_post_cloud_secret_unconfirmed_409_with_categories(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    """A cloud-enabled secret-bearing POST without confirmation → 409 with category names."""
+    app, factory = app_and_factory
+    user = await _seed_user(factory, "owner")
+    sid = await _seed_session(factory, cast(UUID, user.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, user.id), cloud=True)
+
+    async with _client(app) as client:
+        resp = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": _SECRET_MESSAGE},
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["reason"] == "egress_secret_flagged"
+    assert "aws_access_key" in body["matched_categories"]
+    # The 409 body carries category NAMES only — never the matched secret value (§5.5).
+    assert "AKIAIOSFODNN7EXAMPLE" not in resp.text  # gitleaks:allow
+
+
+@pytest.mark.asyncio
+async def test_post_cloud_secret_confirmed_201(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    """Re-POSTing with confirmed_egress=true clears the friction and persists the pair."""
+    app, factory = app_and_factory
+    user = await _seed_user(factory, "owner")
+    sid = await _seed_session(factory, cast(UUID, user.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, user.id), cloud=True)
+
+    async with _client(app) as client:
+        resp = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": _SECRET_MESSAGE, "confirmed_egress": True},
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assert resp.status_code == 201
+    # The persisted user content is byte-for-byte the input — never redacted (§5.5).
+    assert resp.json()["user_message"]["content"] == _SECRET_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_post_archived_409_reason_archived(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    """The archived 409 shares the EgressConfirmationRequired body with a distinguishing reason."""
+    app, factory = app_and_factory
+    user = await _seed_user(factory, "owner")
+    sid = await _seed_session(factory, cast(UUID, user.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, user.id), archived=True)
+
+    async with _client(app) as client:
+        resp = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": "hi"},
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["reason"] == "engagement_archived"
+    assert body["matched_categories"] == []
+
+
+@pytest.mark.asyncio
+async def test_post_local_only_secret_201_no_friction(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    """A secret on a local_only engagement POSTs 201 with no friction (no egress to gate)."""
+    app, factory = app_and_factory
+    user = await _seed_user(factory, "owner")
+    sid = await _seed_session(factory, cast(UUID, user.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, user.id))  # local_only (default)
+
+    async with _client(app) as client:
+        resp = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": _SECRET_MESSAGE},
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assert resp.status_code == 201
 
 
 @pytest.mark.asyncio

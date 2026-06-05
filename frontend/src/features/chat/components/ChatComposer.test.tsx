@@ -27,6 +27,7 @@ function renderComposer(props: Partial<Parameters<typeof ChatComposer>[0]> = {})
     <ChatComposer
       engagementId={props.engagementId ?? ENGAGEMENT_ID}
       archived={props.archived ?? false}
+      privacyMode={props.privacyMode ?? 'local_only'}
       isStreaming={props.isStreaming ?? false}
       onSent={onSent}
     />,
@@ -85,6 +86,7 @@ describe('ChatComposer', () => {
           pinned_node_ids: [],
           recent_node_ids: [],
           mentioned_node_ids: [],
+          confirmed_egress: false,
         },
       }),
     )
@@ -118,5 +120,82 @@ describe('ChatComposer', () => {
     renderComposer({ isStreaming: true })
     await user.type(screen.getByLabelText(/message the ai/i), 'hi')
     expect(screen.getByRole('button', { name: /send/i })).toBeDisabled()
+  })
+
+  // --- §5.1 cloud egress pattern-friction (Slice 14) ---
+
+  // Synthetic secret vector; carries gitleaks:allow.
+  const SECRET = 'login with password=hunter2' // gitleaks:allow
+
+  it('cloud + secret → shows the friction modal and does NOT send until confirm', async () => {
+    const user = userEvent.setup()
+    renderComposer({ privacyMode: 'cloud_enabled' })
+    await user.type(screen.getByLabelText(/message the ai/i), SECRET)
+    await user.click(screen.getByRole('button', { name: /^send$/i }))
+
+    expect(screen.getByRole('button', { name: /send anyway/i })).toBeInTheDocument()
+    expect(mockPost).not.toHaveBeenCalled() // nothing left the machine yet
+  })
+
+  it('cloud + secret + confirm → sends with confirmed_egress=true', async () => {
+    mockPost.mockResolvedValue({ data: sendResult, response: { status: 201 } } as never)
+    const user = userEvent.setup()
+    renderComposer({ privacyMode: 'cloud_enabled' })
+    await user.type(screen.getByLabelText(/message the ai/i), SECRET)
+    await user.click(screen.getByRole('button', { name: /^send$/i }))
+    await user.click(screen.getByRole('button', { name: /send anyway/i }))
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalled())
+    const body = mockPost.mock.calls[0][1] as { body: { confirmed_egress: boolean } }
+    expect(body.body.confirmed_egress).toBe(true)
+  })
+
+  it('cloud + clean text → sends directly, no modal', async () => {
+    mockPost.mockResolvedValue({ data: sendResult, response: { status: 201 } } as never)
+    const user = userEvent.setup()
+    renderComposer({ privacyMode: 'cloud_enabled' })
+    await user.type(screen.getByLabelText(/message the ai/i), 'what is sql injection?')
+    await user.click(screen.getByRole('button', { name: /^send$/i }))
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalled())
+    expect(screen.queryByRole('button', { name: /send anyway/i })).not.toBeInTheDocument()
+    const body = mockPost.mock.calls[0][1] as { body: { confirmed_egress: boolean } }
+    expect(body.body.confirmed_egress).toBe(false)
+  })
+
+  it('local_only + secret → sends directly, no modal (no egress to gate)', async () => {
+    mockPost.mockResolvedValue({ data: sendResult, response: { status: 201 } } as never)
+    const user = userEvent.setup()
+    renderComposer({ privacyMode: 'local_only' })
+    await user.type(screen.getByLabelText(/message the ai/i), SECRET)
+    await user.click(screen.getByRole('button', { name: /^send$/i }))
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalled())
+    expect(screen.queryByRole('button', { name: /send anyway/i })).not.toBeInTheDocument()
+  })
+
+  it('server 409 egress → opens the modal from server categories, retry sends confirmed', async () => {
+    // The client pre-flight passes (clean text), but the authoritative server 409s — the modal
+    // is surfaced from the server's matched_categories and the retry confirms (Risk 3).
+    mockPost
+      .mockResolvedValueOnce({
+        error: { reason: 'egress_secret_flagged', matched_categories: ['aws_access_key'] },
+        response: { status: 409 },
+      } as never)
+      .mockResolvedValueOnce({ data: sendResult, response: { status: 201 } } as never)
+
+    const user = userEvent.setup()
+    renderComposer({ privacyMode: 'cloud_enabled' })
+    await user.type(screen.getByLabelText(/message the ai/i), 'looks clean to the client')
+    await user.click(screen.getByRole('button', { name: /^send$/i }))
+
+    // First POST happened (client missed it); the server 409 re-opens the modal.
+    await waitFor(() => expect(screen.getByText(/AWS access key/)).toBeInTheDocument())
+    expect(mockPost).toHaveBeenCalledTimes(1)
+
+    await user.click(screen.getByRole('button', { name: /send anyway/i }))
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2))
+    const retry = mockPost.mock.calls[1][1] as { body: { confirmed_egress: boolean } }
+    expect(retry.body.confirmed_egress).toBe(true)
   })
 })

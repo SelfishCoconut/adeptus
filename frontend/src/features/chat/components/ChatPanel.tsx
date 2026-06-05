@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import type { SendChatMessageResult } from '@/shared/api'
+import type { PrivacyMode, SendChatMessageResult } from '@/shared/api'
 import { chatKeys, flattenChatPages, useChatMessages } from '../api'
 import { useChatStream } from '../hooks/useChatStream'
 import { useLowConfidenceThreshold } from '../hooks/useLowConfidenceThreshold'
@@ -9,6 +9,8 @@ import { ChatMessageList } from './ChatMessageList'
 
 interface ChatPanelProps {
   engagementId: string
+  /** The engagement's privacy mode (§5.1): gates the cloud egress-friction scan in the composer. */
+  privacyMode: PrivacyMode
   /** When true, the engagement is archived/read-only (§4). */
   archived?: boolean
 }
@@ -23,7 +25,7 @@ interface ChatPanelProps {
  * The stream hook's `error` (§5.1 "AI is unreachable") is surfaced inline by the list
  * for the in-flight message, and the refetched `failed` row keeps it visible afterward.
  */
-export function ChatPanel({ engagementId, archived = false }: ChatPanelProps) {
+export function ChatPanel({ engagementId, privacyMode, archived = false }: ChatPanelProps) {
   const [streamingId, setStreamingId] = useState<string | null>(null)
   const queryClient = useQueryClient()
 
@@ -64,6 +66,7 @@ export function ChatPanel({ engagementId, archived = false }: ChatPanelProps) {
       <ChatComposer
         engagementId={engagementId}
         archived={archived}
+        privacyMode={privacyMode}
         isStreaming={isStreaming}
         onSent={handleSent}
       />

@@ -140,6 +140,7 @@ describe('useSendChatMessage', () => {
           pinned_node_ids: [],
           recent_node_ids: [],
           mentioned_node_ids: [],
+          confirmed_egress: false,
         },
       }),
     )
@@ -172,6 +173,7 @@ describe('useSendChatMessage', () => {
           pinned_node_ids: ['node-a'],
           recent_node_ids: ['node-a', 'node-b'],
           mentioned_node_ids: [],
+          confirmed_egress: false,
         },
       }),
     )

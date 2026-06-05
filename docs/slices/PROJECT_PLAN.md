@@ -167,7 +167,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §5.1 (cloud + friction), §5.5
 - **Depends on**: 11, 02
 - **Risky**: yes (egress, secret detection)
-- **Status**: todo
+- **Status**: done
 
 ### Slice 15: Personas (CRUD + seeded)
 - **Goal**: Switch persona mid-chat; create custom; recon/web-exploit/report-writer/general seeded

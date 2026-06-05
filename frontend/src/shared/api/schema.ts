@@ -735,7 +735,10 @@ export interface paths {
          * @description Persist a user message and an empty pending assistant message, then return both.
          *
          *     Stream the assistant reply over ``WS /ws/chat/{assistant_message_id}``. Requires
-         *     membership (404); an archived engagement is read-only (409, §4).
+         *     membership (404). The two 409 cases are translated inline to the EgressConfirmationRequired
+         *     body (Slice 14): an archived engagement (§4) → ``engagement_archived``; a cloud-enabled
+         *     secret-matching send without ``confirmed_egress`` → ``egress_secret_flagged`` with the
+         *     matched category NAMES (never the secret value, §5.5).
          */
         post: operations["send_chat_message"];
         delete?: never;
@@ -867,6 +870,12 @@ export interface components {
              * @description Node ids @-mentioned in recent messages (§5.3). Empty until the @-mention UI (Slice 31); accepted now for forward-compatibility. Server truncates to K.
              */
             mentioned_node_ids?: string[];
+            /**
+             * Confirmed Egress
+             * @description The user has seen the cloud egress-friction modal for THIS content and chose to send it unmodified anyway (§5.1, Slice 14). Consulted only when the engagement is cloud_enabled and the content matched a secret pattern; ignored otherwise. Never suppresses the audit record (a confirmed send is audited as confirmed).
+             * @default false
+             */
+            confirmed_egress: boolean;
         };
         /**
          * ChatMessagePage
@@ -1078,6 +1087,34 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /**
+         * EgressConfirmationRequired
+         * @description Body of the POST .../chat/messages 409 (Slice 14, §5.1).
+         *
+         *     ``matched_categories`` are pattern category NAMES only (e.g. ``"aws_access_key"``) — NEVER
+         *     the matched secret value (§5.5 / Risk 7) — for the friction modal's copy. Empty for the
+         *     ``engagement_archived`` reason. A client re-sends with ``confirmed_egress=true`` to proceed
+         *     past the friction case.
+         */
+        EgressConfirmationRequired: {
+            /** @description Why the POST was refused with 409. */
+            reason: components["schemas"]["EgressRefusalReason"];
+            /**
+             * Matched Categories
+             * @description Names of the secret-pattern categories the content matched (§5.1). Empty for the archived reason. NEVER contains the matched value (§5.5) — only the category name.
+             */
+            matched_categories?: string[];
+        };
+        /**
+         * EgressRefusalReason
+         * @description Why a POST .../chat/messages was refused with 409 (Slice 14).
+         *
+         *     The single POST 409 covers two cases with a distinguishable body: a cloud-enabled send
+         *     that matched a likely-secret pattern without confirmation (§5.1 pattern-friction), and an
+         *     archived engagement (§4 read-only). The reason lets the client tell them apart.
+         * @enum {string}
+         */
+        EgressRefusalReason: "egress_secret_flagged" | "engagement_archived";
         /** EngagementCreate */
         EngagementCreate: {
             /** Name */
@@ -2898,6 +2935,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SendChatMessageResult"];
+                };
+            };
+            /** @description Either the engagement is archived (read-only, §4), OR the engagement is cloud-enabled and the message matched a likely-secret pattern but was not confirmed (§5.1 pattern-friction). The body's reason distinguishes the two; clients re-send with confirmed_egress=true to proceed past the friction case. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EgressConfirmationRequired"];
                 };
             };
             /** @description Validation Error */

@@ -32,6 +32,36 @@ export interface SendChatMessageInput {
   pinnedNodeIds?: string[]
   recentNodeIds?: string[]
   mentionedNodeIds?: string[]
+  /**
+   * The user saw the cloud egress-friction modal for THIS content and chose to send it
+   * unmodified anyway (§5.1, Slice 14). Defaults false; consulted server-side only when the
+   * engagement is cloud_enabled and the content matched a secret pattern.
+   */
+  confirmedEgress?: boolean
+}
+
+/**
+ * Thrown when the server refuses a cloud-enabled send with a 409 ``egress_secret_flagged``
+ * (§5.1 pattern-friction). Carries the matched category NAMES so the composer can surface the
+ * friction modal even if its client pre-flight missed the pattern (client/server drift, Risk 3)
+ * and retry with ``confirmedEgress: true``.
+ */
+export class EgressConfirmationRequiredError extends Error {
+  readonly categories: string[]
+  constructor(categories: string[]) {
+    super('Cloud egress confirmation required')
+    this.name = 'EgressConfirmationRequiredError'
+    this.categories = categories
+  }
+}
+
+/** Extract the matched categories from a 409 body iff it is the egress-friction case. */
+function egressCategoriesFrom(error: unknown): string[] | null {
+  if (!error || typeof error !== 'object') return null
+  const body = error as Record<string, unknown>
+  if (body.reason !== 'egress_secret_flagged') return null
+  const cats = body.matched_categories
+  return Array.isArray(cats) ? cats.filter((c): c is string => typeof c === 'string') : []
 }
 
 const PAGE_LIMIT = 50
@@ -111,8 +141,14 @@ export function useSendChatMessage(engagementId: string) {
     SendChatMessageInput,
     { previous?: InfiniteChatData }
   >({
-    mutationFn: async ({ content, pinnedNodeIds, recentNodeIds, mentionedNodeIds }) => {
-      const { data, error } = await api.POST(
+    mutationFn: async ({
+      content,
+      pinnedNodeIds,
+      recentNodeIds,
+      mentionedNodeIds,
+      confirmedEgress,
+    }) => {
+      const { data, error, response } = await api.POST(
         '/api/v1/engagements/{engagement_id}/chat/messages',
         {
           params: { path: { engagement_id: engagementId } },
@@ -121,10 +157,15 @@ export function useSendChatMessage(engagementId: string) {
             pinned_node_ids: pinnedNodeIds ?? [],
             recent_node_ids: recentNodeIds ?? [],
             mentioned_node_ids: mentionedNodeIds ?? [],
+            confirmed_egress: confirmedEgress ?? false,
           },
         },
       )
-      if (error || !data) throw new Error('Failed to send message')
+      if (error || !data) {
+        const categories = response?.status === 409 ? egressCategoriesFrom(error) : null
+        if (categories) throw new EgressConfirmationRequiredError(categories)
+        throw new Error('Failed to send message')
+      }
       return data
     },
     onMutate: async ({ content }) => {
