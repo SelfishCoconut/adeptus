@@ -39,17 +39,20 @@ from app.features.approvals import repository as repo
 from app.features.approvals.classifier import ToolConfig, classify
 from app.features.approvals.models import ApprovalRequest
 from app.features.approvals.schemas import (
+    ApprovalReason,
     ApprovalRequestPage,
     ApprovalRequestRead,
     ApprovalStatus,
     ApprovalTier,
     ProposedAction,
 )
+from app.features.approvals.scope import parse_scope
 from app.features.audit import service as audit_service
 from app.features.audit.schemas import AuditAction
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
 from app.features.engagements import repository as eng_repo
+from app.features.mcp import concurrency as mcp_concurrency
 from app.features.mcp import service as mcp_service
 from app.features.mcp.registry import ConfigError, get_registry
 
@@ -204,9 +207,20 @@ async def create_requests_for_turn(
     """Classify a turn's proposed actions into autonomous vs gated.
 
     Each action is resolved against the live MCP config and classified (§5.2). Unknown
-    server/tool actions are dropped (§17.1). Gated actions create a ``pending`` row; the
-    caller commits.
+    server/tool actions are dropped (§17.1). The engagement's declared scope is parsed
+    **once per turn** and each action's resolved target host is checked against it — an
+    out-of-scope target appends ``out_of_scope`` (§5.2 soft) and persists the host +
+    scope it was matched against for the card. Gated actions create a ``pending`` row;
+    the caller commits.
     """
+    # Load + parse the engagement scope ONCE per turn (not per action). The initiator is a
+    # member (the chat service verified membership before proposing), so this read goes
+    # through the §17.1 isolation chokepoint and yields the caller's own engagement only.
+    # Read defensively: a missing engagement degrades to an empty scope (never gates).
+    member = await eng_repo.get_engagement_for_member(db, engagement_id, initiator_user_id)
+    scope_text = member[0].scope if member is not None else ""
+    scope = parse_scope(scope_text)
+
     autonomous: list[ProposedAction] = []
     gated: list[ApprovalRequestRead] = []
     for action in actions:
@@ -218,10 +232,16 @@ async def create_requests_for_turn(
                 action.tool_name,
             )
             continue
-        result = classify(action, tool_config=tool_config)
+        # The canonical, userinfo-smuggling-safe host extractor — the same one the
+        # per-target lock and the sandbox guard use, so scope/lock/sandbox never drift.
+        target_host = mcp_concurrency.resolve_target_host(
+            action.server_name, action.tool_name, action.args
+        )
+        result = classify(action, tool_config=tool_config, scope=scope, target_host=target_host)
         if result.tier is ApprovalTier.AUTONOMOUS:
             autonomous.append(action)
             continue
+        out_of_scope = ApprovalReason.OUT_OF_SCOPE in result.reasons
         row = await repo.create_request(
             db,
             engagement_id=engagement_id,
@@ -233,6 +253,8 @@ async def create_requests_for_turn(
             reasons=[r.value for r in result.reasons],
             preset_name=action.preset_name,
             rationale=action.rationale,
+            out_of_scope_host=target_host if out_of_scope else None,
+            scope_checked_against=scope_text if out_of_scope else None,
         )
         gated.append(await _to_read(db, row))
     return ClassifiedTurnResult(autonomous=autonomous, gated=gated)

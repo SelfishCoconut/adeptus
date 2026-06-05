@@ -67,6 +67,22 @@ def resolve_username() -> Iterator[AsyncMock]:
         yield m
 
 
+@pytest.fixture
+def eng_with_scope() -> Iterator[AsyncMock]:
+    """Patch the per-turn engagement load create_requests_for_turn does for scope.
+
+    Defaults to an engagement with **no** declared scope (so scope never fires unless a
+    test sets a scope); individual tests override ``return_value`` with a scope string.
+    """
+    with patch.object(service.eng_repo, "get_engagement_for_member", new_callable=AsyncMock) as m:
+        m.return_value = (SimpleNamespace(scope=""), SimpleNamespace())
+        yield m
+
+
+def _eng(scope: str) -> tuple[SimpleNamespace, SimpleNamespace]:
+    return (SimpleNamespace(scope=scope), SimpleNamespace())
+
+
 def _patch_tool_config(cfg: ToolConfig | None) -> AbstractContextManager[AsyncMock]:
     return patch.object(service, "_resolve_tool_config", return_value=cfg)
 
@@ -80,7 +96,9 @@ def _await_kwargs(mock: AsyncMock) -> dict[str, object]:
 # --- create_requests_for_turn ---------------------------------------------------------
 
 
-async def test_autonomous_action_returns_no_request(db_session: AsyncSession) -> None:
+async def test_autonomous_action_returns_no_request(
+    db_session: AsyncSession, eng_with_scope: AsyncMock
+) -> None:
     with _patch_tool_config(ToolConfig(weight="light", capability_flags=("network",))):
         result = await service.create_requests_for_turn(
             db_session,
@@ -94,7 +112,7 @@ async def test_autonomous_action_returns_no_request(db_session: AsyncSession) ->
 
 
 async def test_gated_action_creates_pending_request(
-    db_session: AsyncSession, resolve_username: AsyncMock
+    db_session: AsyncSession, eng_with_scope: AsyncMock, resolve_username: AsyncMock
 ) -> None:
     eng = uuid4()
     with _patch_tool_config(ToolConfig(weight="heavy")):
@@ -112,7 +130,9 @@ async def test_gated_action_creates_pending_request(
     assert len(rows) == 1
 
 
-async def test_unknown_tool_action_dropped(db_session: AsyncSession) -> None:
+async def test_unknown_tool_action_dropped(
+    db_session: AsyncSession, eng_with_scope: AsyncMock
+) -> None:
     with _patch_tool_config(None):
         result = await service.create_requests_for_turn(
             db_session,
@@ -125,7 +145,7 @@ async def test_unknown_tool_action_dropped(db_session: AsyncSession) -> None:
 
 
 async def test_unclassified_manifest_action_gated(
-    db_session: AsyncSession, resolve_username: AsyncMock
+    db_session: AsyncSession, eng_with_scope: AsyncMock, resolve_username: AsyncMock
 ) -> None:
     with _patch_tool_config(ToolConfig(weight=None)):
         result = await service.create_requests_for_turn(
@@ -137,6 +157,141 @@ async def test_unclassified_manifest_action_gated(
         )
     assert len(result.gated) == 1
     assert ApprovalReason.UNCLASSIFIED_MANIFEST in result.gated[0].reasons
+
+
+# --- create_requests_for_turn: scope arm (Slice 17 task 5) ----------------------------
+
+
+def _target_action(
+    target: str, *, server: str = "httpx-server", tool: str = "httpx", **kw: object
+) -> ProposedAction:
+    return _action(server=server, tool=tool, args={"target": target}, **kw)
+
+
+async def test_out_of_scope_autonomous_command_is_gated_with_out_of_scope_reason(
+    db_session: AsyncSession, eng_with_scope: AsyncMock
+) -> None:
+    eng_with_scope.return_value = _eng("juice-shop")
+    with _patch_tool_config(ToolConfig(weight="light", capability_flags=("network",))):
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=uuid4(),
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_target_action("http://example.com")],
+        )
+    assert result.autonomous == []
+    assert len(result.gated) == 1
+    assert ApprovalReason.OUT_OF_SCOPE in result.gated[0].reasons
+
+
+async def test_in_scope_autonomous_command_still_runs(
+    db_session: AsyncSession, eng_with_scope: AsyncMock
+) -> None:
+    eng_with_scope.return_value = _eng("juice-shop, example.com")
+    with _patch_tool_config(ToolConfig(weight="light", capability_flags=("network",))):
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=uuid4(),
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_target_action("http://example.com")],
+        )
+    assert len(result.autonomous) == 1
+    assert result.gated == []
+
+
+async def test_out_of_scope_context_persisted_on_request(
+    db_session: AsyncSession, eng_with_scope: AsyncMock
+) -> None:
+    eng = uuid4()
+    eng_with_scope.return_value = _eng("juice-shop, 10.0.0.0/24")
+    with _patch_tool_config(ToolConfig(weight="light", capability_flags=("network",))):
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=eng,
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_target_action("http://example.com:8080/admin")],
+        )
+    gated = result.gated[0]
+    assert gated.out_of_scope_host == "example.com"  # port/path stripped (parse_host)
+    assert gated.scope_checked_against == "juice-shop, 10.0.0.0/24"
+    # Persisted on the row, not just on the read object.
+    rows, _ = await repo.list_for_engagement(db_session, engagement_id=eng)
+    assert rows[0].out_of_scope_host == "example.com"
+    assert rows[0].scope_checked_against == "juice-shop, 10.0.0.0/24"
+
+
+async def test_dangerous_and_out_of_scope_combines_reasons(
+    db_session: AsyncSession, eng_with_scope: AsyncMock
+) -> None:
+    eng_with_scope.return_value = _eng("juice-shop")
+    with _patch_tool_config(ToolConfig(weight="heavy", capability_flags=("network",))):
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=uuid4(),
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_target_action("http://example.com", server="nmap-server", tool="nmap")],
+        )
+    reasons = set(result.gated[0].reasons)
+    assert ApprovalReason.AGGRESSIVE_SCAN in reasons
+    assert ApprovalReason.OUT_OF_SCOPE in reasons
+
+
+async def test_empty_engagement_scope_never_gates_on_scope(
+    db_session: AsyncSession, eng_with_scope: AsyncMock
+) -> None:
+    eng_with_scope.return_value = _eng("")  # blank scope ⇒ never out-of-scope (soft)
+    with _patch_tool_config(ToolConfig(weight="light", capability_flags=("network",))):
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=uuid4(),
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_target_action("http://anywhere.example")],
+        )
+    assert len(result.autonomous) == 1
+    assert result.gated == []
+
+
+async def test_targetless_command_not_gated_for_scope(
+    db_session: AsyncSession, eng_with_scope: AsyncMock, resolve_username: AsyncMock
+) -> None:
+    # A run_command with no target arg has no host to test: it still gates on its
+    # Slice-16 shell-exec → target_write reason, but NOT on scope.
+    eng_with_scope.return_value = _eng("juice-shop")
+    with _patch_tool_config(ToolConfig(weight="light", capability_flags=("shell-exec",))):
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=uuid4(),
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_action(server="shell-exec", tool="run", args={"cmd": "id"})],
+        )
+    gated = result.gated[0]
+    assert ApprovalReason.TARGET_WRITE in gated.reasons
+    assert ApprovalReason.OUT_OF_SCOPE not in gated.reasons
+    assert gated.out_of_scope_host is None
+
+
+async def test_scope_parsed_once_per_turn(
+    db_session: AsyncSession, eng_with_scope: AsyncMock
+) -> None:
+    eng_with_scope.return_value = _eng("juice-shop")
+    with (
+        _patch_tool_config(ToolConfig(weight="light", capability_flags=("network",))),
+        patch.object(service, "parse_scope", wraps=service.parse_scope) as spy,
+    ):
+        await service.create_requests_for_turn(
+            db_session,
+            engagement_id=uuid4(),
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_target_action("http://juice-shop"), _target_action("http://juice-shop")],
+        )
+    spy.assert_called_once()
 
 
 # --- list_requests --------------------------------------------------------------------

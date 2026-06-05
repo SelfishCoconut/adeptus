@@ -314,3 +314,172 @@ async def test_unclassified_manifest_command_is_gated(app_and_factory: AppFactor
         await s.commit()
     assert len(result.gated) == 1
     assert ApprovalReason.UNCLASSIFIED_MANIFEST in result.gated[0].reasons
+
+
+# --- §5.2 soft scope (Slice 17) -------------------------------------------------------
+
+
+async def _seed_engagement_with_scope(
+    factory: async_sessionmaker[AsyncSession], owner_id: UUID, scope: str
+) -> UUID:
+    async with factory() as s:
+        eng = await eng_repo.create_engagement(
+            s, name="Eng", scope=scope, client_info=None, owner_id=owner_id
+        )
+        await s.commit()
+        await s.refresh(eng)
+        return cast(UUID, eng.id)
+
+
+async def _propose_against(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    eng_id: UUID,
+    initiator_id: UUID,
+    target: str,
+    weight: str = "light",
+    server: str = "httpx-server",
+    tool: str = "httpx",
+) -> service.ClassifiedTurnResult:
+    """Drive the real scope-aware classify→gate path for an httpx-style command."""
+    async with factory() as s:
+        with patch.object(
+            service,
+            "_resolve_tool_config",
+            return_value=ToolConfig(weight=weight, capability_flags=("network",)),
+        ):
+            result = await service.create_requests_for_turn(
+                s,
+                engagement_id=eng_id,
+                chat_message_id=uuid4(),
+                initiator_user_id=initiator_id,
+                actions=[
+                    ProposedAction(server_name=server, tool_name=tool, args={"target": target})
+                ],
+            )
+        await s.commit()
+        return result
+
+
+async def test_out_of_scope_command_gated_then_approved_executes(
+    app_and_factory: AppFactory,
+) -> None:
+    # Headline §5.2-soft + §14 happy path: an otherwise-autonomous httpx against an
+    # out-of-scope target gates, the initiator approves, and the command then runs.
+    _app, factory, exec_run = app_and_factory
+    initiator = await _user(factory, "owner")
+    eng_id = await _seed_engagement_with_scope(factory, initiator, "juice-shop")
+
+    result = await _propose_against(
+        factory, eng_id=eng_id, initiator_id=initiator, target="http://example.com"
+    )
+    assert len(result.gated) == 1
+    req = result.gated[0]
+    assert ApprovalReason.OUT_OF_SCOPE in req.reasons
+    assert req.out_of_scope_host == "example.com"
+    assert req.scope_checked_against == "juice-shop"
+    exec_run.assert_not_awaited()  # nothing has run yet (§5.2 soft — warn + confirm)
+
+    async with factory() as s:
+        read = await service.decide(
+            s,
+            engagement_id=eng_id,
+            request_id=req.id,
+            requester=cast(User, SimpleNamespace(id=initiator, username="owner")),
+            decision="approve",
+        )
+    assert read.status is ApprovalStatus.APPROVED
+    assert read.self_approved is True
+    exec_run.assert_awaited_once()
+    assert await _count_audit(factory, "approval_granted") == 1
+    # The approval audit payload carries the out_of_scope reason (§14, rides existing payload).
+    async with factory() as s:
+        entry = (
+            await s.execute(select(AuditEntry).where(AuditEntry.action == "approval_granted"))
+        ).scalar_one()
+        assert "out_of_scope" in entry.payload["reasons"]
+
+
+async def test_in_scope_autonomous_command_runs_without_request(
+    app_and_factory: AppFactory,
+) -> None:
+    _app, factory, _exec = app_and_factory
+    initiator = await _user(factory, "owner")
+    eng_id = await _seed_engagement_with_scope(factory, initiator, "juice-shop")
+
+    result = await _propose_against(
+        factory, eng_id=eng_id, initiator_id=initiator, target="http://juice-shop:3000"
+    )
+    assert result.gated == []
+    assert len(result.autonomous) == 1  # in-scope safe httpx stays autonomous
+    async with factory() as s:
+        rows, _ = await repo.list_for_engagement(s, engagement_id=eng_id)
+    assert rows == []
+
+
+async def test_out_of_scope_combines_with_dangerous_reason(app_and_factory: AppFactory) -> None:
+    _app, factory, _exec = app_and_factory
+    initiator = await _user(factory, "owner")
+    eng_id = await _seed_engagement_with_scope(factory, initiator, "juice-shop")
+
+    result = await _propose_against(
+        factory,
+        eng_id=eng_id,
+        initiator_id=initiator,
+        target="http://example.com",
+        weight="heavy",  # aggressive_scan
+        server="nmap-server",
+        tool="nmap",
+    )
+    reasons = set(result.gated[0].reasons)
+    assert ApprovalReason.AGGRESSIVE_SCAN in reasons
+    assert ApprovalReason.OUT_OF_SCOPE in reasons
+
+
+async def test_empty_scope_does_not_gate_on_scope(app_and_factory: AppFactory) -> None:
+    _app, factory, _exec = app_and_factory
+    initiator = await _user(factory, "owner")
+    eng_id = await _seed_engagement_with_scope(factory, initiator, "   ")  # blank scope
+
+    result = await _propose_against(
+        factory, eng_id=eng_id, initiator_id=initiator, target="http://anywhere.example"
+    )
+    assert result.gated == []
+    assert len(result.autonomous) == 1
+
+
+async def test_audit_chain_intact_after_out_of_scope_decisions(
+    app_and_factory: AppFactory,
+) -> None:
+    _app, factory, _exec = app_and_factory
+    a = await _user(factory, "alice")
+    eng_id = await _seed_engagement_with_scope(factory, a, "juice-shop")
+    requester = cast(User, SimpleNamespace(id=a, username="alice"))
+
+    approve = await _propose_against(
+        factory, eng_id=eng_id, initiator_id=a, target="http://example.com"
+    )
+    reject = await _propose_against(
+        factory, eng_id=eng_id, initiator_id=a, target="http://other.example"
+    )
+    async with factory() as s:
+        await service.decide(
+            s,
+            engagement_id=eng_id,
+            request_id=approve.gated[0].id,
+            requester=requester,
+            decision="approve",
+        )
+    async with factory() as s:
+        await service.decide(
+            s,
+            engagement_id=eng_id,
+            request_id=reject.gated[0].id,
+            requester=requester,
+            decision="reject",
+        )
+
+    async with factory() as s:
+        ok, verified, broke = await audit_verify.verify(s)
+    assert ok is True and broke is None
+    assert verified >= 2
