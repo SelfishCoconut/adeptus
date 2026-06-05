@@ -30,7 +30,7 @@ The full operational architecture for how Claude Code builds Adeptus is in `CLAU
 ## Cross-cutting components
 
 - **Single-writer per engagement** (ADR-0001): each active engagement has one process owning the in-memory NetworkX graph; all writes serialize through it.
-- **Hash-chained audit log**: every dangerous action, approval, login, and graph edit; tamper-evident chain (see §14 of requirements).
+- **Hash-chained audit log** (ADR-0010): every dangerous action, approval, login, and graph edit; tamper-evident chain (see §14 of requirements). Appends serialize under a `SELECT … FOR UPDATE` on a single-row `audit_chain_head` table — the audit analogue of the single-writer invariant.
 - **Pattern-friction egress** (engagement-level): when cloud is enabled and a message looks like it contains a secret, present a confirmation modal — never silently redact.
 - **Server-side sessions** (ADR-0003): opaque cookie ID, session table in Postgres, instant revocation.
 - **RAG isolation by SQL filter**: every vector query has `WHERE engagement_id = ?`; per-engagement uploads and global curated KB are queried separately.

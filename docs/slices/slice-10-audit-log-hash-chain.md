@@ -435,3 +435,4 @@ self_approved plumbing). Only LOW/INFO findings.
 - Async/background `tool_run_completed` (needs `user_id` threaded into `_stream_to_channel`
   + a ToolRun attribution seam).
 - 2026-06-05T00:23:06Z — 0115fbe docs(slice-10): record review outcomes + deferred follow-ups
+- 2026-06-05T00:30:45Z — 8438704 chore(slice-10): mark in-review (PR #30)
