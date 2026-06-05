@@ -2050,6 +2050,22 @@
             "type": "string",
             "format": "date-time",
             "title": "Created At"
+          },
+          "plan": {
+            "items": {
+              "$ref": "#/components/schemas/PlanStep"
+            },
+            "type": "array",
+            "title": "Plan",
+            "description": "The AI's running plan as of this turn (\u00a75.3). Empty for user/pending/pre-slice rows; populated from the assistant row's parsed metadata so a reloaded conversation re-renders the Plan panel without the debug call."
+          },
+          "claims": {
+            "items": {
+              "$ref": "#/components/schemas/Claim"
+            },
+            "type": "array",
+            "title": "Claims",
+            "description": "Certainty-tagged claims parsed from this turn (\u00a75.3). Empty when none; drives the inline certainty badges and the Graph-pane overlay."
           }
         },
         "type": "object",
@@ -2131,7 +2147,23 @@
           "model_output": {
             "type": "string",
             "title": "Model Output",
-            "description": "The model's raw output for this turn (empty while pending/failed)."
+            "description": "The model's raw output for this turn, INCLUDING the structured <adeptus-meta> block (\u00a714 \u2014 the debug view shows the unstripped output so a power user can see exactly what was parsed). Empty while pending/failed."
+          },
+          "plan": {
+            "items": {
+              "$ref": "#/components/schemas/PlanStep"
+            },
+            "type": "array",
+            "title": "Plan",
+            "description": "The plan parsed from this turn's metadata block (\u00a75.3 / \u00a714)."
+          },
+          "claims": {
+            "items": {
+              "$ref": "#/components/schemas/Claim"
+            },
+            "type": "array",
+            "title": "Claims",
+            "description": "The certainty claims parsed from this turn's metadata block (\u00a75.3 / \u00a714)."
           }
         },
         "type": "object",
@@ -2147,6 +2179,42 @@
         ],
         "title": "ChatTurnDebug",
         "description": "The AI debug record for one assistant turn (\u00a714): the exact relevant subset of the\ngraph injected, the raw prompt, and the model output.\n\nRead by ``GET .../chat/messages/{message_id}/debug``. ``model_output`` is the assistant\nrow's ``content`` (empty while pending/failed). ``nodes``/``edges``/``context_block``/\n``raw_prompt`` are read back from the persisted ``graph_context`` JSONB; an assistant row\nthat completed before this slice (or an empty-graph turn) has an empty subset and an\nempty ``context_block``."
+      },
+      "Claim": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "Text",
+            "description": "The claim the AI flagged, verbatim (\u00a75.5)."
+          },
+          "certainty": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Certainty",
+            "description": "Stated certainty percentage for this claim (\u00a75.3)."
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id",
+            "description": "The graph node this claim is about, if any; validated against the engagement's live graph (foreign/unknown ids dropped, \u00a717.1). Drives the Graph-pane badge."
+          }
+        },
+        "type": "object",
+        "required": [
+          "text",
+          "certainty"
+        ],
+        "title": "Claim",
+        "description": "One AI claim flagged with a stated certainty percentage (\u00a75.3 uncertainty signaling).\n\n``certainty`` is bounded 0\u2013100 (the parser clamps out-of-range values before this model\nis constructed). ``node_id`` is the graph node the claim is about, if any \u2014 validated at\nfinalize against the engagement's live graph (foreign/unknown ids dropped, \u00a717.1) so the\nGraph-pane certainty badge never points at a foreign/hallucinated node. ``text`` is\nrendered verbatim (no redaction, \u00a75.5)."
       },
       "Edge": {
         "properties": {
@@ -2935,6 +3003,36 @@
         "type": "object",
         "title": "NodeUpdate",
         "description": "Request body for PATCH .../graph/nodes/{node_id}.\n\nAt least one of ``label`` or ``properties`` must be present.\n``properties`` fully replaces the prior blob when provided."
+      },
+      "PlanStep": {
+        "properties": {
+          "step": {
+            "type": "string",
+            "title": "Step",
+            "description": "The todo-list item text, verbatim (\u00a75.5)."
+          },
+          "status": {
+            "$ref": "#/components/schemas/PlanStepStatus",
+            "description": "The step's current state (todo/in_progress/done)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "step",
+          "status"
+        ],
+        "title": "PlanStep",
+        "description": "One ordered todo-list item the AI is tracking this turn (\u00a75.3 visible plan).\n\nRendered verbatim in the inline Plan panel (no redaction, \u00a75.5). Parsed server-side\nfrom the model's trailing ``<adeptus-meta>`` block; an absent/invalid ``status`` is\ncoerced to ``todo`` by the parser before this model is constructed (task 2)."
+      },
+      "PlanStepStatus": {
+        "type": "string",
+        "enum": [
+          "todo",
+          "in_progress",
+          "done"
+        ],
+        "title": "PlanStepStatus",
+        "description": "Lifecycle of one step in the AI's visible running plan (\u00a75.3 visible plan).\n\nUnlike ``ChatRole``/``ChatMessageStatus`` this enum has NO backing DB column \u2014 plan\nsteps live inside the per-turn ``chat_messages.graph_context`` JSONB blob, not their\nown table \u2014 so there is no DB-vocabulary parity to guard. ``in_progress`` mirrors the\nunderscore wire form used in the ``<adeptus-meta>`` block (Design notes)."
       },
       "QueuedRun": {
         "properties": {
