@@ -160,7 +160,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §5.3 (visible plan + uncertainty)
 - **Depends on**: 11
 - **Risky**: no
-- **Status**: in-progress
+- **Status**: done
 
 ### Slice 14: Cloud LLM + pattern-friction egress
 - **Goal**: With cloud enabled, secret-looking content triggers confirmation modal before send
