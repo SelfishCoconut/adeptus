@@ -1,0 +1,215 @@
+"""Unit tests for the two-tier classifier (Slice 16 task 3).
+
+This is the §5.2 safety boundary AND the inverted-default (Resolved decision 2) — the
+densest-covered module in the slice. Every dangerous category, the dangerous-flag set,
+the escape hatch, the inverted default, ``validate_tool_manifests``, the reserved
+``out_of_scope``, and multi-reason combination are exercised.
+"""
+
+from app.features.approvals.classifier import ToolConfig, classify, validate_tool_manifests
+from app.features.approvals.schemas import ApprovalReason, ApprovalTier, ProposedAction
+
+
+def _action(
+    *,
+    server: str = "httpx-server",
+    tool: str = "httpx",
+    args: dict[str, object] | None = None,
+    preset: str | None = None,
+) -> ProposedAction:
+    return ProposedAction(
+        server_name=server,
+        tool_name=tool,
+        args=args or {"target": "10.0.0.5"},
+        preset_name=preset,
+    )
+
+
+# --- Autonomous (the inverted default) ------------------------------------------------
+
+
+def test_light_with_safe_flags_is_autonomous() -> None:
+    result = classify(
+        _action(), tool_config=ToolConfig(weight="light", capability_flags=("network",))
+    )
+    assert result.tier is ApprovalTier.AUTONOMOUS
+    assert result.reasons == []
+
+
+def test_unknown_but_light_and_safe_runs_autonomously() -> None:
+    # The load-bearing INVERTED default: a present, non-dangerous classification runs
+    # WITHOUT a human gate even for a tool not on any list.
+    result = classify(
+        _action(server="mystery", tool="some-new-recon-tool"),
+        tool_config=ToolConfig(weight="light", capability_flags=()),
+    )
+    assert result.tier is ApprovalTier.AUTONOMOUS
+    assert result.reasons == []
+
+
+# --- target_write ---------------------------------------------------------------------
+
+
+def test_shell_exec_flag_is_target_write() -> None:
+    result = classify(
+        _action(server="shell-exec", tool="run", args={"cmd": "id"}),
+        tool_config=ToolConfig(weight="light", capability_flags=("shell-exec",)),
+    )
+    assert result.tier is ApprovalTier.REQUIRES_APPROVAL
+    assert result.reasons == [ApprovalReason.TARGET_WRITE]
+
+
+def test_filesystem_write_flag_is_target_write() -> None:
+    result = classify(
+        _action(), tool_config=ToolConfig(weight="light", capability_flags=("filesystem-write",))
+    )
+    assert result.reasons == [ApprovalReason.TARGET_WRITE]
+
+
+def test_target_write_flag_is_target_write() -> None:
+    result = classify(
+        _action(), tool_config=ToolConfig(weight="light", capability_flags=("target-write",))
+    )
+    assert result.reasons == [ApprovalReason.TARGET_WRITE]
+
+
+def test_target_write_tool_list_is_target_write() -> None:
+    result = classify(
+        _action(server="exploit", tool="sqlmap"),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+    )
+    assert result.reasons == [ApprovalReason.TARGET_WRITE]
+
+
+# --- aggressive_scan ------------------------------------------------------------------
+
+
+def test_heavy_tool_is_aggressive_scan() -> None:
+    result = classify(
+        _action(server="nmap-server", tool="nmap"),
+        tool_config=ToolConfig(weight="heavy", capability_flags=("network",)),
+    )
+    assert result.tier is ApprovalTier.REQUIRES_APPROVAL
+    assert result.reasons == [ApprovalReason.AGGRESSIVE_SCAN]
+
+
+def test_aggressive_preset_is_aggressive_scan() -> None:
+    result = classify(
+        _action(server="nmap-server", tool="nmap", preset="aggressive"),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+    )
+    assert result.reasons == [ApprovalReason.AGGRESSIVE_SCAN]
+
+
+def test_aggressive_scan_tool_list_is_aggressive_scan() -> None:
+    result = classify(
+        _action(server="scan", tool="masscan"),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+    )
+    assert result.reasons == [ApprovalReason.AGGRESSIVE_SCAN]
+
+
+# --- credential_attack ----------------------------------------------------------------
+
+
+def test_credential_flag_is_credential_attack() -> None:
+    result = classify(
+        _action(), tool_config=ToolConfig(weight="light", capability_flags=("credential-attack",))
+    )
+    assert result.tier is ApprovalTier.REQUIRES_APPROVAL
+    assert result.reasons == [ApprovalReason.CREDENTIAL_ATTACK]
+
+
+def test_credential_tool_list_is_credential_attack() -> None:
+    result = classify(
+        _action(server="creds", tool="hydra", args={"target": "ssh://10.0.0.5"}),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+    )
+    assert result.reasons == [ApprovalReason.CREDENTIAL_ATTACK]
+
+
+def test_brute_arg_signal_is_credential_attack() -> None:
+    result = classify(
+        _action(tool="ffuf", args={"mode": "brute", "wordlist": "rockyou.txt"}),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+    )
+    assert result.reasons == [ApprovalReason.CREDENTIAL_ATTACK]
+
+
+# --- The escape hatch (load-bearing) --------------------------------------------------
+
+
+def test_empty_manifest_gates_as_unclassified() -> None:
+    # No weight, no flags at all → the genuinely-unknown case still gates.
+    result = classify(_action(), tool_config=ToolConfig())
+    assert result.tier is ApprovalTier.REQUIRES_APPROVAL
+    assert result.reasons == [ApprovalReason.UNCLASSIFIED_MANIFEST]
+
+
+def test_missing_weight_only_gates_as_unclassified() -> None:
+    # A missing weight ALONE gates, even when a benign flag is present: a tool without a
+    # present weight was never classified, so it can never run ungated.
+    result = classify(_action(), tool_config=ToolConfig(weight=None, capability_flags=("network",)))
+    assert result.tier is ApprovalTier.REQUIRES_APPROVAL
+    assert result.reasons == [ApprovalReason.UNCLASSIFIED_MANIFEST]
+
+
+def test_missing_weight_with_dangerous_flag_uses_specific_reason() -> None:
+    # When a dangerous signal is present the specific reason wins over the escape hatch.
+    result = classify(
+        _action(), tool_config=ToolConfig(weight=None, capability_flags=("shell-exec",))
+    )
+    assert result.reasons == [ApprovalReason.TARGET_WRITE]
+    assert ApprovalReason.UNCLASSIFIED_MANIFEST not in result.reasons
+
+
+# --- Multi-reason combination ---------------------------------------------------------
+
+
+def test_multiple_reasons_combine() -> None:
+    # A heavy credential tool that also writes the target → all three §5.2 categories.
+    result = classify(
+        _action(server="creds", tool="hydra", args={"mode": "brute"}, preset="aggressive"),
+        tool_config=ToolConfig(weight="heavy", capability_flags=("shell-exec",)),
+    )
+    assert result.tier is ApprovalTier.REQUIRES_APPROVAL
+    assert set(result.reasons) == {
+        ApprovalReason.AGGRESSIVE_SCAN,
+        ApprovalReason.TARGET_WRITE,
+        ApprovalReason.CREDENTIAL_ATTACK,
+    }
+    # No duplicate reasons.
+    assert len(result.reasons) == len(set(result.reasons))
+
+
+# --- Reserved out_of_scope (Slice 17) -------------------------------------------------
+
+
+def test_out_of_scope_never_returned_in_this_slice() -> None:
+    cases = [
+        (_action(), ToolConfig()),
+        (_action(tool="hydra"), ToolConfig(weight="heavy", capability_flags=("shell-exec",))),
+        (_action(), ToolConfig(weight="light", capability_flags=("network",))),
+        (_action(preset="aggressive"), ToolConfig(weight="light")),
+    ]
+    for action, cfg in cases:
+        result = classify(action, tool_config=cfg)
+        assert ApprovalReason.OUT_OF_SCOPE not in result.reasons
+
+
+# --- validate_tool_manifests ----------------------------------------------------------
+
+
+def test_validate_tool_manifests_flags_unclassified() -> None:
+    tools = [
+        ("good-light", ToolConfig(weight="light", capability_flags=("network",))),
+        ("good-heavy", ToolConfig(weight="heavy")),
+        ("bad-unclassified", ToolConfig(weight=None, capability_flags=())),
+        ("bad-weightless-with-flag", ToolConfig(weight=None, capability_flags=("network",))),
+    ]
+    flagged = validate_tool_manifests(tools)
+    assert flagged == ["bad-unclassified", "bad-weightless-with-flag"]
+
+
+def test_validate_tool_manifests_empty_input() -> None:
+    assert validate_tool_manifests([]) == []
