@@ -1962,6 +1962,222 @@
           }
         }
       }
+    },
+    "/api/v1/engagements/{engagement_id}/approvals": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "List Approval Requests",
+        "description": "List the engagement's shared approval requests (\u00a75.2). Membership required (404).",
+        "operationId": "list_approval_requests",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ApprovalStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/approvals/{request_id}/approve": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Approve Request",
+        "description": "Approve a pending dangerous command and hand it to the tool-run pipeline (\u00a75.2).",
+        "operationId": "approve_request",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestRead"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Either the request is already decided (reason=already_decided, with the terminal status), OR the engagement is archived (reason=engagement_archived, no new runs \u00a74).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalConflict"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/approvals/{request_id}/reject": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Reject Request",
+        "description": "Reject a pending dangerous command; it is never executed (\u00a75.2 symmetric).",
+        "operationId": "reject_request",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestRead"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Either the request is already decided (reason=already_decided, with the terminal status), OR the engagement is archived (reason=engagement_archived, no new runs \u00a74).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalConflict"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1978,6 +2194,232 @@
           "username"
         ],
         "title": "AddMemberRequest"
+      },
+      "ApprovalConflict": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "already_decided",
+              "engagement_archived"
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "ApprovalConflict",
+        "description": "409 body distinguishing the two conflict cases on a decision endpoint.\n\n``already_decided`` \u2014 the request is already terminal (double-/concurrent-decision\nguard); ``status`` carries its current terminal status. ``engagement_archived`` \u2014\napprove-and-run is blocked in an archived engagement (\u00a74); ``status`` is omitted."
+      },
+      "ApprovalReason": {
+        "type": "string",
+        "enum": [
+          "target_write",
+          "aggressive_scan",
+          "credential_attack",
+          "unclassified_manifest",
+          "out_of_scope"
+        ],
+        "title": "ApprovalReason",
+        "description": "Why a command was gated (\u00a75.2 dangerous categories) plus ``unclassified_manifest``.\n\n``TARGET_WRITE`` / ``AGGRESSIVE_SCAN`` / ``CREDENTIAL_ATTACK`` are the three \u00a75.2\ndangerous categories computed in this slice. ``UNCLASSIFIED_MANIFEST`` is the\nfail-safe reason for a tool whose manifest carries no weight and no capability flags\n(Resolved decision 2 escape hatch). ``OUT_OF_SCOPE`` is **reserved for Slice 17**\n(soft scope enforcement) and is never produced in this slice."
+      },
+      "ApprovalRequestPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalRequestRead"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "ApprovalRequestPage",
+        "description": "A page of approval requests with an opaque cursor for the next (older) page."
+      },
+      "ApprovalRequestRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "engagement_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Engagement Id"
+          },
+          "chat_message_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Chat Message Id"
+          },
+          "initiator_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Initiator User Id"
+          },
+          "server_name": {
+            "type": "string",
+            "title": "Server Name"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "args": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Args"
+          },
+          "preset_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Name"
+          },
+          "rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale"
+          },
+          "reasons": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalReason"
+            },
+            "type": "array",
+            "title": "Reasons"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ApprovalStatus"
+          },
+          "acted_by_user_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acted By User Id"
+          },
+          "acted_by_username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acted By Username"
+          },
+          "self_approved": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Self Approved"
+          },
+          "tool_run_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Run Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "engagement_id",
+          "chat_message_id",
+          "initiator_user_id",
+          "server_name",
+          "tool_name",
+          "args",
+          "reasons",
+          "status",
+          "created_at"
+        ],
+        "title": "ApprovalRequestRead",
+        "description": "One approval request as exposed by the read/decision API.\n\n``acted_by_username`` is resolved at read time (not a DB column) and set as a\ntransient attribute on the ORM row by the service before ``model_validate``; it\ndefaults to ``None`` so pending rows (no decider yet) validate cleanly."
+      },
+      "ApprovalStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "approved",
+          "rejected"
+        ],
+        "title": "ApprovalStatus",
+        "description": "Request lifecycle (\u00a75.2). Mirrors ``models.APPROVAL_STATUSES`` exactly \u2014\nguarded by ``test_schemas.test_status_enum_matches_db_vocabulary`` so the enum and\nthe DB CHECK constraint can never silently drift. No expiry: approvals do not\ntime out \u2014 a request stays ``PENDING`` until a member acts."
       },
       "AuditAction": {
         "type": "string",
@@ -2303,6 +2745,14 @@
             ],
             "title": "Persona Name",
             "description": "The persona's display name at turn time, denormalized onto the turn so a renamed/deleted persona still labels the historical turn (the in-chat persona chip). Null for user/pending/pre-slice rows."
+          },
+          "approval_requests": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalRequestRead"
+            },
+            "type": "array",
+            "title": "Approval Requests",
+            "description": "Approval requests this assistant turn created (\u00a75.2, Slice 16). Empty for user/pending rows and turns that proposed no dangerous command; each renders an inline approval card so a reloaded conversation re-shows the cards + decisions."
           }
         },
         "type": "object",
