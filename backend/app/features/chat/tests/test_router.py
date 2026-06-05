@@ -28,6 +28,7 @@ from app.features.chat.ollama_client import OllamaUsage
 from app.features.chat.schemas import OllamaChatMessage
 from app.features.engagements import repository as eng_repo
 from app.features.graph import repository as graph_repo
+from app.features.personas import service as personas_service
 
 _hasher = PasswordHasher()
 _SESSION_COOKIE = "session_id"
@@ -697,3 +698,116 @@ async def test_get_debug_response_has_plan_and_claims(
     assert body["claims"][0]["certainty"] == 20
     # §14: the debug view shows the UNSTRIPPED output (block included).
     assert "adeptus-meta" in body["model_output"]
+
+
+# ---------------------------------------------------------------------------
+# HTTP: POST/GET persona threading (Slice 15)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_builtin_personas(factory: async_sessionmaker[AsyncSession]) -> None:
+    async with factory() as s:
+        await personas_service.bootstrap_system_personas(s)
+        await s.commit()
+
+
+async def _seed_custom_persona(
+    factory: async_sessionmaker[AsyncSession], owner: User, name: str, prompt: str
+) -> UUID:
+    async with factory() as s:
+        created = await personas_service.create_persona(
+            s, requester=owner, name=name, system_prompt=prompt
+        )
+        await s.commit()
+        return created.id
+
+
+@pytest.mark.asyncio
+async def test_post_message_accepts_persona_id(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    app, factory = app_and_factory
+    user = await _seed_user(factory, "owner")
+    sid = await _seed_session(factory, cast(UUID, user.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, user.id))
+    await _seed_builtin_personas(factory)
+    persona_id = await _seed_custom_persona(factory, user, "Recon X", "recon prompt")
+
+    async with _client(app) as client:
+        resp = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": "where do I start?", "persona_id": str(persona_id)},
+            cookies={_SESSION_COOKIE: sid},
+        )
+        assert resp.status_code == 201
+        listed = (
+            await client.get(
+                f"/api/v1/engagements/{eng_id}/chat/messages", cookies={_SESSION_COOKIE: sid}
+            )
+        ).json()
+
+    assistant = next(m for m in listed["items"] if m["role"] == "assistant")
+    assert assistant["persona_id"] == str(persona_id)
+    assert assistant["persona_name"] == "Recon X"
+
+
+@pytest.mark.asyncio
+async def test_post_foreign_persona_still_201_general_fallback(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    """§17.1 — a foreign persona id never errors; the turn falls back to general."""
+    app, factory = app_and_factory
+    alice = await _seed_user(factory, "alice")
+    bob = await _seed_user(factory, "bob")
+    sid = await _seed_session(factory, cast(UUID, alice.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, alice.id))
+    await _seed_builtin_personas(factory)
+    bobs_persona = await _seed_custom_persona(factory, bob, "Bobs", "BOB-SECRET")
+
+    async with _client(app) as client:
+        resp = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": "hi", "persona_id": str(bobs_persona)},
+            cookies={_SESSION_COOKIE: sid},
+        )
+        assert resp.status_code == 201
+        listed = (
+            await client.get(
+                f"/api/v1/engagements/{eng_id}/chat/messages", cookies={_SESSION_COOKIE: sid}
+            )
+        ).json()
+
+    assistant = next(m for m in listed["items"] if m["role"] == "assistant")
+    assert assistant["persona_name"] == "General"  # not Bob's persona
+
+
+@pytest.mark.asyncio
+async def test_list_messages_response_carries_persona_fields(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    app, factory = app_and_factory
+    user = await _seed_user(factory, "owner")
+    sid = await _seed_session(factory, cast(UUID, user.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, user.id))
+    await _seed_builtin_personas(factory)
+    persona_id = await _seed_custom_persona(factory, user, "Recon X", "recon prompt")
+
+    async with _client(app) as client:
+        await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": "hi", "persona_id": str(persona_id)},
+            cookies={_SESSION_COOKIE: sid},
+        )
+        listed = (
+            await client.get(
+                f"/api/v1/engagements/{eng_id}/chat/messages", cookies={_SESSION_COOKIE: sid}
+            )
+        ).json()
+
+    user_msg = next(m for m in listed["items"] if m["role"] == "user")
+    assistant = next(m for m in listed["items"] if m["role"] == "assistant")
+    # The user turn never carries a persona; the assistant turn does.
+    assert user_msg["persona_id"] is None
+    assert user_msg["persona_name"] is None
+    assert assistant["persona_id"] == str(persona_id)
+    assert assistant["persona_name"] == "Recon X"
