@@ -41,6 +41,7 @@ from app.features.chat.schemas import (
     ChatMessagePage,
     ChatMessageRead,
     ChatMessageStatus,
+    ChatRole,
     ChatTurnDebug,
     Claim,
     GraphSubsetEdge,
@@ -212,7 +213,7 @@ async def list_messages(
         else None
     )
     return ChatMessagePage(
-        items=[ChatMessageRead.model_validate(r) for r in rows],
+        items=[_to_message_read(r) for r in rows],
         next_cursor=next_cursor,
     )
 
@@ -685,6 +686,25 @@ def _validate_claim_node_ids(claims: list[Claim], live_node_ids: set[UUID]) -> l
     return validated
 
 
+def _to_message_read(message: ChatMessage) -> ChatMessageRead:
+    """Map a persisted row into the read schema, populating plan/claims (Slice 13).
+
+    The render-needed plan/claims ride on the normal message read so a reloaded
+    conversation re-renders the Plan panel + in-chat certainty badges without the lazy
+    debug call. User/pending/pre-slice rows have no stored plan/claims → empty lists."""
+    plan, claims = _stored_plan_claims(message)
+    return ChatMessageRead(
+        id=cast(UUID, message.id),
+        engagement_id=cast(UUID, message.engagement_id),
+        role=ChatRole(message.role),
+        content=message.content,
+        status=ChatMessageStatus(message.status),
+        created_at=message.created_at,
+        plan=plan,
+        claims=claims,
+    )
+
+
 def _stored_plan_claims(message: ChatMessage) -> tuple[list[PlanStep], list[Claim]]:
     """Read the parsed plan/claims back from an assistant row's ``graph_context`` JSONB.
 
@@ -760,7 +780,13 @@ def _to_turn_debug(message: ChatMessage) -> ChatTurnDebug:
 
     A row whose ``graph_context`` still holds only the POST-time stash (pending), or is NULL
     (pre-slice), yields an empty subset and empty prompt blocks — the panel shows the
-    empty-subset state. ``model_output`` is the row's ``content`` (empty while pending/failed).
+    empty-subset state.
+
+    ``model_output`` (Slice 13) is the UNSTRIPPED reply persisted in ``graph_context``
+    (incl. the metadata block, so the §14 panel shows exactly what was parsed); a pre-slice
+    row has no stored output and falls back to the row's ``content`` (no block existed then).
+    ``plan``/``claims`` are the parsed structures read back from the same blob (empty for
+    pre-slice / pending / failed rows).
     """
     gc = message.graph_context if isinstance(message.graph_context, dict) else {}
     raw_nodes = gc.get("nodes")
@@ -775,6 +801,9 @@ def _to_turn_debug(message: ChatMessage) -> ChatTurnDebug:
         if isinstance(raw_edges, list)
         else []
     )
+    plan, claims = _stored_plan_claims(message)
+    stored_output = gc.get("model_output")
+    model_output = stored_output if isinstance(stored_output, str) else message.content
     return ChatTurnDebug(
         message_id=cast(UUID, message.id),
         model=message.model,
@@ -783,5 +812,7 @@ def _to_turn_debug(message: ChatMessage) -> ChatTurnDebug:
         edges=edges,
         context_block=str(gc.get("context_block", "")),
         raw_prompt=str(gc.get("raw_prompt", "")),
-        model_output=message.content,
+        model_output=model_output,
+        plan=plan,
+        claims=claims,
     )

@@ -967,3 +967,112 @@ async def test_prose_not_redacted(
         )
     assert row is not None
     assert secret in row.content
+
+
+# ---------------------------------------------------------------------------
+# Read paths surface stored plan/claims (Slice 13 task 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_messages_includes_plan(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = _meta(
+        plan=[{"step": "the step", "status": "done"}],
+        claims=[{"text": "the claim", "certainty": 50}],
+    )
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(_tokens("Answer", block))
+    )
+    message = await _seed_pending(db_factory)
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with db_factory() as s:
+        user = await auth_repo.get_user_by_id(s, cast(UUID, message.user_id))
+        assert user is not None
+        page = await service.list_messages(
+            s,
+            engagement_id=cast(UUID, message.engagement_id),
+            requester=user,
+            cursor=None,
+            limit=50,
+        )
+
+    assistant_rows = [m for m in page.items if m.role == "assistant"]
+    assert assistant_rows[0].plan[0].step == "the step"
+    assert assistant_rows[0].claims[0].certainty == 50
+    # The user row carries no plan/claims.
+    user_rows = [m for m in page.items if m.role == "user"]
+    assert user_rows[0].plan == []
+    assert user_rows[0].claims == []
+
+
+@pytest.mark.asyncio
+async def test_turn_debug_includes_parsed_plan_and_claims(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = _meta(
+        plan=[{"step": "enumerate", "status": "in_progress"}],
+        claims=[{"text": "unsure", "certainty": 33}],
+    )
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(_tokens("Visible prose.", block))
+    )
+    message = await _seed_pending(db_factory)
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with db_factory() as s:
+        user = await auth_repo.get_user_by_id(s, cast(UUID, message.user_id))
+        assert user is not None
+        debug = await service.get_turn_debug(
+            s,
+            engagement_id=cast(UUID, message.engagement_id),
+            requester=user,
+            message_id=cast(UUID, message.id),
+        )
+
+    assert debug.plan[0].step == "enumerate"
+    assert debug.claims[0].certainty == 33
+    # §14: the debug view shows the UNSTRIPPED output (block included).
+    assert "adeptus-meta" in debug.model_output
+
+
+@pytest.mark.asyncio
+async def test_pre_slice_row_reads_empty_plan(db_session: AsyncSession) -> None:
+    """A pre-Slice-13 assistant row (graph_context without plan/claims keys) reads empty,
+    and its debug model_output falls back to the row content (no block ever existed)."""
+    owner = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, owner.id))
+    _, assistant = await chat_repo.insert_user_and_pending_assistant(
+        db_session, engagement_id=eng_id, user_id=cast(UUID, owner.id), content="hi"
+    )
+    await chat_repo.finalize_assistant(
+        db_session,
+        message_id=cast(UUID, assistant.id),
+        content="old answer",
+        status="complete",
+        model="qwen3.5:9b",
+        prompt_tokens=None,
+        completion_tokens=None,
+        graph_context={"nodes": [], "edges": [], "context_block": "", "raw_prompt": "x"},
+    )
+    await db_session.commit()
+
+    page = await service.list_messages(
+        db_session, engagement_id=eng_id, requester=owner, cursor=None, limit=50
+    )
+    arows = [m for m in page.items if m.role == "assistant"]
+    assert arows[0].plan == []
+    assert arows[0].claims == []
+
+    debug = await service.get_turn_debug(
+        db_session, engagement_id=eng_id, requester=owner, message_id=cast(UUID, assistant.id)
+    )
+    assert debug.plan == []
+    assert debug.claims == []
+    assert debug.model_output == "old answer"  # fallback to content for pre-slice row
