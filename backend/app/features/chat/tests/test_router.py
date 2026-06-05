@@ -26,6 +26,7 @@ from app.features.chat import service
 from app.features.chat.ollama_client import OllamaUsage
 from app.features.chat.schemas import OllamaChatMessage
 from app.features.engagements import repository as eng_repo
+from app.features.graph import repository as graph_repo
 
 _hasher = PasswordHasher()
 _SESSION_COOKIE = "session_id"
@@ -81,6 +82,31 @@ async def _seed_pending(
         )
         await s.commit()
         return cast(UUID, assistant.id)
+
+
+async def _seed_node(
+    factory: async_sessionmaker[AsyncSession],
+    engagement_id: UUID,
+    *,
+    node_type: str = "host",
+    label: str = "h",
+) -> UUID:
+    async with factory() as s:
+        node = await graph_repo.insert_node(
+            s, engagement_id=engagement_id, node_type=node_type, label=label, properties={}
+        )
+        await s.commit()
+        return cast(UUID, node.id)
+
+
+async def _drain_ws(app: FastAPI, message_id: UUID, sid: str) -> None:
+    """Connect the streaming WS and read to a terminal frame so the turn finalizes."""
+    client = _ws_client(app)
+    with client.websocket_connect(f"/ws/chat/{message_id}", cookies={_SESSION_COOKIE: sid}) as ws:
+        while True:
+            frame = ws.receive_json()
+            if frame["type"] in ("done", "error"):
+                break
 
 
 def _fake_stream(tokens: list[str]) -> Callable[..., AsyncIterator[str]]:
@@ -357,3 +383,135 @@ async def test_ws_replays_completed_message(
 
     assert [f["type"] for f in frames] == ["token", "done"]
     assert frames[0]["data"] == "stored answer"
+
+
+# ---------------------------------------------------------------------------
+# HTTP: POST with §5.3 node-id inputs + GET debug (Slice 12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_post_with_node_ids_201(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    app, factory = app_and_factory
+    user = await _seed_user(factory, "owner")
+    sid = await _seed_session(factory, cast(UUID, user.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, user.id))
+    node_id = await _seed_node(factory, eng_id, label="pinned-box")
+
+    async with _client(app) as client:
+        resp = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={
+                "content": "hi",
+                "pinned_node_ids": [str(node_id)],
+                "recent_node_ids": [str(node_id)],
+                "mentioned_node_ids": [],
+            },
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assert resp.status_code == 201
+    assert resp.json()["assistant_message"]["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_get_debug_200_for_owner(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, factory = app_and_factory
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["the ", "answer"]))
+    user = await _seed_user(factory, "owner")
+    sid = await _seed_session(factory, cast(UUID, user.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, user.id))
+    node_id = await _seed_node(factory, eng_id, label="pinned-box")
+
+    async with _client(app) as client:
+        post = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": "hi", "pinned_node_ids": [str(node_id)]},
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assistant_id = post.json()["assistant_message"]["id"]
+    # Stream to finalize so the canonical §14 debug record is persisted.
+    await _drain_ws(app, UUID(assistant_id), sid)
+
+    async with _client(app) as client:
+        resp = await client.get(
+            f"/api/v1/engagements/{eng_id}/chat/messages/{assistant_id}/debug",
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["message_id"] == assistant_id
+    assert [n["label"] for n in body["nodes"]] == ["pinned-box"]
+    assert "pinned" in body["nodes"][0]["reasons"]
+    assert body["model_output"] == "the answer"
+
+
+@pytest.mark.asyncio
+async def test_get_debug_404_for_non_owner(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    app, factory = app_and_factory
+    owner = await _seed_user(factory, "owner")
+    other = await _seed_user(factory, "other")
+    eng_id = await _seed_engagement(factory, cast(UUID, owner.id))
+    async with factory() as s:
+        await eng_repo.add_member(s, engagement_id=eng_id, user_id=cast(UUID, other.id))
+        await s.commit()
+    owner_sid = await _seed_session(factory, cast(UUID, owner.id))
+    other_sid = await _seed_session(factory, cast(UUID, other.id))
+
+    async with _client(app) as client:
+        post = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": "private"},
+            cookies={_SESSION_COOKIE: owner_sid},
+        )
+        assistant_id = post.json()["assistant_message"]["id"]
+        # `other` is a member but does not own owner's turn → 404 (§5.4 / Risk 5).
+        resp = await client.get(
+            f"/api/v1/engagements/{eng_id}/chat/messages/{assistant_id}/debug",
+            cookies={_SESSION_COOKIE: other_sid},
+        )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_debug_404_for_non_member(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    app, factory = app_and_factory
+    owner = await _seed_user(factory, "owner")
+    outsider = await _seed_user(factory, "outsider")
+    eng_id = await _seed_engagement(factory, cast(UUID, owner.id))
+    owner_sid = await _seed_session(factory, cast(UUID, owner.id))
+    outsider_sid = await _seed_session(factory, cast(UUID, outsider.id))
+
+    async with _client(app) as client:
+        post = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": "private"},
+            cookies={_SESSION_COOKIE: owner_sid},
+        )
+        assistant_id = post.json()["assistant_message"]["id"]
+        # A non-member cannot even learn the engagement exists → 404 (§17.1).
+        resp = await client.get(
+            f"/api/v1/engagements/{eng_id}/chat/messages/{assistant_id}/debug",
+            cookies={_SESSION_COOKIE: outsider_sid},
+        )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_debug_401_unauthenticated(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+) -> None:
+    app, _factory = app_and_factory
+    async with _client(app) as client:
+        resp = await client.get(
+            f"/api/v1/engagements/{uuid4()}/chat/messages/{uuid4()}/debug",
+        )
+    assert resp.status_code == 401
