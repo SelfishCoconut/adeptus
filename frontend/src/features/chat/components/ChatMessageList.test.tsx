@@ -139,4 +139,26 @@ describe('ChatMessageList', () => {
     })
     expect(screen.queryByRole('button', { name: 'Debug' })).not.toBeInTheDocument()
   })
+
+  it('renders inline certainty badges for a completed turn with claims', () => {
+    const assistant: ChatMessage = {
+      ...msg('a1', 'assistant', 'It is likely Apache.'),
+      claims: [
+        { text: 'service is Apache', certainty: 55, node_id: null },
+        { text: 'patched recently', certainty: 90, node_id: null },
+      ],
+    }
+    renderList({ messages: [assistant] })
+
+    const badges = screen.getAllByTestId('certainty-badge')
+    expect(badges).toHaveLength(2)
+    expect(screen.getByText('(55% certain)')).toBeInTheDocument()
+    expect(badges[0]).toHaveAttribute('data-low-confidence', 'true')
+    expect(badges[1]).toHaveAttribute('data-low-confidence', 'false')
+  })
+
+  it('renders no claim badges when the turn has none', () => {
+    renderList({ messages: [msg('a1', 'assistant', 'plain answer')] })
+    expect(screen.queryByTestId('claim-badges')).not.toBeInTheDocument()
+  })
 })

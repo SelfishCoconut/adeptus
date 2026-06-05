@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import type { ChatMessage } from '@/shared/api'
+import type { ChatMessage, Claim } from '@/shared/api'
 import { AiDebugPanel } from './AiDebugPanel'
+import { CertaintyBadge } from './CertaintyBadge'
 
 interface ChatMessageListProps {
   /** The engagement these messages belong to (for the per-turn debug panel). */
@@ -24,6 +25,18 @@ function OfflineNotice({ reason }: { reason: string }) {
     <p role="alert" className="text-sm text-destructive">
       {reason}
     </p>
+  )
+}
+
+/** Inline certainty badges for an assistant turn's flagged claims (§5.3 "in chat"). */
+function ClaimBadges({ claims }: { claims: Claim[] }) {
+  if (claims.length === 0) return null
+  return (
+    <div data-testid="claim-badges" className="flex flex-wrap gap-1.5">
+      {claims.map((claim, index) => (
+        <CertaintyBadge key={`${index}:${claim.text}`} claim={claim} />
+      ))}
+    </div>
   )
 }
 
@@ -182,6 +195,7 @@ export function ChatMessageList({
           >
             <div className="space-y-2 [&_code]:rounded [&_code]:bg-background [&_code]:px-1">
               <ReactMarkdown>{message.content}</ReactMarkdown>
+              <ClaimBadges claims={message.claims ?? []} />
             </div>
           </FinalizedAssistantTurn>
         )
