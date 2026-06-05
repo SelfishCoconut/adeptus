@@ -260,7 +260,7 @@ Numbered continuously across the whole slice. Every commit subject cites its tas
 
 9. **[M]** Wire the live callers (each its own small commit), calling `audit.service.record` **after** the originating state change commits (Open Question 1 resolved: same transaction):
    - `auth.router` → `login` on success (`actor_user_id=user.id`), `logout` (`actor_user_id=session user`), and `login_failed` on `AuthenticationError` (`actor_user_id=NULL`, `payload={username}`, committed in its own transaction then the error re-raised). Tests `test_login_writes_audit_entry`, `test_logout_writes_audit_entry`, `test_failed_login_writes_audit_entry`.
-   - `mcp.service.execute_tool_run` → `tool_run` at run-row creation (both sync and async paths), `payload={server, tool, target, status}`, `target_type="tool_run"`, `target_id=tool_run_id`; and `tool_run_completed` when the terminal status is set — after `update_tool_run_result` on the sync path and in the `_stream_to_channel` completion handling on the async/background path — `payload={..., status, exit_code}`. Tests `test_tool_run_writes_invocation_entry`, `test_tool_run_writes_completion_entry`.
+   - `mcp.service.execute_tool_run` → `tool_run` at run-row creation (both sync and async paths), attributed (`actor_user_id=user_id`), `payload={server, tool, target, status}`, `target_type="tool_run"`, `target_id=tool_run_id`; and `tool_run_completed` on the **sync path only** (after `update_tool_run_result`), `payload={..., status, exit_code}`. **Async/background completion is deferred** (Open Question 3, refined): `ToolRun` has no user-attribution column and the background `_stream_to_channel` persists terminal status at ~10 points without the `user_id`; wiring it is a larger, riskier change in fragile kill/timeout/server-down handlers, out of scope for this step-gated audit-chain slice. The seam: thread `user_id` into `_stream_to_channel` and emit `tool_run_completed` at the terminal `update_tool_run_result` chokepoint in a focused follow-up. Tests `test_tool_run_writes_invocation_entry`, `test_sync_tool_run_writes_completion_entry`.
    - `graph.service` create/update/delete node & edge → `record(action=graph_*_*, engagement_id, actor_user_id=user_id, target_type, target_id)`, emitted in the request session alongside `_push_undo` (the Slice-09 seam) so it commits with the undo row after the writer has committed the entity. Tests `test_create_node_writes_audit_entry`, `test_update_node_writes_audit_entry`, `test_delete_edge_writes_audit_entry`, and `test_one_audit_entry_per_graph_mutation` (no double-count, incl. via the Slice 09 undo-apply path).
 
 10. **[S]** **Reserved-seam documentation (no emission).** Add a module docstring + short comment block in `audit/service.py` documenting the two un-wired callers for downstream slices: Slice 16 calls `record(action=approval_granted|approval_rejected, self_approved=...)`; Slice 11+ calls `record(action=ai_call, ...)`. Do NOT import or depend on those (non-existent) features. Reference the Slice 09 audit seam (its `push_undo_entry`/`pop_undo_stack` chokepoints) and note that graph-edit emission in task 9 covers undo-applied writes.
@@ -379,3 +379,28 @@ code-reviewer and security-reviewer check the code against the decided design.
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-06-04T22:43:22Z — 0246cfc docs(slice-10): add slice spec, mark in-progress
 - 2026-06-04T22:43:51Z — 0246cfc docs(slice-10): add slice spec, mark in-progress
+
+### 2026-06-05 — implementation complete (all 16 tasks)
+
+All backend (1–12) + frontend (13–16) tasks implemented, committed per-task, full `make
+lint` green, backend 776 tests (audit feature 99% cov), frontend 419 tests (audit 87–100%
+cov), 4 real-Postgres integration tests pass (incl. concurrent no-fork). Migration
+upgrade/downgrade/upgrade verified on real Postgres; `make verify-audit` returns OK on the
+empty chain. Manual real-Postgres round-trip confirmed: clean chain verifies, rewriting
+`actor_user_id` is caught (content-tamper).
+
+**Resolved design decisions (override the spec defaults where noted):**
+1. record() runs in the **same transaction** as the action (atomic).
+2. **No FK** on `actor_user_id`/`engagement_id` — immutable, hashed, denormalized (the
+   user's `SET NULL` intent, reconciled to keep tamper-evidence of attribution).
+3. Tool runs: `tool_run` invocation on **both** paths (attributed) + `tool_run_completed`
+   on the **sync path only**; async/background completion **deferred** (ToolRun has no
+   attribution column; ~10 terminal sites in `_stream_to_channel`) — documented seam.
+4. Auth: `login` + `logout` + `login_failed` all audited.
+
+Graph: audited at the `_push_undo` chokepoint (all 5 ordinary mutators, one entry each)
+AND at `pop_undo_stack` for undo-applied inverses (mapped via `_UNDO_AUDIT_ACTION`) — no
+double-count (the inverse bypasses the mutators).
+
+**Remaining:** finish-slice (full gate + code-reviewer + **required security-reviewer** +
+PR). Not yet run.
