@@ -22,6 +22,10 @@ __all__ = [
     "ChatMessageRead",
     "ChatMessageStatus",
     "ChatRole",
+    "ChatTurnDebug",
+    "GraphSubsetEdge",
+    "GraphSubsetNode",
+    "GraphSubsetReason",
     "OllamaChatMessage",
     "SendChatMessageResult",
     "WebSocketChatChunk",
@@ -52,12 +56,42 @@ class ChatMessageStatus(StrEnum):
 
 
 class ChatMessageCreate(BaseModel):
-    """Request body for POST .../chat/messages."""
+    """Request body for POST .../chat/messages.
+
+    The three id lists carry the client-supplied arms of the §5.3 "relevant subset"
+    union: ``pinned_node_ids`` (the always-included pinned set, §5.4), ``recent_node_ids``
+    (the "last N touched in the conversation" approximation, most-recent-first), and
+    ``mentioned_node_ids`` (the @-mention arm, empty until Slice 31). They are *inputs* only
+    — the server re-resolves each id against the engagement's live graph (foreign/unknown
+    ids are ignored, §17.1) and runs the keyword arm itself, so the client can never inject
+    node content, only ids.
+    """
 
     content: str = Field(
         min_length=1,
         max_length=MAX_MESSAGE_CHARS,
         description="The user's message text, sent verbatim to the model (no redaction, §5.5).",
+    )
+    pinned_node_ids: list[UUID] = Field(
+        default_factory=list,
+        description=(
+            "Node ids the user has pinned (client-side pinStore, §5.4). Always-included "
+            "arm of the §5.3 union. Unknown/foreign ids are ignored server-side (§17.1)."
+        ),
+    )
+    recent_node_ids: list[UUID] = Field(
+        default_factory=list,
+        description=(
+            "Node ids recently interacted with this session, most-recent-first; the "
+            '"last N nodes touched in the conversation" arm (§5.3). Server truncates to N.'
+        ),
+    )
+    mentioned_node_ids: list[UUID] = Field(
+        default_factory=list,
+        description=(
+            "Node ids @-mentioned in recent messages (§5.3). Empty until the @-mention UI "
+            "(Slice 31); accepted now for forward-compatibility. Server truncates to K."
+        ),
     )
 
 
@@ -109,3 +143,65 @@ class OllamaChatMessage(BaseModel):
 
     role: Literal["system", "user", "assistant"]
     content: str
+
+
+# ---------------------------------------------------------------------------
+# AI debug panel (§14) — the per-turn "relevant subset" record (Slice 12)
+# ---------------------------------------------------------------------------
+
+
+class GraphSubsetReason(StrEnum):
+    """Why a node entered the §5.3 relevant subset. A node may carry several reasons."""
+
+    PINNED = "pinned"
+    RECENT = "recent"
+    MENTIONED = "mentioned"
+    KEYWORD = "keyword"
+
+
+class GraphSubsetNode(BaseModel):
+    """One graph node included in the per-turn subset, tagged with its inclusion reason(s).
+
+    Labels/properties are NOT carried here — only the rendered ``context_block`` (on
+    ``ChatTurnDebug``) holds the verbatim text sent to the model (§5.5). This row is the
+    grouping/affordance data the debug panel renders (id + type + label + reasons)."""
+
+    id: UUID
+    type: str
+    label: str
+    reasons: list[GraphSubsetReason] = Field(
+        description="Why this node was included (one node may have several reasons)."
+    )
+
+
+class GraphSubsetEdge(BaseModel):
+    """One edge between two selected nodes (only edges with both endpoints in the subset)."""
+
+    id: UUID
+    source_id: UUID
+    target_id: UUID
+    relation: str
+
+
+class ChatTurnDebug(BaseModel):
+    """The AI debug record for one assistant turn (§14): the exact relevant subset of the
+    graph injected, the raw prompt, and the model output.
+
+    Read by ``GET .../chat/messages/{message_id}/debug``. ``model_output`` is the assistant
+    row's ``content`` (empty while pending/failed). ``nodes``/``edges``/``context_block``/
+    ``raw_prompt`` are read back from the persisted ``graph_context`` JSONB; an assistant row
+    that completed before this slice (or an empty-graph turn) has an empty subset and an
+    empty ``context_block``."""
+
+    message_id: UUID
+    model: str | None
+    status: ChatMessageStatus
+    nodes: list[GraphSubsetNode]
+    edges: list[GraphSubsetEdge]
+    context_block: str = Field(
+        description="The exact graph-context text prepended to the system prompt this turn."
+    )
+    raw_prompt: str = Field(description='The full prompt sent to the model (§14 "raw prompts").')
+    model_output: str = Field(
+        description="The model's raw output for this turn (empty while pending/failed)."
+    )
