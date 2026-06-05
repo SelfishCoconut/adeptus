@@ -156,3 +156,17 @@ async def decide_request(
         return None
     fresh = await db.execute(select(ApprovalRequest).where(ApprovalRequest.id == request_id))
     return fresh.scalar_one()
+
+
+async def set_tool_run_id(db: AsyncSession, *, request_id: UUID, tool_run_id: UUID) -> None:
+    """Link an approved request to the run it spawned (set after the guarded claim).
+
+    Decoupled from :func:`decide_request` because the run id is only known after the
+    claim wins and the tool-run pipeline returns it; the link is a convenience pointer
+    (the audit log is the source of truth). The caller owns the commit.
+    """
+    await db.execute(
+        update(ApprovalRequest)
+        .where(ApprovalRequest.id == request_id)
+        .values(tool_run_id=tool_run_id)
+    )
