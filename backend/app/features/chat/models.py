@@ -13,8 +13,10 @@ in ``audit_entries`` (the §14 record), never on this row.
 """
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -23,7 +25,7 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func, text
 
@@ -33,6 +35,10 @@ from app.core.db import Base
 # and are guarded against drift by test_schemas.
 CHAT_ROLES: tuple[str, ...] = ("user", "assistant")
 CHAT_STATUSES: tuple[str, ...] = ("complete", "pending", "failed")
+
+# JSONB on Postgres; generic JSON on the SQLite test engine (same variant pattern as the
+# graph models' _PROPS_JSON) so the in-memory unit-test DDL renders.
+_GRAPH_CONTEXT_JSON = JSONB().with_variant(JSON(), "sqlite")
 
 _ROLE_CHECK_SQL = "role IN (" + ", ".join(f"'{r}'" for r in CHAT_ROLES) + ")"
 _STATUS_CHECK_SQL = "status IN (" + ", ".join(f"'{s}'" for s in CHAT_STATUSES) + ")"
@@ -87,6 +93,13 @@ class ChatMessage(Base):
     # not rendered in this slice.
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The per-turn AI debug record (§14, Slice 12): the resolved §5.3 relevant subset
+    # (nodes with inclusion reasons + edges), the rendered context_block, and the raw_prompt
+    # sent to the model. Set on an ASSISTANT row — first as transient client inputs at POST
+    # time, then overwritten with the canonical subset at finalize (Decision 4). NULL for
+    # user rows and for any assistant row completed before this slice. This is debug data on
+    # the turn that USED the graph — NOT a provenance column on a graph entity (§8.2).
+    graph_context: Mapped[dict[str, Any] | None] = mapped_column(_GRAPH_CONTEXT_JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

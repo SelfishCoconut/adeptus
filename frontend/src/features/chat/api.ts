@@ -1,6 +1,7 @@
 import {
   useInfiniteQuery,
   useMutation,
+  useQuery,
   useQueryClient,
   type InfiniteData,
 } from '@tanstack/react-query'
@@ -8,6 +9,7 @@ import {
   api,
   type ChatMessage,
   type ChatMessagePage,
+  type ChatTurnDebug,
   type SendChatMessageResult,
 } from '@/shared/api'
 
@@ -16,6 +18,20 @@ import {
 export const chatKeys = {
   all: ['chat'] as const,
   conversation: (engagementId: string) => ['chat', engagementId] as const,
+  debug: (engagementId: string, messageId: string | null) =>
+    ['chat', engagementId, 'debug', messageId] as const,
+}
+
+/**
+ * Input for {@link useSendChatMessage}. The three id lists are the client-supplied arms
+ * of the §5.3 "relevant subset" union (pinned / recently-touched / @-mentioned). They are
+ * optional so callers that don't yet track graph context send an empty union.
+ */
+export interface SendChatMessageInput {
+  content: string
+  pinnedNodeIds?: string[]
+  recentNodeIds?: string[]
+  mentionedNodeIds?: string[]
 }
 
 const PAGE_LIMIT = 50
@@ -89,19 +105,29 @@ export function useSendChatMessage(engagementId: string) {
   const queryClient = useQueryClient()
   const queryKey = chatKeys.conversation(engagementId)
 
-  return useMutation<SendChatMessageResult, Error, string, { previous?: InfiniteChatData }>({
-    mutationFn: async (content) => {
+  return useMutation<
+    SendChatMessageResult,
+    Error,
+    SendChatMessageInput,
+    { previous?: InfiniteChatData }
+  >({
+    mutationFn: async ({ content, pinnedNodeIds, recentNodeIds, mentionedNodeIds }) => {
       const { data, error } = await api.POST(
         '/api/v1/engagements/{engagement_id}/chat/messages',
         {
           params: { path: { engagement_id: engagementId } },
-          body: { content },
+          body: {
+            content,
+            pinned_node_ids: pinnedNodeIds ?? [],
+            recent_node_ids: recentNodeIds ?? [],
+            mentioned_node_ids: mentionedNodeIds ?? [],
+          },
         },
       )
       if (error || !data) throw new Error('Failed to send message')
       return data
     },
-    onMutate: async (content) => {
+    onMutate: async ({ content }) => {
       await queryClient.cancelQueries({ queryKey })
       const previous = queryClient.getQueryData<InfiniteChatData>(queryKey)
 
@@ -122,13 +148,38 @@ export function useSendChatMessage(engagementId: string) {
 
       return { previous }
     },
-    onError: (_err, _content, context) => {
+    onError: (_err, _input, context) => {
       if (context?.previous) {
         queryClient.setQueryData(queryKey, context.previous)
       }
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey })
+    },
+  })
+}
+
+/**
+ * Lazily load the AI debug record (§14) for one assistant turn: the exact §5.3 relevant
+ * subset of the graph injected, the raw prompt, and the model output. Disabled until a
+ * `messageId` is provided (the panel is opened), so chat history loads stay lean and the
+ * large prompt blob is only fetched on demand.
+ */
+export function useChatTurnDebug(engagementId: string, messageId: string | null) {
+  return useQuery<ChatTurnDebug>({
+    queryKey: chatKeys.debug(engagementId, messageId),
+    enabled: Boolean(engagementId) && Boolean(messageId),
+    queryFn: async () => {
+      const { data, error } = await api.GET(
+        '/api/v1/engagements/{engagement_id}/chat/messages/{message_id}/debug',
+        {
+          params: {
+            path: { engagement_id: engagementId, message_id: messageId as string },
+          },
+        },
+      )
+      if (error || !data) throw new Error('Failed to load AI debug record')
+      return data
     },
   })
 }

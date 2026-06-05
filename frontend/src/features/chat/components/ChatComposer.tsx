@@ -1,7 +1,8 @@
-import { useState, type KeyboardEvent } from 'react'
+import { useMemo, useState, type KeyboardEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import type { SendChatMessageResult } from '@/shared/api'
+import { usePinStore } from '@/features/graph/store/pinStore'
 import { useSendChatMessage } from '../api'
 
 interface ChatComposerProps {
@@ -24,18 +25,33 @@ export function ChatComposer({ engagementId, archived, isStreaming, onSent }: Ch
   const [content, setContent] = useState('')
   const sendMutation = useSendChatMessage(engagementId)
 
+  // Read the current pinned set (Slice-08 pinStore) at send time so it forms the §5.3
+  // "always-included" union arm (§5.4). Select the raw map and derive to keep a stable
+  // reference (a selector returning a fresh array would churn the store snapshot).
+  const pinnedByEngagement = usePinStore((s) => s.pinnedByEngagement)
+  const pinnedNodeIds = useMemo(
+    () => pinnedByEngagement[engagementId] ?? [],
+    [pinnedByEngagement, engagementId],
+  )
+
   const trimmed = content.trim()
   const disabled = archived || isStreaming || sendMutation.isPending
   const canSend = trimmed.length > 0 && !disabled
 
   const submit = () => {
     if (!canSend) return
-    sendMutation.mutate(trimmed, {
-      onSuccess: (result) => {
-        setContent('')
-        onSent(result)
+    // recent_node_ids = pinned ∪ last-selected (Decision 1). No node-selection surface is
+    // wired into the composer in this slice, so the union reduces to the pinned set; the
+    // server caps it to N and dedupes against the pinned arm.
+    sendMutation.mutate(
+      { content: trimmed, pinnedNodeIds, recentNodeIds: pinnedNodeIds },
+      {
+        onSuccess: (result) => {
+          setContent('')
+          onSent(result)
+        },
       },
-    })
+    )
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {

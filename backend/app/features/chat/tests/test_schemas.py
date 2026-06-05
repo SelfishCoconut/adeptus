@@ -1,5 +1,7 @@
 """Schema validation tests: content bounds, enum/DB-vocabulary parity."""
 
+from uuid import uuid4
+
 import pytest
 from pydantic import ValidationError
 
@@ -9,6 +11,10 @@ from app.features.chat.schemas import (
     ChatMessageCreate,
     ChatMessageStatus,
     ChatRole,
+    ChatTurnDebug,
+    GraphSubsetEdge,
+    GraphSubsetNode,
+    GraphSubsetReason,
 )
 
 
@@ -45,3 +51,63 @@ def test_content_passes_through_verbatim() -> None:
     even for sensitive-looking content (the model needs full context to be useful)."""
     raw = "  creds for box-7 are <not-redacted-here>\n\ttrailing-whitespace-kept  "
     assert ChatMessageCreate(content=raw).content == raw
+
+
+def test_node_id_lists_default_empty() -> None:
+    """The three §5.3 union id lists are optional and default to empty lists."""
+    body = ChatMessageCreate(content="hi")
+    assert body.pinned_node_ids == []
+    assert body.recent_node_ids == []
+    assert body.mentioned_node_ids == []
+
+
+def test_node_id_lists_accept_uuids() -> None:
+    """Each id list coerces well-formed UUID strings (the JSON wire form) into UUIDs."""
+    a, b = uuid4(), uuid4()
+    body = ChatMessageCreate.model_validate(
+        {
+            "content": "hi",
+            "pinned_node_ids": [str(a)],
+            "recent_node_ids": [str(b)],
+            "mentioned_node_ids": [str(a), str(b)],
+        }
+    )
+    assert body.pinned_node_ids == [a]
+    assert body.recent_node_ids == [b]
+    assert body.mentioned_node_ids == [a, b]
+
+
+def test_invalid_node_id_rejected() -> None:
+    """A malformed id in any union list is a validation error (server never trusts it)."""
+    with pytest.raises(ValidationError):
+        ChatMessageCreate.model_validate({"content": "hi", "pinned_node_ids": ["not-a-uuid"]})
+
+
+def test_subset_reason_enum_values() -> None:
+    """The inclusion-reason vocabulary matches the four §5.3 union arms."""
+    assert {r.value for r in GraphSubsetReason} == {"pinned", "recent", "mentioned", "keyword"}
+
+
+def test_chat_turn_debug_round_trips() -> None:
+    """ChatTurnDebug serializes and re-validates without loss (debug-panel contract)."""
+    node_id, src, tgt, edge_id, msg_id = (uuid4() for _ in range(5))
+    debug = ChatTurnDebug(
+        message_id=msg_id,
+        model="qwen3.5:9b",
+        status=ChatMessageStatus.COMPLETE,
+        nodes=[
+            GraphSubsetNode(
+                id=node_id,
+                type="endpoint",
+                label="/login",
+                reasons=[GraphSubsetReason.PINNED, GraphSubsetReason.KEYWORD],
+            )
+        ],
+        edges=[GraphSubsetEdge(id=edge_id, source_id=src, target_id=tgt, relation="hosts")],
+        context_block="## Graph context\n- endpoint /login",
+        raw_prompt="system...\nuser...",
+        model_output="Try default creds.",
+    )
+    again = ChatTurnDebug.model_validate(debug.model_dump())
+    assert again == debug
+    assert again.nodes[0].reasons == [GraphSubsetReason.PINNED, GraphSubsetReason.KEYWORD]

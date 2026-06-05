@@ -1,7 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ReactNode } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { ChatMessageList } from './ChatMessageList'
 import type { ChatMessage } from '@/shared/api'
+import { api } from '@/shared/api'
+
+vi.mock('@/shared/api', () => ({
+  api: { GET: vi.fn(), POST: vi.fn() },
+}))
+
+const mockGet = vi.mocked(api.GET)
 
 const ENGAGEMENT_ID = '00000000-0000-0000-0000-000000000001'
 
@@ -22,16 +32,23 @@ const msg = (
 beforeEach(() => {
   // jsdom does not implement scrollIntoView.
   Element.prototype.scrollIntoView = vi.fn()
+  mockGet.mockReset()
 })
 
 function renderList(props: Partial<Parameters<typeof ChatMessageList>[0]> = {}) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const Wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  )
   return render(
     <ChatMessageList
+      engagementId={props.engagementId ?? ENGAGEMENT_ID}
       messages={props.messages ?? []}
       streamingId={props.streamingId ?? null}
       streamingText={props.streamingText ?? ''}
       streamError={props.streamError ?? null}
     />,
+    { wrapper: Wrapper },
   )
 }
 
@@ -82,5 +99,44 @@ describe('ChatMessageList', () => {
       messages: [msg('u1', 'user', 'hi'), msg('a1', 'assistant', '', 'failed')],
     })
     expect(screen.getByRole('alert')).toHaveTextContent(/unreachable/i)
+  })
+
+  it('toggles the debug panel for the right assistant message', async () => {
+    mockGet.mockResolvedValue({
+      data: {
+        message_id: 'a1',
+        model: 'qwen3.5:9b',
+        status: 'complete',
+        nodes: [{ id: 'n1', type: 'host', label: '10.0.0.5', reasons: ['pinned'] }],
+        edges: [],
+        context_block: '## Relevant graph subset',
+        raw_prompt: '[system]\n...',
+        model_output: 'answer',
+      },
+      response: { status: 200 },
+    } as never)
+
+    const user = userEvent.setup()
+    renderList({ messages: [msg('a1', 'assistant', 'an answer')] })
+
+    // Panel is not mounted until the Debug toggle is clicked (lazy).
+    expect(screen.queryByLabelText('AI debug panel')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Debug' }))
+
+    expect(await screen.findByLabelText('AI debug panel')).toBeInTheDocument()
+    expect(mockGet).toHaveBeenCalledWith(
+      '/api/v1/engagements/{engagement_id}/chat/messages/{message_id}/debug',
+      expect.objectContaining({
+        params: { path: { engagement_id: ENGAGEMENT_ID, message_id: 'a1' } },
+      }),
+    )
+  })
+
+  it('does not offer a Debug toggle for a pending assistant turn', () => {
+    renderList({
+      messages: [msg('u1', 'user', 'hi'), msg('a1', 'assistant', '', 'pending')],
+    })
+    expect(screen.queryByRole('button', { name: 'Debug' })).not.toBeInTheDocument()
   })
 })

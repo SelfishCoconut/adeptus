@@ -153,7 +153,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §5.3 (graph access rules), §14 (debug panel)
 - **Depends on**: 08, 11
 - **Risky**: no
-- **Status**: todo
+- **Status**: done
 
 ### Slice 13: Visible plan + certainty signaling
 - **Goal**: AI's running plan visible to user; certainty % on claims and graph items

@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     ADEPTUS_OLLAMA_URL: str = "http://ollama:11434"
     ADEPTUS_LLM_MODEL: str = "qwen3.5:9b"
 
+    # Slice 12 — §5.3 "relevant subset" caps. The recent ("last N nodes touched in the
+    # conversation") and mentioned ("nodes @-mentioned in the last K messages") union arms
+    # are truncated to these. There is deliberately NO token budget (planning Decision 3):
+    # the assembled subset is sent to the model in full and verbatim.
+    ADEPTUS_GRAPH_CONTEXT_RECENT_LIMIT: int = 15
+    ADEPTUS_GRAPH_CONTEXT_MENTIONED_LIMIT: int = 10
+
     # DEV/TEST ONLY — ignored when ENVIRONMENT=production (see auth/service.py bootstrap_test_user)
     ADEPTUS_TEST_USER_USERNAME: str | None = None
     ADEPTUS_TEST_USER_PASSWORD: str | None = None

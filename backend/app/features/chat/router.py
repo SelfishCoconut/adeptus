@@ -31,6 +31,7 @@ from app.features.chat import service
 from app.features.chat.schemas import (
     ChatMessageCreate,
     ChatMessagePage,
+    ChatTurnDebug,
     SendChatMessageResult,
 )
 
@@ -87,9 +88,43 @@ async def send_chat_message(
         engagement_id=engagement_id,
         requester=current_user,
         content=body.content,
+        pinned_node_ids=body.pinned_node_ids,
+        recent_node_ids=body.recent_node_ids,
+        mentioned_node_ids=body.mentioned_node_ids,
     )
     await db.commit()
     return result
+
+
+@router.get(
+    "/api/v1/engagements/{engagement_id}/chat/messages/{message_id}/debug",
+    response_model=ChatTurnDebug,
+    operation_id="get_chat_turn_debug",
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {"description": "Not authenticated"},
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Message not found, not owned by caller, or not an assistant turn"
+        },
+    },
+)
+async def get_chat_turn_debug(
+    engagement_id: UUID,
+    message_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> ChatTurnDebug:
+    """Return the AI debug record (§14) for one of the caller's own assistant turns.
+
+    The exact §5.3 relevant subset of the graph injected, the raw prompt, and the model
+    output. Membership + ownership scoped: a non-member, non-owner, wrong-engagement, or
+    non-assistant message all return 404 (no existence disclosure, §17.1 / §5.4).
+    """
+    return await service.get_turn_debug(
+        db,
+        engagement_id=engagement_id,
+        requester=current_user,
+        message_id=message_id,
+    )
 
 
 @router.websocket("/ws/chat/{assistant_message_id}")

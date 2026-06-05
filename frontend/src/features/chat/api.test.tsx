@@ -2,7 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { chatKeys, flattenChatPages, useChatMessages, useSendChatMessage } from './api'
+import {
+  chatKeys,
+  flattenChatPages,
+  useChatMessages,
+  useChatTurnDebug,
+  useSendChatMessage,
+} from './api'
 import { api } from '@/shared/api'
 
 vi.mock('@/shared/api', () => ({
@@ -122,13 +128,52 @@ describe('useSendChatMessage', () => {
       wrapper: createWrapper(),
     })
 
-    const sent = await result.current.mutateAsync('hello')
+    const sent = await result.current.mutateAsync({ content: 'hello' })
     expect(sent.user_message.id).toBe('user-1')
     expect(sent.assistant_message.id).toBe('assistant-1')
     expect(sent.assistant_message.status).toBe('pending')
     expect(mockPost).toHaveBeenCalledWith(
       '/api/v1/engagements/{engagement_id}/chat/messages',
-      expect.objectContaining({ body: { content: 'hello' } }),
+      expect.objectContaining({
+        body: {
+          content: 'hello',
+          pinned_node_ids: [],
+          recent_node_ids: [],
+          mentioned_node_ids: [],
+        },
+      }),
+    )
+  })
+
+  it('forwards the §5.3 node-id union in the POST body', async () => {
+    resolveGet({ data: { items: [], next_cursor: null }, response: { status: 200 } })
+    resolvePost({
+      data: {
+        user_message: message('user-1', 'user', 'hello'),
+        assistant_message: { ...message('assistant-1', 'assistant', ''), status: 'pending' },
+      },
+      response: { status: 201 },
+    })
+
+    const { result } = renderHook(() => useSendChatMessage(ENGAGEMENT_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await result.current.mutateAsync({
+      content: 'hello',
+      pinnedNodeIds: ['node-a'],
+      recentNodeIds: ['node-a', 'node-b'],
+    })
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/v1/engagements/{engagement_id}/chat/messages',
+      expect.objectContaining({
+        body: {
+          content: 'hello',
+          pinned_node_ids: ['node-a'],
+          recent_node_ids: ['node-a', 'node-b'],
+          mentioned_node_ids: [],
+        },
+      }),
     )
   })
 
@@ -140,6 +185,57 @@ describe('useSendChatMessage', () => {
       wrapper: createWrapper(),
     })
 
-    await expect(result.current.mutateAsync('hello')).rejects.toBeInstanceOf(Error)
+    await expect(result.current.mutateAsync({ content: 'hello' })).rejects.toBeInstanceOf(Error)
+  })
+})
+
+describe('useChatTurnDebug', () => {
+  const MESSAGE_ID = 'assistant-1'
+
+  it('is disabled until a message id is provided', () => {
+    const { result } = renderHook(() => useChatTurnDebug(ENGAGEMENT_ID, null), {
+      wrapper: createWrapper(),
+    })
+    expect(result.current.fetchStatus).toBe('idle')
+    expect(mockGet).not.toHaveBeenCalled()
+  })
+
+  it('loads the debug record once enabled', async () => {
+    resolveGet({
+      data: {
+        message_id: MESSAGE_ID,
+        model: 'qwen3.5:9b',
+        status: 'complete',
+        nodes: [{ id: 'n1', type: 'host', label: 'box', reasons: ['pinned'] }],
+        edges: [],
+        context_block: '## Relevant graph subset',
+        raw_prompt: '[system]\n...',
+        model_output: 'answer',
+      },
+      response: { status: 200 },
+    })
+
+    const { result } = renderHook(() => useChatTurnDebug(ENGAGEMENT_ID, MESSAGE_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data?.nodes).toHaveLength(1)
+    expect(mockGet).toHaveBeenCalledWith(
+      '/api/v1/engagements/{engagement_id}/chat/messages/{message_id}/debug',
+      expect.objectContaining({
+        params: { path: { engagement_id: ENGAGEMENT_ID, message_id: MESSAGE_ID } },
+      }),
+    )
+  })
+
+  it('surfaces a 404 as an error', async () => {
+    resolveGet({ error: { detail: 'not found' }, response: { status: 404 } })
+
+    const { result } = renderHook(() => useChatTurnDebug(ENGAGEMENT_ID, MESSAGE_ID), {
+      wrapper: createWrapper(),
+    })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
   })
 })
