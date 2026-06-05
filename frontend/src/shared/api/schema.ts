@@ -821,6 +821,66 @@ export interface paths {
         patch: operations["update_persona"];
         trace?: never;
     };
+    "/api/v1/engagements/{engagement_id}/approvals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Approval Requests
+         * @description List the engagement's shared approval requests (§5.2). Membership required (404).
+         */
+        get: operations["list_approval_requests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/approvals/{request_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve Request
+         * @description Approve a pending dangerous command and hand it to the tool-run pipeline (§5.2).
+         */
+        post: operations["approve_request"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/approvals/{request_id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reject Request
+         * @description Reject a pending dangerous command; it is never executed (§5.2 symmetric).
+         */
+        post: operations["reject_request"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -830,6 +890,113 @@ export interface components {
             /** Username */
             username: string;
         };
+        /**
+         * ApprovalConflict
+         * @description 409 body distinguishing the two conflict cases on a decision endpoint.
+         *
+         *     ``already_decided`` — the request is already terminal (double-/concurrent-decision
+         *     guard); ``status`` carries its current terminal status. ``engagement_archived`` —
+         *     approve-and-run is blocked in an archived engagement (§4); ``status`` is omitted.
+         */
+        ApprovalConflict: {
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "already_decided" | "engagement_archived";
+            status?: components["schemas"]["ApprovalStatus"] | null;
+        };
+        /**
+         * ApprovalReason
+         * @description Why a command was gated (§5.2 dangerous categories) plus ``unclassified_manifest``.
+         *
+         *     ``TARGET_WRITE`` / ``AGGRESSIVE_SCAN`` / ``CREDENTIAL_ATTACK`` are the three §5.2
+         *     dangerous categories computed in this slice. ``UNCLASSIFIED_MANIFEST`` is the
+         *     fail-safe reason for a tool whose manifest carries no weight and no capability flags
+         *     (Resolved decision 2 escape hatch). ``OUT_OF_SCOPE`` is **reserved for Slice 17**
+         *     (soft scope enforcement) and is never produced in this slice.
+         * @enum {string}
+         */
+        ApprovalReason: "target_write" | "aggressive_scan" | "credential_attack" | "unclassified_manifest" | "out_of_scope";
+        /**
+         * ApprovalRequestPage
+         * @description A page of approval requests with an opaque cursor for the next (older) page.
+         */
+        ApprovalRequestPage: {
+            /** Items */
+            items: components["schemas"]["ApprovalRequestRead"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /**
+         * ApprovalRequestRead
+         * @description One approval request as exposed by the read/decision API.
+         *
+         *     ``acted_by_username`` is resolved at read time (not a DB column) and set as a
+         *     transient attribute on the ORM row by the service before ``model_validate``; it
+         *     defaults to ``None`` so pending rows (no decider yet) validate cleanly.
+         */
+        ApprovalRequestRead: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Engagement Id
+             * Format: uuid
+             */
+            engagement_id: string;
+            /**
+             * Chat Message Id
+             * Format: uuid
+             */
+            chat_message_id: string;
+            /**
+             * Initiator User Id
+             * Format: uuid
+             */
+            initiator_user_id: string;
+            /** Server Name */
+            server_name: string;
+            /** Tool Name */
+            tool_name: string;
+            /** Args */
+            args: {
+                [key: string]: unknown;
+            };
+            /** Preset Name */
+            preset_name?: string | null;
+            /** Rationale */
+            rationale?: string | null;
+            /** Reasons */
+            reasons: components["schemas"]["ApprovalReason"][];
+            status: components["schemas"]["ApprovalStatus"];
+            /** Acted By User Id */
+            acted_by_user_id?: string | null;
+            /** Acted By Username */
+            acted_by_username?: string | null;
+            /** Self Approved */
+            self_approved?: boolean | null;
+            /** Tool Run Id */
+            tool_run_id?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Decided At */
+            decided_at?: string | null;
+        };
+        /**
+         * ApprovalStatus
+         * @description Request lifecycle (§5.2). Mirrors ``models.APPROVAL_STATUSES`` exactly —
+         *     guarded by ``test_schemas.test_status_enum_matches_db_vocabulary`` so the enum and
+         *     the DB CHECK constraint can never silently drift. No expiry: approvals do not
+         *     time out — a request stays ``PENDING`` until a member acts.
+         * @enum {string}
+         */
+        ApprovalStatus: "pending" | "approved" | "rejected";
         /**
          * AuditAction
          * @description The audit action vocabulary (§14). Mirrors ``models.AUDIT_ACTIONS`` exactly —
@@ -993,6 +1160,11 @@ export interface components {
              * @description The persona's display name at turn time, denormalized onto the turn so a renamed/deleted persona still labels the historical turn (the in-chat persona chip). Null for user/pending/pre-slice rows.
              */
             persona_name?: string | null;
+            /**
+             * Approval Requests
+             * @description Approval requests this assistant turn created (§5.2, Slice 16). Empty for user/pending rows and turns that proposed no dangerous command; each renders an inline approval card so a reloaded conversation re-shows the cards + decisions.
+             */
+            approval_requests?: components["schemas"]["ApprovalRequestRead"][];
         };
         /**
          * ChatMessageStatus
@@ -3315,6 +3487,123 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_approval_requests: {
+        parameters: {
+            query?: {
+                status?: components["schemas"]["ApprovalStatus"] | null;
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRequestPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approve_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRequestRead"];
+                };
+            };
+            /** @description Either the request is already decided (reason=already_decided, with the terminal status), OR the engagement is archived (reason=engagement_archived, no new runs §4). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalConflict"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reject_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRequestRead"];
+                };
+            };
+            /** @description Either the request is already decided (reason=already_decided, with the terminal status), OR the engagement is archived (reason=engagement_archived, no new runs §4). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalConflict"];
+                };
             };
             /** @description Validation Error */
             422: {

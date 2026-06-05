@@ -496,3 +496,60 @@ class TestToolPresetsAndArgSchema:
 
         preset = get_registry()["httpx"].tools[0].presets[0]
         assert preset.args == {}
+
+
+# ---------------------------------------------------------------------------
+# Slice 16: approvals manifest-validation hook is invoked at load
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalsValidationHook:
+    def test_load_registry_invokes_validate_tool_manifests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from app.features.approvals import classifier
+
+        spy = MagicMock(return_value=[])
+        monkeypatch.setattr(classifier, "validate_tool_manifests", spy)
+
+        load_registry(config_path=_write(tmp_path, _VALID_YAML))
+
+        spy.assert_called_once()
+        # The hook passes (name, ToolConfig) pairs built from the manifest.
+        (passed_tools,) = spy.call_args.args
+        names = [name for name, _ in passed_tools]
+        assert "shell-exec/run_command" in names
+
+
+class TestFailClosedOnMissingWeight:
+    """C3 (Slice 16): the live safety layer — a tool with no weight cannot register.
+
+    The approvals classifier's unclassified_manifest escape hatch is defense-in-depth; the
+    AUTHORITATIVE live enforcement is config-load fail-closed: a tool that never declared a
+    weight raises ConfigError at startup, so it can never be proposed or run at all.
+    """
+
+    _NO_WEIGHT_YAML = textwrap.dedent(
+        """\
+        servers:
+          - name: mystery
+            command: python
+            args: [-m, mcp_servers.mystery]
+            tools:
+              - name: do_thing
+                capability_flags: [network]
+        """
+    )
+
+    def test_tool_missing_weight_fails_config_load(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError, match="weight"):
+            load_registry(config_path=_write(tmp_path, self._NO_WEIGHT_YAML))
+
+    def test_tool_with_invalid_weight_fails_config_load(self, tmp_path: Path) -> None:
+        bad = self._NO_WEIGHT_YAML.replace(
+            "capability_flags: [network]", "weight: medium\n                capability_flags: []"
+        )
+        with pytest.raises(ConfigError):
+            load_registry(config_path=_write(tmp_path, bad))

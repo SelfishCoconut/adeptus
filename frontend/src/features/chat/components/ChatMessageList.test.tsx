@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ChatMessageList } from './ChatMessageList'
-import type { ChatMessage } from '@/shared/api'
+import type { ApprovalRequest, ChatMessage } from '@/shared/api'
 import { api } from '@/shared/api'
 
 vi.mock('@/shared/api', () => ({
@@ -48,6 +48,8 @@ function renderList(props: Partial<Parameters<typeof ChatMessageList>[0]> = {}) 
       streamingText={props.streamingText ?? ''}
       streamError={props.streamError ?? null}
       streamingPlan={props.streamingPlan ?? []}
+      streamingApprovalRequests={props.streamingApprovalRequests}
+      streamingAutonomousActions={props.streamingAutonomousActions}
     />,
     { wrapper: Wrapper },
   )
@@ -214,5 +216,84 @@ describe('ChatMessageList', () => {
     expect(screen.getByTestId('plan-panel')).toBeInTheDocument()
     expect(screen.getByText('Test SQLi')).toBeInTheDocument()
     expect(screen.getByText('Working…')).toBeInTheDocument()
+  })
+})
+
+
+// --- Slice 16: inline approval / autonomous cards ---
+
+const approvalRequest = (overrides: Partial<ApprovalRequest> = {}): ApprovalRequest =>
+  ({
+    id: 'req-1',
+    engagement_id: ENGAGEMENT_ID,
+    chat_message_id: 'a1',
+    initiator_user_id: 'u1',
+    server_name: 'shell-exec',
+    tool_name: 'run',
+    args: { cmd: 'login-bruteforce' },
+    preset_name: null,
+    rationale: null,
+    reasons: ['credential_attack'],
+    status: 'pending',
+    acted_by_user_id: null,
+    acted_by_username: null,
+    self_approved: null,
+    tool_run_id: null,
+    created_at: '2026-06-05T00:00:00Z',
+    decided_at: null,
+    ...overrides,
+  }) as ApprovalRequest
+
+describe('ChatMessageList — approval cards (Slice 16)', () => {
+  it('renders a pending approval card from a finalized turn (reload)', () => {
+    const assistant = {
+      ...msg('a1', 'assistant', 'I will brute-force it.'),
+      approval_requests: [approvalRequest()],
+    } as ChatMessage
+    renderList({ messages: [assistant] })
+    expect(screen.getByText('needs approval')).toBeInTheDocument()
+    expect(screen.getByText('credential attack')).toBeInTheDocument()
+  })
+
+  it('renders a "Approved by @user" decided card after a refetch', () => {
+    const assistant = {
+      ...msg('a1', 'assistant', 'done'),
+      approval_requests: [
+        approvalRequest({ status: 'approved', acted_by_username: 'second', self_approved: false }),
+      ],
+    } as ChatMessage
+    renderList({ messages: [assistant] })
+    expect(screen.getByTestId('approval-decision')).toHaveTextContent('Approved by @second')
+  })
+
+  it('renders a gated card mid-stream from a proposed_action frame', () => {
+    const pending = msg('a1', 'assistant', '', 'pending')
+    renderList({
+      messages: [pending],
+      streamingId: 'a1',
+      streamingText: 'Proposing…',
+      streamingApprovalRequests: [approvalRequest()],
+    })
+    expect(screen.getByText('needs approval')).toBeInTheDocument()
+  })
+
+  it('renders the "running automatically" variant for an autonomous command mid-stream', () => {
+    const pending = msg('a1', 'assistant', '', 'pending')
+    renderList({
+      messages: [pending],
+      streamingId: 'a1',
+      streamingText: 'Running…',
+      streamingAutonomousActions: [
+        {
+          server_name: 'httpx-server',
+          tool_name: 'httpx',
+          args: { target: 'sandbox.test' },
+          preset_name: null,
+          rationale: 'recon',
+          tool_run_id: 'run-1',
+        },
+      ],
+    })
+    expect(screen.getByText('running automatically')).toBeInTheDocument()
   })
 })

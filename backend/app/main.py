@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.core.config import get_settings
 from app.core.db import get_sessionmaker
 from app.core.errors import register_error_handlers
+from app.features.approvals.router import router as approvals_router
 from app.features.audit.router import router as audit_router
 from app.features.auth import service as auth_service
 from app.features.auth.router import router as auth_router
@@ -140,6 +141,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_router)
     app.include_router(chat_router)
     app.include_router(personas_router)
+    app.include_router(approvals_router)
     return app
 
 

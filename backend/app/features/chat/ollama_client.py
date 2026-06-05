@@ -33,7 +33,9 @@ from dataclasses import dataclass
 import httpx
 
 from app.core.config import get_settings
+from app.features.chat import tool_calling
 from app.features.chat.schemas import OllamaChatMessage
+from app.features.chat.tool_calling import ProposedCalls, ProposedToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,7 @@ async def stream_chat(
     messages: Sequence[OllamaChatMessage],
     model: str | None = None,
     usage: OllamaUsage | None = None,
+    proposed: ProposedCalls | None = None,
 ) -> AsyncIterator[str]:
     """Stream an assistant reply from the local model token-by-token.
 
@@ -90,6 +93,9 @@ async def stream_chat(
         model: Ollama model name; defaults to ``ADEPTUS_LLM_MODEL`` (ADR-0004).
         usage: Optional holder populated with the final token counts when the stream
             completes (read it after iterating).
+        proposed: Optional ``ProposedCalls`` holder (Slice 16). When provided, the
+            ``propose_command`` tool is sent and any ``message.tool_calls`` frames are parsed
+            into it out-of-band (text tokens still stream unchanged); read after iterating.
 
     Yields:
         Incremental assistant text slices (may be empty strings, which are skipped).
@@ -99,11 +105,13 @@ async def stream_chat(
     """
     settings = get_settings()
     model_name = model or settings.ADEPTUS_LLM_MODEL
-    payload = {
+    payload: dict[str, object] = {
         "model": model_name,
         "messages": [m.model_dump() for m in messages],
         "stream": True,
     }
+    if proposed is not None:
+        payload["tools"] = tool_calling.ollama_tools()
 
     try:
         async with _build_async_client() as client:
@@ -122,9 +130,13 @@ async def stream_chat(
                         logger.warning("Skipping malformed Ollama NDJSON line: %r", line)
                         continue
 
-                    token = frame.get("message", {}).get("content", "")
+                    message = frame.get("message", {})
+                    token = message.get("content", "")
                     if token:
                         yield token
+
+                    if proposed is not None:
+                        _collect_tool_calls(message.get("tool_calls"), proposed)
 
                     if frame.get("done"):
                         if usage is not None:
@@ -135,3 +147,31 @@ async def stream_chat(
         # ConnectError / ReadError / timeouts all subclass httpx.HTTPError. Collapse to
         # the domain error with a stable message (the raw exception may leak host:port).
         raise LlmUnreachableError("Local model is unreachable") from exc
+
+
+def _collect_tool_calls(raw: object, proposed: ProposedCalls) -> None:
+    """Append any ``message.tool_calls`` from one Ollama frame into the holder (Slice 16).
+
+    Each entry is ``{"function": {"name": ..., "arguments": {...}}}``; Ollama gives the
+    arguments as an already-parsed object, but a string-encoded form is tolerated too.
+    """
+    if not isinstance(raw, list):
+        return
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        function = entry.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str):
+            continue
+        arguments = function.get("arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        proposed.calls.append(ProposedToolCall(name=name, arguments=arguments))

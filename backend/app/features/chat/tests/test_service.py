@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime
 import json
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Literal, cast
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -21,6 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.core.errors import ConflictError, NotFoundError
+from app.features.approvals.schemas import (
+    ApprovalReason,
+    ApprovalRequestRead,
+    ApprovalStatus,
+    ProposedAction,
+)
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
 from app.features.chat import plan_parser, service
@@ -81,6 +87,7 @@ def _fake_stream(
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         for tok in tokens:
             yield tok
@@ -97,6 +104,7 @@ def _fake_unreachable() -> FakeStream:
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         if False:  # pragma: no cover — make this a generator that raises on first step
             yield ""
@@ -111,6 +119,7 @@ def _capture_prompt(captured: list[Sequence[OllamaChatMessage]], tokens: list[st
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         captured.append(messages)
         for tok in tokens:
@@ -499,6 +508,7 @@ async def test_stream_replays_completed_message(
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         raise AssertionError("Ollama must not be called on replay")
 
@@ -1090,6 +1100,7 @@ async def test_replay_complete_turn_returns_stored_plan(
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         raise AssertionError("Ollama must not be called on replay")
 
@@ -1295,6 +1306,7 @@ def _boom_stream() -> FakeStream:
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         raise AssertionError("this backend must not be called")
         yield ""  # pragma: no cover — makes _gen a generator
@@ -1779,3 +1791,251 @@ async def test_persona_prompt_not_redacted(
     _ = [c async for c in service.stream_assistant_reply(message=message)]
 
     assert secret_prompt in captured[0][0].content
+
+
+# ---------------------------------------------------------------------------
+# Slice 16: AI-proposed action routing (native tool-calls → classify/gate/run)
+# ---------------------------------------------------------------------------
+
+
+def _akw(mock: AsyncMock) -> dict[str, object]:
+    """Guarded kwargs of a mock's awaited call (keeps mypy happy on await_args)."""
+    assert mock.await_args is not None
+    return dict(mock.await_args.kwargs)
+
+
+def _fake_stream_with_tool_call(
+    tokens: list[str],
+    *,
+    server: str = "shell-exec",
+    tool: str = "run",
+    args: Mapping[str, object] | None = None,
+) -> FakeStream:
+    """A fake stream that yields prose AND populates the native tool-call holder."""
+    from app.features.chat.tool_calling import ProposedCalls, ProposedToolCall
+
+    async def _gen(
+        *,
+        messages: Sequence[OllamaChatMessage],
+        model: str | None = None,
+        usage: OllamaUsage | None = None,
+        proposed: object = None,
+    ) -> AsyncIterator[str]:
+        for tok in tokens:
+            yield tok
+        if isinstance(proposed, ProposedCalls):
+            proposed.calls.append(
+                ProposedToolCall(
+                    name="propose_command",
+                    arguments={
+                        "server": server,
+                        "tool": tool,
+                        "args": args if args is not None else {"cmd": "id"},
+                    },
+                )
+            )
+
+    return _gen
+
+
+def _mock_classify(
+    service_module: object,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    autonomous: list[ProposedAction] | None = None,
+    gated: list[ApprovalRequestRead] | None = None,
+) -> AsyncMock:
+    from app.features.approvals.service import ClassifiedTurnResult
+
+    mock = AsyncMock(
+        return_value=ClassifiedTurnResult(autonomous=autonomous or [], gated=gated or [])
+    )
+    monkeypatch.setattr(service.approvals_service, "create_requests_for_turn", mock)
+    return mock
+
+
+def _approval_read(server: str = "shell-exec") -> ApprovalRequestRead:
+    return ApprovalRequestRead(
+        id=uuid4(),
+        engagement_id=uuid4(),
+        chat_message_id=uuid4(),
+        initiator_user_id=uuid4(),
+        server_name=server,
+        tool_name="run",
+        args={"cmd": "hydra"},
+        reasons=[ApprovalReason.CREDENTIAL_ATTACK],
+        status=ApprovalStatus.PENDING,
+        created_at=datetime.datetime(2026, 6, 5, tzinfo=datetime.UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_parses_native_tool_calls(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        service.ollama_client,
+        "stream_chat",
+        _fake_stream_with_tool_call(["Running "], server="httpx-server", tool="httpx"),
+    )
+    classify = _mock_classify(service, monkeypatch)
+    message = await _seed_pending(db_factory)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    classify.assert_awaited_once()
+    actions = cast("list[ProposedAction]", _akw(classify)["actions"])
+    assert len(actions) == 1
+    assert actions[0].server_name == "httpx-server"
+    assert actions[0].tool_name == "httpx"
+
+
+@pytest.mark.asyncio
+async def test_no_tool_call_degrades_cleanly(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["just prose"]))
+    classify = _mock_classify(service, monkeypatch)
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert [c.type for c in chunks] == ["token", "done"]
+    assert _akw(classify)["actions"] == []
+    assert chunks[-1].approval_requests == []
+
+
+@pytest.mark.asyncio
+async def test_gated_action_emits_proposed_action_frame(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream_with_tool_call(["x"]))
+    gated = [_approval_read()]
+    _mock_classify(service, monkeypatch, gated=gated)
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    proposed_frames = [c for c in chunks if c.type == "proposed_action"]
+    assert len(proposed_frames) == 1
+    assert proposed_frames[0].approval_request is not None
+    assert proposed_frames[0].approval_request.reasons[0].value == "credential_attack"
+
+
+@pytest.mark.asyncio
+async def test_done_frame_repeats_approval_requests(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream_with_tool_call(["x"]))
+    gated = [_approval_read()]
+    _mock_classify(service, monkeypatch, gated=gated)
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    done = chunks[-1]
+    assert done.type == "done"
+    assert done.approval_requests is not None
+    assert len(done.approval_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_autonomous_action_runs_immediately_and_emits_frame(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.features.approvals.schemas import ProposedAction
+
+    monkeypatch.setattr(
+        service.ollama_client,
+        "stream_chat",
+        _fake_stream_with_tool_call(["x"], server="httpx-server", tool="httpx"),
+    )
+    autonomous = [
+        ProposedAction(
+            server_name="httpx-server",
+            tool_name="httpx",
+            args={"target": "10.0.0.5"},
+            rationale="recon",
+        )
+    ]
+    _mock_classify(service, monkeypatch, autonomous=autonomous)
+    run_id = uuid4()
+    exec_mock = AsyncMock(return_value=SimpleNamespace(tool_run_id=run_id))
+    monkeypatch.setattr(service.mcp_service, "execute_tool_run", exec_mock)
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    exec_mock.assert_awaited_once()
+    # The run is attributed to the initiator (turn owner — Resolved decision 3).
+    assert _akw(exec_mock)["user_id"] == cast(UUID, message.user_id)
+    auto_frames = [c for c in chunks if c.type == "proposed_action" and c.autonomous_action]
+    assert len(auto_frames) == 1
+    card = auto_frames[0].autonomous_action
+    assert card is not None and card.tool_run_id == run_id
+
+
+@pytest.mark.asyncio
+async def test_action_args_not_redacted(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = {"cmd": "hydra -l admin -p Sup3rSecret! ssh://10.0.0.5"}
+    monkeypatch.setattr(
+        service.ollama_client,
+        "stream_chat",
+        _fake_stream_with_tool_call(["x"], args=secret),
+    )
+    classify = _mock_classify(service, monkeypatch)
+    message = await _seed_pending(db_factory)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    sent_actions = cast("list[ProposedAction]", _akw(classify)["actions"])
+    assert sent_actions[0].args == secret  # verbatim (§5.5)
+
+
+@pytest.mark.asyncio
+async def test_list_messages_includes_approval_requests(
+    db_session: AsyncSession,
+) -> None:
+    from app.features.approvals import repository as approvals_repo
+
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id))
+    _, assistant = await chat_repo.insert_user_and_pending_assistant(
+        db_session, engagement_id=eng_id, user_id=cast(UUID, user.id), content="hi"
+    )
+    await db_session.commit()
+    await approvals_repo.create_request(
+        db_session,
+        engagement_id=eng_id,
+        chat_message_id=cast(UUID, assistant.id),
+        initiator_user_id=cast(UUID, user.id),
+        server_name="shell-exec",
+        tool_name="run",
+        args={"cmd": "hydra"},
+        reasons=["credential_attack"],
+    )
+    await db_session.commit()
+
+    page = await service.list_messages(
+        db_session, engagement_id=eng_id, requester=user, cursor=None, limit=50
+    )
+    assistant_reads = [m for m in page.items if m.role == "assistant"]
+    assert len(assistant_reads) == 1
+    assert len(assistant_reads[0].approval_requests) == 1
+    assert assistant_reads[0].approval_requests[0].server_name == "shell-exec"

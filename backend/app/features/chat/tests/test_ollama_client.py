@@ -147,3 +147,61 @@ async def test_explicit_model_overrides_default(monkeypatch: pytest.MonkeyPatch)
 
     sent = json.loads(captured[0].content)
     assert sent["model"] == "llama3:8b"
+
+
+# ---------------------------------------------------------------------------
+# Slice 16: native tool-calling surfacing (propose_command)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_native_tool_call_populates_proposed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.features.chat.tool_calling import ProposedCalls
+
+    tool_call = {
+        "function": {
+            "name": "propose_command",
+            "arguments": {"server": "shell-exec", "tool": "run", "args": {"cmd": "id"}},
+        }
+    }
+    body = _ndjson(
+        _frame("Running "),
+        {"message": {"role": "assistant", "content": "", "tool_calls": [tool_call]}, "done": False},
+        _frame("", done=True),
+    )
+    captured = _patch_transport(monkeypatch, lambda req: httpx.Response(200, content=body))
+
+    proposed = ProposedCalls()
+    tokens = [
+        tok
+        async for tok in stream_chat(
+            messages=[OllamaChatMessage(role="user", content="hi")], proposed=proposed
+        )
+    ]
+    assert tokens == ["Running "]
+    assert len(proposed.calls) == 1
+    assert proposed.calls[0].name == "propose_command"
+    assert proposed.calls[0].arguments["server"] == "shell-exec"
+    # The tools array was sent in the request.
+    sent = json.loads(captured[0].content)
+    assert sent["tools"][0]["function"]["name"] == "propose_command"
+
+
+@pytest.mark.asyncio
+async def test_text_only_stream_leaves_proposed_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.features.chat.tool_calling import ProposedCalls
+
+    body = _ndjson(_frame("just prose"), _frame("", done=True))
+    _patch_transport(monkeypatch, lambda req: httpx.Response(200, content=body))
+
+    proposed = ProposedCalls()
+    await _collect([OllamaChatMessage(role="user", content="hi")], proposed=proposed)
+    assert proposed.calls == []
+
+
+@pytest.mark.asyncio
+async def test_no_tools_sent_when_proposed_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = _ndjson(_frame("hi"), _frame("", done=True))
+    captured = _patch_transport(monkeypatch, lambda req: httpx.Response(200, content=body))
+    await _collect([OllamaChatMessage(role="user", content="hi")])
+    assert "tools" not in json.loads(captured[0].content)

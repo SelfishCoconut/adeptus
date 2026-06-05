@@ -130,6 +130,31 @@ def load_registry(config_path: str | None = None) -> None:
         raise ConfigError(f"Malformed YAML in MCP config {resolved_path!r}: {exc}") from exc
 
     _registry = _parse_config(data, resolved_path)
+    _validate_manifests_for_approvals(_registry)
+
+
+def _validate_manifests_for_approvals(registry: dict[str, McpServerConfig]) -> None:
+    """Slice 16 hook: flag tools with no manifest classification at load time.
+
+    The two-tier classifier treats a tool with no present weight as dangerous via the
+    ``unclassified_manifest`` escape hatch (Resolved decision 2); this surfaces such a
+    mis-manifested tool as a loud startup warning so the admin can fix the server
+    manifest. Imported locally to avoid coupling the mcp registry to the approvals
+    feature at module-load time.
+    """
+    from app.features.approvals import classifier
+
+    tools = [
+        (
+            f"{server.name}/{tool.name}",
+            classifier.ToolConfig(
+                weight=tool.weight, capability_flags=tuple(tool.capability_flags)
+            ),
+        )
+        for server in registry.values()
+        for tool in server.tools
+    ]
+    classifier.validate_tool_manifests(tools)
 
 
 def get_registry() -> dict[str, McpServerConfig]:

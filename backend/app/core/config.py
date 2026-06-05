@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     ADEPTUS_ANTHROPIC_MODEL: str = "claude-sonnet-4-6"
     ADEPTUS_ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"
 
+    # Slice 16 — how the AI proposes a command (§5.2 / Resolved decision 1).
+    # ``native``   — send the propose_command tool and read native tool-calls.
+    # ``fallback`` — append an action-proposal instruction and parse a tolerant
+    #                <adeptus-meta> ``actions`` block from the streamed text (for a backend
+    #                with weak/no native tool-calling). Both paths normalize to the same
+    #                ProposedAction list. ``auto`` (default) currently behaves as ``native``
+    #                (per-backend capability probing is a future refinement).
+    ADEPTUS_TOOLCALL_MODE: str = "auto"
+
     # Slice 12 — §5.3 "relevant subset" caps. The recent ("last N nodes touched in the
     # conversation") and mentioned ("nodes @-mentioned in the last K messages") union arms
     # are truncated to these. There is deliberately NO token budget (planning Decision 3):

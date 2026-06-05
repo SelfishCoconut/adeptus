@@ -47,7 +47,15 @@ describe('useChatStream', () => {
   it('does not open a socket when the id is null', () => {
     const { result } = renderHook(() => useChatStream(null))
     expect(FakeWebSocket.instances).toHaveLength(0)
-    expect(result.current).toEqual({ text: '', isDone: false, error: null, plan: [], claims: [] })
+    expect(result.current).toEqual({
+      text: '',
+      isDone: false,
+      error: null,
+      plan: [],
+      claims: [],
+      approvalRequests: [],
+      autonomousActions: [],
+    })
   })
 
   it('opens a ws:// socket targeting the message id', () => {
