@@ -946,3 +946,55 @@ async def test_cloud_without_key_marks_failed_no_fallback(
     assert len(rows) == 1
     assert rows[0].payload["status"] == "failed"
     assert rows[0].payload["backend"] == "cloud"
+
+
+async def test_cloud_flip_after_local_post_rescans_and_refuses_secret(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TOCTOU guard (Risk 1) end-to-end: a secret POSTed under local_only then streamed after a
+    flip to cloud_enabled is re-scanned at the egress point and refused — the turn fails, neither
+    client is iterated, and the ai_call honestly records the flagged cloud failure."""
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _boom_stream())
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom_stream())
+
+    user = await _seed_user(pg_factory, "owner")
+    user_id = cast(uuid.UUID, user.id)
+    eng_id = await _seed_engagement(pg_factory, user_id)  # local_only — no friction at POST
+
+    async with pg_factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=user, content=_SECRET
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+
+    # Owner flips the engagement to cloud_enabled AFTER the secret was persisted.
+    async with pg_factory() as db:
+        member = await eng_repo.get_engagement_for_member(db, eng_id, user_id)
+        assert member is not None
+        member[0].privacy_mode = "cloud_enabled"
+        await db.commit()
+
+    async with pg_factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=user_id
+        )
+    assert message is not None
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+    assert [c.type for c in chunks] == ["error"]
+    assert chunks[0].message == service.EGRESS_UNCONFIRMED_MESSAGE
+
+    async with pg_factory() as db:
+        row = await chat_repo.get_message_for_owner(db, message_id=assistant_id, user_id=user_id)
+        assert row is not None
+        assert row.status == "failed"
+
+    rows = await _ai_call_rows(pg_factory, user_id)
+    assert len(rows) == 1
+    assert rows[0].payload["status"] == "failed"
+    assert rows[0].payload["backend"] == "cloud"
+    assert rows[0].payload["egress_secret_flagged"] is True
+    assert rows[0].payload["egress_confirmed"] is False
+    assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(rows[0].payload)  # gitleaks:allow

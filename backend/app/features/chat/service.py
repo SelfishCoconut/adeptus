@@ -102,6 +102,14 @@ UNREACHABLE_MESSAGE = "AI is unreachable — local model is offline"
 # than silently using local (no auto-fallback). Same shape as UNREACHABLE_MESSAGE.
 CLOUD_NOT_CONFIGURED_MESSAGE = "Cloud LLM is not configured for this engagement"
 
+# Slice 14 (§5.1 / Risk 1): a turn whose content matches a secret pattern reaches the cloud
+# egress point WITHOUT a per-send confirmation (e.g. it was POSTed under local_only and the
+# engagement was flipped to cloud_enabled before streaming). The turn fails — the message is
+# never sent — and the user re-sends to get the friction modal. Stable, non-leaky.
+EGRESS_UNCONFIRMED_MESSAGE = (
+    "This message may contain a secret and was not confirmed for cloud egress — re-send to confirm"
+)
+
 
 class EngagementArchivedError(ConflictError):
     """Raised when a new chat message targets an archived engagement (§4 read-only).
@@ -466,6 +474,30 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
         window = await chat_repo.recent_messages(
             session, engagement_id=engagement_id, user_id=user_id, limit=RECENT_WINDOW
         )
+
+        # Authoritative egress re-check at the ACTUAL egress point (Risk 1 / TOCTOU). The POST
+        # gate scanned under the POST-time privacy mode, but the backend is chosen here from the
+        # *live* mode — a flip from local_only → cloud_enabled between the POST and this stream
+        # would otherwise send a never-scanned secret to the cloud with no friction. So on the
+        # cloud branch we re-scan the triggering user message and refuse an unconfirmed match
+        # before any token leaves the machine (§5.1 / §17.5); a turn confirmed at the POST
+        # (stash ``confirmed``) is allowed through. Never falls back to local (§5.1).
+        if backend == "cloud":
+            rescan = egress_scan.category_names(_triggering_user_text(window))
+            if rescan and not egress["confirmed"]:
+                egress = {"secret_flagged": True, "confirmed": False, "match_categories": rescan}
+                await _finalize_failed(
+                    session,
+                    message_id=message_id,
+                    actor_user_id=user_id,
+                    engagement_id=engagement_id,
+                    model_name=model_name,
+                    prompt_count=0,
+                    backend="cloud",
+                    egress=egress,
+                )
+                yield WebSocketChatChunk(type="error", message=EGRESS_UNCONFIRMED_MESSAGE)
+                return
 
         # Build the §5.3 relevant subset from the POST-time stash + the live graph, and
         # prepend it to the system prompt (Slice 12). On an empty graph / empty subset the

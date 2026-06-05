@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime
 import json
 from collections.abc import AsyncIterator, Callable, Sequence
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
@@ -1450,3 +1450,86 @@ async def test_cloud_path_does_not_redact_content(
     # The secret-bearing user turn reaches the cloud client byte-for-byte (never redacted).
     user_turns = [m.content for m in captured[0] if m.role == "user"]
     assert any(_CLOUD_SECRET in c for c in user_turns)
+
+
+async def _set_privacy_mode(
+    factory: async_sessionmaker[AsyncSession],
+    engagement_id: UUID,
+    user_id: UUID,
+    mode: Literal["local_only", "cloud_enabled"],
+) -> None:
+    """Flip an engagement's privacy mode mid-flight (mimics the owner PATCH, Slice 02)."""
+    async with factory() as s:
+        member = await eng_repo.get_engagement_for_member(s, engagement_id, user_id)
+        assert member is not None
+        member[0].privacy_mode = mode
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_stream_cloud_flip_rescans_and_refuses_unconfirmed_secret(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TOCTOU guard (Risk 1): a secret POSTed under local_only then streamed after a flip to
+    cloud_enabled is re-scanned at the egress point and refused — it never reaches the cloud,
+    and the audit honestly records the flagged failure."""
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _boom_stream())
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom_stream())
+
+    async with db_factory() as s:
+        owner = await _seed_user(s, f"owner-{uuid4().hex[:8]}")
+        owner_id = cast(UUID, owner.id)
+        eng_id = await _seed_engagement(s, owner_id)  # local_only — no friction at POST
+        result = await service.send_message(
+            s, engagement_id=eng_id, requester=owner, content=_CLOUD_SECRET
+        )
+        await s.commit()
+        assistant_id = result.assistant_message.id
+
+    # Owner flips the engagement to cloud_enabled AFTER the secret was persisted.
+    await _set_privacy_mode(db_factory, eng_id, owner_id, "cloud_enabled")
+
+    async with db_factory() as s:
+        assistant = await chat_repo.get_message_for_owner(
+            s, message_id=assistant_id, user_id=owner_id
+        )
+    assert assistant is not None
+    chunks = [c async for c in service.stream_assistant_reply(message=assistant)]
+
+    # Refused before any token left the machine; neither client was iterated (_boom_stream).
+    assert [c.type for c in chunks] == ["error"]
+    assert chunks[0].message == service.EGRESS_UNCONFIRMED_MESSAGE
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(s, message_id=assistant_id, user_id=owner_id)
+    assert row is not None
+    assert row.status == "failed"
+
+    # The audit honestly records the flagged, unconfirmed cloud refusal (category NAMES only).
+    mock_audit_record.assert_awaited_once()
+    payload = mock_audit_record.await_args.kwargs["payload"]  # type: ignore[union-attr]
+    assert payload["status"] == "failed"
+    assert payload["backend"] == "cloud"
+    assert payload["egress_secret_flagged"] is True
+    assert payload["egress_confirmed"] is False
+    assert "aws_access_key" in payload["egress_match_categories"]
+    assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(payload)  # gitleaks:allow
+
+
+@pytest.mark.asyncio
+async def test_stream_cloud_flip_allows_confirmed_secret(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret CONFIRMED at the POST (cloud_enabled) still streams after the re-scan — the
+    re-check refuses only UNCONFIRMED matches, so confirmed sends are not double-gated."""
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _fake_stream(["ok"]))
+    message = await _seed_cloud_pending(db_factory, content=_CLOUD_SECRET, confirmed_egress=True)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+    assert chunks[-1].type == "done"
