@@ -24,6 +24,8 @@ __all__ = [
     "ChatRole",
     "ChatTurnDebug",
     "Claim",
+    "EgressConfirmationRequired",
+    "EgressRefusalReason",
     "GraphSubsetEdge",
     "GraphSubsetNode",
     "GraphSubsetReason",
@@ -145,6 +147,44 @@ class ChatMessageCreate(BaseModel):
         description=(
             "Node ids @-mentioned in recent messages (§5.3). Empty until the @-mention UI "
             "(Slice 31); accepted now for forward-compatibility. Server truncates to K."
+        ),
+    )
+    confirmed_egress: bool = Field(
+        default=False,
+        description=(
+            "The user has seen the cloud egress-friction modal for THIS content and chose to "
+            "send it unmodified anyway (§5.1, Slice 14). Consulted only when the engagement is "
+            "cloud_enabled and the content matched a secret pattern; ignored otherwise. Never "
+            "suppresses the audit record (a confirmed send is audited as confirmed)."
+        ),
+    )
+
+
+class EgressRefusalReason(StrEnum):
+    """Why a POST .../chat/messages was refused with 409 (Slice 14).
+
+    The single POST 409 covers two cases with a distinguishable body: a cloud-enabled send
+    that matched a likely-secret pattern without confirmation (§5.1 pattern-friction), and an
+    archived engagement (§4 read-only). The reason lets the client tell them apart."""
+
+    EGRESS_SECRET_FLAGGED = "egress_secret_flagged"
+    ENGAGEMENT_ARCHIVED = "engagement_archived"
+
+
+class EgressConfirmationRequired(BaseModel):
+    """Body of the POST .../chat/messages 409 (Slice 14, §5.1).
+
+    ``matched_categories`` are pattern category NAMES only (e.g. ``"aws_access_key"``) — NEVER
+    the matched secret value (§5.5 / Risk 7) — for the friction modal's copy. Empty for the
+    ``engagement_archived`` reason. A client re-sends with ``confirmed_egress=true`` to proceed
+    past the friction case."""
+
+    reason: EgressRefusalReason = Field(description="Why the POST was refused with 409.")
+    matched_categories: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of the secret-pattern categories the content matched (§5.1). Empty for the "
+            "archived reason. NEVER contains the matched value (§5.5) — only the category name."
         ),
     )
 
