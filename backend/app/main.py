@@ -24,6 +24,8 @@ from app.features.mcp import repository as mcp_repo
 from app.features.mcp import subprocess_manager
 from app.features.mcp.registry import ConfigError, load_registry
 from app.features.mcp.router import router as mcp_router
+from app.features.personas import service as personas_service
+from app.features.personas.router import router as personas_router
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.exception("Failed to bootstrap admin user")
             # Don't crash the app — bad hash is a config problem, not a fatal startup error.
             # The admin simply won't be able to log in until the env var is fixed.
+
+        # Seed the four global built-in personas idempotently (Slice 15, Decision 5),
+        # mirroring the admin bootstrap: safe on every boot (upsert by slug), non-fatal on
+        # error (a bad seed must not crash the app; personas simply won't be present until
+        # the next successful boot).
+        try:
+            seeded = await personas_service.bootstrap_system_personas(db)
+            await db.commit()
+            logger.info("Seeded %d built-in persona(s)", seeded)
+        except Exception:
+            logger.exception("Failed to bootstrap system personas")
 
         # DEV/TEST ONLY — never runs when ENVIRONMENT=production
         if settings.ENVIRONMENT in ("development", "test"):
@@ -126,6 +139,7 @@ def create_app() -> FastAPI:
     app.include_router(graph_router)
     app.include_router(audit_router)
     app.include_router(chat_router)
+    app.include_router(personas_router)
     return app
 
 
