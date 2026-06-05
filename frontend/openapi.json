@@ -1670,7 +1670,7 @@
           "chat"
         ],
         "summary": "Send Chat Message",
-        "description": "Persist a user message and an empty pending assistant message, then return both.\n\nStream the assistant reply over ``WS /ws/chat/{assistant_message_id}``. Requires\nmembership (404); an archived engagement is read-only (409, \u00a74).",
+        "description": "Persist a user message and an empty pending assistant message, then return both.\n\nStream the assistant reply over ``WS /ws/chat/{assistant_message_id}``. Requires\nmembership (404). The two 409 cases are translated inline to the EgressConfirmationRequired\nbody (Slice 14): an archived engagement (\u00a74) \u2192 ``engagement_archived``; a cloud-enabled\nsecret-matching send without ``confirmed_egress`` \u2192 ``egress_secret_flagged`` with the\nmatched category NAMES (never the secret value, \u00a75.5).",
         "operationId": "send_chat_message",
         "parameters": [
           {
@@ -1701,6 +1701,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SendChatMessageResult"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Either the engagement is archived (read-only, \u00a74), OR the engagement is cloud-enabled and the message matched a likely-secret pattern but was not confirmed (\u00a75.1 pattern-friction). The body's reason distinguishes the two; clients re-send with confirmed_egress=true to proceed past the friction case.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EgressConfirmationRequired"
                 }
               }
             }
@@ -1986,6 +1996,12 @@
             "type": "array",
             "title": "Mentioned Node Ids",
             "description": "Node ids @-mentioned in recent messages (\u00a75.3). Empty until the @-mention UI (Slice 31); accepted now for forward-compatibility. Server truncates to K."
+          },
+          "confirmed_egress": {
+            "type": "boolean",
+            "title": "Confirmed Egress",
+            "description": "The user has seen the cloud egress-friction modal for THIS content and chose to send it unmodified anyway (\u00a75.1, Slice 14). Consulted only when the engagement is cloud_enabled and the content matched a secret pattern; ignored otherwise. Never suppresses the audit record (a confirmed send is audited as confirmed).",
+            "default": false
           }
         },
         "type": "object",
@@ -2317,6 +2333,37 @@
         ],
         "title": "EdgeCreate",
         "description": "Request body for POST .../graph/edges."
+      },
+      "EgressConfirmationRequired": {
+        "properties": {
+          "reason": {
+            "$ref": "#/components/schemas/EgressRefusalReason",
+            "description": "Why the POST was refused with 409."
+          },
+          "matched_categories": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Matched Categories",
+            "description": "Names of the secret-pattern categories the content matched (\u00a75.1). Empty for the archived reason. NEVER contains the matched value (\u00a75.5) \u2014 only the category name."
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "EgressConfirmationRequired",
+        "description": "Body of the POST .../chat/messages 409 (Slice 14, \u00a75.1).\n\n``matched_categories`` are pattern category NAMES only (e.g. ``\"aws_access_key\"``) \u2014 NEVER\nthe matched secret value (\u00a75.5 / Risk 7) \u2014 for the friction modal's copy. Empty for the\n``engagement_archived`` reason. A client re-sends with ``confirmed_egress=true`` to proceed\npast the friction case."
+      },
+      "EgressRefusalReason": {
+        "type": "string",
+        "enum": [
+          "egress_secret_flagged",
+          "engagement_archived"
+        ],
+        "title": "EgressRefusalReason",
+        "description": "Why a POST .../chat/messages was refused with 409 (Slice 14).\n\nThe single POST 409 covers two cases with a distinguishable body: a cloud-enabled send\nthat matched a likely-secret pattern without confirmation (\u00a75.1 pattern-friction), and an\narchived engagement (\u00a74 read-only). The reason lets the client tell them apart."
       },
       "EngagementCreate": {
         "properties": {

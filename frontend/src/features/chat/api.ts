@@ -32,6 +32,12 @@ export interface SendChatMessageInput {
   pinnedNodeIds?: string[]
   recentNodeIds?: string[]
   mentionedNodeIds?: string[]
+  /**
+   * The user saw the cloud egress-friction modal for THIS content and chose to send it
+   * unmodified anyway (§5.1, Slice 14). Defaults false; consulted server-side only when the
+   * engagement is cloud_enabled and the content matched a secret pattern.
+   */
+  confirmedEgress?: boolean
 }
 
 const PAGE_LIMIT = 50
@@ -111,7 +117,13 @@ export function useSendChatMessage(engagementId: string) {
     SendChatMessageInput,
     { previous?: InfiniteChatData }
   >({
-    mutationFn: async ({ content, pinnedNodeIds, recentNodeIds, mentionedNodeIds }) => {
+    mutationFn: async ({
+      content,
+      pinnedNodeIds,
+      recentNodeIds,
+      mentionedNodeIds,
+      confirmedEgress,
+    }) => {
       const { data, error } = await api.POST(
         '/api/v1/engagements/{engagement_id}/chat/messages',
         {
@@ -121,6 +133,7 @@ export function useSendChatMessage(engagementId: string) {
             pinned_node_ids: pinnedNodeIds ?? [],
             recent_node_ids: recentNodeIds ?? [],
             mentioned_node_ids: mentionedNodeIds ?? [],
+            confirmed_egress: confirmedEgress ?? false,
           },
         },
       )
