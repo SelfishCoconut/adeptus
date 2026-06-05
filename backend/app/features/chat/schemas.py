@@ -158,6 +158,16 @@ class ChatMessageCreate(BaseModel):
             "suppresses the audit record (a confirmed send is audited as confirmed)."
         ),
     )
+    persona_id: UUID | None = Field(
+        default=None,
+        description=(
+            "The persona whose system prompt should shape THIS turn (§5.3, Slice 15). Must be a "
+            "built-in or one of the caller's own personas; an unknown/foreign id falls back to "
+            "the `general` built-in server-side (§17.1, never errors). Null/absent → `general`. "
+            "Chosen per send so the user can switch persona mid-chat without resetting the "
+            "conversation."
+        ),
+    )
 
 
 class EgressRefusalReason(StrEnum):
@@ -213,6 +223,21 @@ class ChatMessageRead(BaseModel):
         description=(
             "Certainty-tagged claims parsed from this turn (§5.3). Empty when none; drives "
             "the inline certainty badges and the Graph-pane overlay."
+        ),
+    )
+    persona_id: UUID | None = Field(
+        default=None,
+        description=(
+            "The persona used for this assistant turn (§5.3, Slice 15). Null for user/pending/"
+            "pre-slice rows. A soft reference: the persona may since have been renamed/deleted."
+        ),
+    )
+    persona_name: str | None = Field(
+        default=None,
+        description=(
+            "The persona's display name at turn time, denormalized onto the turn so a renamed/"
+            "deleted persona still labels the historical turn (the in-chat persona chip). Null "
+            "for user/pending/pre-slice rows."
         ),
     )
 
