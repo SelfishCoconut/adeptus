@@ -188,7 +188,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §5.2 (scope soft)
 - **Depends on**: 16
 - **Risky**: no
-- **Status**: todo
+- **Status**: in-progress
 
 ### Slice 18: Delegation pattern (standing autonomy)
 - **Goal**: "Always approve dedup" or "always approve light recon" toggles for the engagement
