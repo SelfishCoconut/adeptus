@@ -8,6 +8,7 @@ streaming paths run against the ``db_factory`` (the service opens its own sessio
 from __future__ import annotations
 
 import datetime
+import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import cast
 from unittest.mock import AsyncMock
@@ -20,8 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.errors import ConflictError, NotFoundError
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
+from app.features.chat import plan_parser, service
 from app.features.chat import repository as chat_repo
-from app.features.chat import service
 from app.features.chat.models import ChatMessage
 from app.features.chat.ollama_client import OllamaUsage
 from app.features.chat.schemas import OllamaChatMessage
@@ -189,6 +190,8 @@ async def test_list_messages_only_own_conversation(db_session: AsyncSession) -> 
     contents = [m.content for m in owner_page.items]
     assert "owner-secret" in contents
     assert "other-secret" not in contents  # §5.4 per-user isolation
+    # The §5.3 low-confidence threshold (backend tunable) rides on the page (default 70).
+    assert owner_page.low_confidence_threshold == 70
 
 
 @pytest.mark.asyncio
@@ -528,7 +531,9 @@ async def test_stream_empty_graph_no_context_block(
     _ = [c async for c in service.stream_assistant_reply(message=message)]
 
     system_msg = captured[0][0]
-    assert system_msg.content == service.SYSTEM_PROMPT
+    # No graph block on an empty graph; the base prompt + the Slice-13 structured-output
+    # instruction is all the system message carries.
+    assert system_msg.content == service.SYSTEM_PROMPT + service.PLAN_CERTAINTY_INSTRUCTION
     assert "Relevant graph subset" not in system_msg.content
 
 
@@ -683,3 +688,427 @@ async def test_get_turn_debug_non_assistant_404(db_session: AsyncSession) -> Non
             requester=owner,
             message_id=result.user_message.id,
         )
+
+
+# ---------------------------------------------------------------------------
+# stream_assistant_reply — §5.3 visible plan + certainty signaling (Slice 13)
+# ---------------------------------------------------------------------------
+
+
+def _meta(
+    *, plan: list[dict[str, object]] | None = None, claims: list[dict[str, object]] | None = None
+) -> str:
+    """Render a well-formed trailing <adeptus-meta> block (the model's structured output)."""
+    payload = {"plan": plan or [], "claims": claims or []}
+    return f"{plan_parser.START_MARKER}\n{json.dumps(payload)}\n{plan_parser.END_MARKER}"
+
+
+def _chunk(text: str, size: int = 4) -> list[str]:
+    """Split a reply into small fixed-size token slices to exercise the streamer's
+    across-token-boundary marker buffering."""
+    return [text[i : i + size] for i in range(0, len(text), size)] or [""]
+
+
+def _tokens(prose: str, block: str) -> list[str]:
+    return _chunk(prose + "\n\n" + block)
+
+
+@pytest.mark.asyncio
+async def test_prompt_appends_structured_instruction(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    message = await _seed_pending(db_factory)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    system_content = captured[0][0].content
+    assert service.PLAN_CERTAINTY_INSTRUCTION in system_content
+    assert plan_parser.START_MARKER in system_content
+
+
+@pytest.mark.asyncio
+async def test_stream_strips_meta_block_from_tokens(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = _meta(
+        plan=[{"step": "Enumerate", "status": "done"}],
+        claims=[{"text": "likely apache", "certainty": 55}],
+    )
+    prose = "This is the visible answer to the operator."
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(_tokens(prose, block)))
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    token_data = "".join(c.data or "" for c in chunks if c.type == "token")
+    assert "adeptus-meta" not in token_data  # the raw block never streamed (Risk 2)
+    assert prose in token_data
+    assert chunks[-1].type == "done"
+
+
+@pytest.mark.asyncio
+async def test_done_frame_carries_plan_and_claims(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = _meta(
+        plan=[
+            {"step": "Enumerate login", "status": "done"},
+            {"step": "Try SQLi", "status": "in_progress"},
+        ],
+        claims=[{"text": "service is likely Apache", "certainty": 60}],
+    )
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(_tokens("Answer.", block))
+    )
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    done = chunks[-1]
+    assert done.type == "done"
+    assert done.plan is not None and len(done.plan) == 2
+    assert done.plan[1].status.value == "in_progress"
+    assert done.claims is not None and done.claims[0].certainty == 60
+
+
+@pytest.mark.asyncio
+async def test_stream_persists_plan_and_claims(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = _meta(
+        plan=[{"step": "Check cookie flags", "status": "todo"}],
+        claims=[{"text": "no HttpOnly", "certainty": 80}],
+    )
+    prose = "Clean prose only."
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(_tokens(prose, block)))
+    message = await _seed_pending(db_factory)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.content == prose  # stored prose is block-stripped
+    gc = row.graph_context
+    assert gc is not None
+    assert [p["step"] for p in gc["plan"]] == ["Check cookie flags"]
+    assert gc["claims"][0]["certainty"] == 80
+    # The UNSTRIPPED reply (incl. the block) is kept for the §14 debug panel.
+    assert "adeptus-meta" in gc["model_output"]
+    # Slice-12 keys survive on the same blob (Risk 6 — merge, not overwrite).
+    assert "context_block" in gc and "raw_prompt" in gc
+
+
+@pytest.mark.asyncio
+async def test_claim_node_id_validated_against_graph(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with db_factory() as s:
+        owner = await _seed_user(s, f"owner-{uuid4().hex[:8]}")
+        eng_id = await _seed_engagement(s, cast(UUID, owner.id))
+        node = await graph_repo.insert_node(
+            s, engagement_id=eng_id, node_type="service", label="apache", properties={}
+        )
+        await s.commit()
+        node_id = cast(UUID, node.id)
+        result = await service.send_message(
+            s, engagement_id=eng_id, requester=owner, content="what is running?"
+        )
+        await s.commit()
+        assistant = await chat_repo.get_message_for_owner(
+            s, message_id=result.assistant_message.id, user_id=cast(UUID, owner.id)
+        )
+        assert assistant is not None
+
+    foreign_id = uuid4()
+    block = _meta(
+        claims=[
+            {"text": "real node claim", "certainty": 60, "node_id": str(node_id)},
+            {"text": "foreign node claim", "certainty": 40, "node_id": str(foreign_id)},
+        ]
+    )
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(_tokens("Hi.", block)))
+
+    chunks = [c async for c in service.stream_assistant_reply(message=assistant)]
+
+    done = chunks[-1]
+    assert done.claims is not None
+    by_text = {c.text: c for c in done.claims}
+    assert by_text["real node claim"].node_id == node_id  # known live node kept
+    assert by_text["foreign node claim"].node_id is None  # foreign id dropped (§17.1, Risk 3)
+
+
+@pytest.mark.asyncio
+async def test_stream_truncated_block_no_leak_and_consistent_persist(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that opens <adeptus-meta> but never closes it (truncated stream): the
+    sentinel must not leak into the streamed tokens, and the stored content must equal the
+    pre-marker prose (streamed tokens and persisted prose stay consistent — W4 / Risk 2)."""
+    truncated = "Visible answer.\n\n" + plan_parser.START_MARKER + '\n{"plan": [{"step": "half'
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(_chunk(truncated, 5)))
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    token_data = "".join(c.data or "" for c in chunks if c.type == "token")
+    assert "adeptus-meta" not in token_data  # sentinel never leaked
+    # The streamed prose is exactly the pre-marker prose (no block fragment, no prose lost);
+    # it agrees with the stored content modulo the trailing whitespace extract() strips.
+    assert token_data.strip() == "Visible answer."
+    done = chunks[-1]
+    assert done.type == "done"
+    assert done.plan == [] and done.claims == []
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    # Streamed prose and stored content agree — no prose lost, no block fragment kept.
+    assert row.content == "Visible answer."
+    assert "adeptus-meta" not in row.content
+
+
+@pytest.mark.asyncio
+async def test_no_block_yields_empty_plan_and_clean_prose(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(["Just ", "plain ", "prose."])
+    )
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    token_data = "".join(c.data or "" for c in chunks if c.type == "token")
+    assert token_data == "Just plain prose."
+    done = chunks[-1]
+    assert done.type == "done"
+    assert done.plan == []
+    assert done.claims == []
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.status == "complete"
+    assert row.content == "Just plain prose."
+
+
+@pytest.mark.asyncio
+async def test_replay_complete_turn_returns_stored_plan(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(
+        *,
+        messages: Sequence[OllamaChatMessage],
+        model: str | None = None,
+        usage: OllamaUsage | None = None,
+    ) -> AsyncIterator[str]:
+        raise AssertionError("Ollama must not be called on replay")
+
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom)
+
+    message = await _seed_pending(db_factory)
+    async with db_factory() as s:
+        await chat_repo.finalize_assistant(
+            s,
+            message_id=cast(UUID, message.id),
+            content="stored prose",
+            status="complete",
+            model="qwen3.5:9b",
+            prompt_tokens=1,
+            completion_tokens=1,
+            graph_context={
+                "plan": [{"step": "stored step", "status": "done"}],
+                "claims": [{"text": "stored claim", "certainty": 42, "node_id": None}],
+            },
+        )
+        await s.commit()
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    done = chunks[-1]
+    assert done.type == "done"
+    assert done.plan is not None and done.plan[0].step == "stored step"
+    assert done.claims is not None and done.claims[0].certainty == 42
+    mock_audit_record.assert_not_awaited()  # no re-emit on replay (Risk 6)
+
+
+@pytest.mark.asyncio
+async def test_ai_call_payload_has_plan_and_claim_counts(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = _meta(
+        plan=[{"step": "a", "status": "todo"}, {"step": "b", "status": "done"}],
+        claims=[{"text": "c", "certainty": 10}],
+    )
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(_tokens("Hi.", block)))
+    message = await _seed_pending(db_factory)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    mock_audit_record.assert_awaited_once()
+    call = mock_audit_record.await_args
+    assert call is not None
+    payload = call.kwargs["payload"]
+    assert payload["plan_steps"] == 2
+    assert payload["claims_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_prose_not_redacted(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "the api key is sk-DO-NOT-STRIP-123"
+    block = _meta(claims=[{"text": "unsure", "certainty": 30}])
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(_tokens(f"Note: {secret}", block))
+    )
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    token_data = "".join(c.data or "" for c in chunks if c.type == "token")
+    assert secret in token_data  # prose passes through verbatim (§5.5 / Risk 5)
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert secret in row.content
+
+
+# ---------------------------------------------------------------------------
+# Read paths surface stored plan/claims (Slice 13 task 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_messages_includes_plan(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = _meta(
+        plan=[{"step": "the step", "status": "done"}],
+        claims=[{"text": "the claim", "certainty": 50}],
+    )
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(_tokens("Answer", block))
+    )
+    message = await _seed_pending(db_factory)
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with db_factory() as s:
+        user = await auth_repo.get_user_by_id(s, cast(UUID, message.user_id))
+        assert user is not None
+        page = await service.list_messages(
+            s,
+            engagement_id=cast(UUID, message.engagement_id),
+            requester=user,
+            cursor=None,
+            limit=50,
+        )
+
+    assistant_rows = [m for m in page.items if m.role == "assistant"]
+    assert assistant_rows[0].plan[0].step == "the step"
+    assert assistant_rows[0].claims[0].certainty == 50
+    # The user row carries no plan/claims.
+    user_rows = [m for m in page.items if m.role == "user"]
+    assert user_rows[0].plan == []
+    assert user_rows[0].claims == []
+
+
+@pytest.mark.asyncio
+async def test_turn_debug_includes_parsed_plan_and_claims(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = _meta(
+        plan=[{"step": "enumerate", "status": "in_progress"}],
+        claims=[{"text": "unsure", "certainty": 33}],
+    )
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(_tokens("Visible prose.", block))
+    )
+    message = await _seed_pending(db_factory)
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with db_factory() as s:
+        user = await auth_repo.get_user_by_id(s, cast(UUID, message.user_id))
+        assert user is not None
+        debug = await service.get_turn_debug(
+            s,
+            engagement_id=cast(UUID, message.engagement_id),
+            requester=user,
+            message_id=cast(UUID, message.id),
+        )
+
+    assert debug.plan[0].step == "enumerate"
+    assert debug.claims[0].certainty == 33
+    # §14: the debug view shows the UNSTRIPPED output (block included).
+    assert "adeptus-meta" in debug.model_output
+
+
+@pytest.mark.asyncio
+async def test_pre_slice_row_reads_empty_plan(db_session: AsyncSession) -> None:
+    """A pre-Slice-13 assistant row (graph_context without plan/claims keys) reads empty,
+    and its debug model_output falls back to the row content (no block ever existed)."""
+    owner = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, owner.id))
+    _, assistant = await chat_repo.insert_user_and_pending_assistant(
+        db_session, engagement_id=eng_id, user_id=cast(UUID, owner.id), content="hi"
+    )
+    await chat_repo.finalize_assistant(
+        db_session,
+        message_id=cast(UUID, assistant.id),
+        content="old answer",
+        status="complete",
+        model="qwen3.5:9b",
+        prompt_tokens=None,
+        completion_tokens=None,
+        graph_context={"nodes": [], "edges": [], "context_block": "", "raw_prompt": "x"},
+    )
+    await db_session.commit()
+
+    page = await service.list_messages(
+        db_session, engagement_id=eng_id, requester=owner, cursor=None, limit=50
+    )
+    arows = [m for m in page.items if m.role == "assistant"]
+    assert arows[0].plan == []
+    assert arows[0].claims == []
+
+    debug = await service.get_turn_debug(
+        db_session, engagement_id=eng_id, requester=owner, message_id=cast(UUID, assistant.id)
+    )
+    assert debug.plan == []
+    assert debug.claims == []
+    assert debug.model_output == "old answer"  # fallback to content for pre-slice row

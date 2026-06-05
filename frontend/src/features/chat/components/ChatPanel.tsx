@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import type { SendChatMessageResult } from '@/shared/api'
 import { chatKeys, flattenChatPages, useChatMessages } from '../api'
 import { useChatStream } from '../hooks/useChatStream'
+import { useLowConfidenceThreshold } from '../hooks/useLowConfidenceThreshold'
 import { ChatComposer } from './ChatComposer'
 import { ChatMessageList } from './ChatMessageList'
 
@@ -29,6 +30,7 @@ export function ChatPanel({ engagementId, archived = false }: ChatPanelProps) {
   const messagesQuery = useChatMessages(engagementId)
   const stream = useChatStream(streamingId)
   const messages = flattenChatPages(messagesQuery.data)
+  const threshold = useLowConfidenceThreshold(engagementId)
 
   // When a streamed turn finishes, pull the finalized assistant content. We do NOT clear
   // streamingId here (that would be a setState-in-effect): the list stops treating the
@@ -55,6 +57,8 @@ export function ChatPanel({ engagementId, archived = false }: ChatPanelProps) {
           streamingId={streamingId}
           streamingText={stream.text}
           streamError={stream.error}
+          streamingPlan={stream.plan}
+          threshold={threshold}
         />
       </div>
       <ChatComposer

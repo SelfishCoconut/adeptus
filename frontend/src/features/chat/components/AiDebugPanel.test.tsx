@@ -97,4 +97,46 @@ describe('AiDebugPanel', () => {
 
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
   })
+
+  it('renders the parsed plan and claims sections (§14)', async () => {
+    resolveGet({
+      data: debugRecord({
+        plan: [
+          { step: 'Enumerate the login endpoint', status: 'done' },
+          { step: 'Test for SQL injection', status: 'in_progress' },
+        ],
+        claims: [{ text: 'service is likely Apache', certainty: 60, node_id: null }],
+      }),
+      response: { status: 200 },
+    })
+    renderPanel()
+
+    await waitFor(() => expect(screen.getByText('Parsed plan')).toBeInTheDocument())
+    expect(screen.getByText('Enumerate the login endpoint')).toBeInTheDocument()
+    expect(screen.getByText('Parsed claims')).toBeInTheDocument()
+    expect(screen.getByText('(60% certain)')).toBeInTheDocument()
+  })
+
+  it('shows empty states for a turn with no plan or claims', async () => {
+    resolveGet({ data: debugRecord(), response: { status: 200 } })
+    renderPanel()
+
+    await waitFor(() => expect(screen.getByText('Parsed plan')).toBeInTheDocument())
+    expect(screen.getByTestId('plan-panel-empty')).toBeInTheDocument()
+    expect(screen.getByText(/no certainty claims parsed/i)).toBeInTheDocument()
+  })
+
+  it('shows the unstripped model output including the metadata block', async () => {
+    resolveGet({
+      data: debugRecord({
+        model_output: 'Try default creds.\n<adeptus-meta>\n{"plan": []}\n</adeptus-meta>',
+      }),
+      response: { status: 200 },
+    })
+    renderPanel()
+
+    const summary = await screen.findByText('Model output')
+    const details = summary.closest('details')
+    expect(within(details as HTMLElement).getByText(/adeptus-meta/)).toBeInTheDocument()
+  })
 })

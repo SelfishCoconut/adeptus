@@ -23,10 +23,13 @@ __all__ = [
     "ChatMessageStatus",
     "ChatRole",
     "ChatTurnDebug",
+    "Claim",
     "GraphSubsetEdge",
     "GraphSubsetNode",
     "GraphSubsetReason",
     "OllamaChatMessage",
+    "PlanStep",
+    "PlanStepStatus",
     "SendChatMessageResult",
     "WebSocketChatChunk",
 ]
@@ -53,6 +56,57 @@ class ChatMessageStatus(StrEnum):
     COMPLETE = "complete"
     PENDING = "pending"
     FAILED = "failed"
+
+
+# ---------------------------------------------------------------------------
+# §5.3 visible plan + uncertainty signaling (Slice 13)
+# ---------------------------------------------------------------------------
+
+
+class PlanStepStatus(StrEnum):
+    """Lifecycle of one step in the AI's visible running plan (§5.3 visible plan).
+
+    Unlike ``ChatRole``/``ChatMessageStatus`` this enum has NO backing DB column — plan
+    steps live inside the per-turn ``chat_messages.graph_context`` JSONB blob, not their
+    own table — so there is no DB-vocabulary parity to guard. ``in_progress`` mirrors the
+    underscore wire form used in the ``<adeptus-meta>`` block (Design notes)."""
+
+    TODO = "todo"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+
+
+class PlanStep(BaseModel):
+    """One ordered todo-list item the AI is tracking this turn (§5.3 visible plan).
+
+    Rendered verbatim in the inline Plan panel (no redaction, §5.5). Parsed server-side
+    from the model's trailing ``<adeptus-meta>`` block; an absent/invalid ``status`` is
+    coerced to ``todo`` by the parser before this model is constructed (task 2)."""
+
+    step: str = Field(description="The todo-list item text, verbatim (§5.5).")
+    status: PlanStepStatus = Field(description="The step's current state (todo/in_progress/done).")
+
+
+class Claim(BaseModel):
+    """One AI claim flagged with a stated certainty percentage (§5.3 uncertainty signaling).
+
+    ``certainty`` is bounded 0–100 (the parser clamps out-of-range values before this model
+    is constructed). ``node_id`` is the graph node the claim is about, if any — validated at
+    finalize against the engagement's live graph (foreign/unknown ids dropped, §17.1) so the
+    Graph-pane certainty badge never points at a foreign/hallucinated node. ``text`` is
+    rendered verbatim (no redaction, §5.5)."""
+
+    text: str = Field(description="The claim the AI flagged, verbatim (§5.5).")
+    certainty: int = Field(
+        ge=0, le=100, description="Stated certainty percentage for this claim (§5.3)."
+    )
+    node_id: UUID | None = Field(
+        default=None,
+        description=(
+            "The graph node this claim is about, if any; validated against the engagement's "
+            "live graph (foreign/unknown ids dropped, §17.1). Drives the Graph-pane badge."
+        ),
+    )
 
 
 class ChatMessageCreate(BaseModel):
@@ -106,6 +160,21 @@ class ChatMessageRead(BaseModel):
     content: str
     status: ChatMessageStatus
     created_at: datetime
+    plan: list[PlanStep] = Field(
+        default_factory=list,
+        description=(
+            "The AI's running plan as of this turn (§5.3). Empty for user/pending/pre-slice "
+            "rows; populated from the assistant row's parsed metadata so a reloaded "
+            "conversation re-renders the Plan panel without the debug call."
+        ),
+    )
+    claims: list[Claim] = Field(
+        default_factory=list,
+        description=(
+            "Certainty-tagged claims parsed from this turn (§5.3). Empty when none; drives "
+            "the inline certainty badges and the Graph-pane overlay."
+        ),
+    )
 
 
 class SendChatMessageResult(BaseModel):
@@ -122,6 +191,16 @@ class ChatMessagePage(BaseModel):
 
     items: list[ChatMessageRead]
     next_cursor: str | None
+    low_confidence_threshold: int = Field(
+        default=70,
+        ge=0,
+        le=100,
+        description=(
+            "Certainty %% below which a claim renders as low-confidence (§5.3). This is the "
+            "single backend tunable (ADEPTUS_CHAT_LOW_CONFIDENCE_THRESHOLD) surfaced to the "
+            "UI so the frontend reads one source of truth, not a hard-coded mirror."
+        ),
+    )
 
 
 class WebSocketChatChunk(BaseModel):
@@ -136,6 +215,11 @@ class WebSocketChatChunk(BaseModel):
     type: Literal["token", "done", "error"]
     data: str | None = None
     message: str | None = None
+    # Slice 13: the "done" frame carries the parsed running plan + certainty claims for the
+    # turn (may be empty). Withheld (None) on token/error frames; the token stream is the
+    # block-stripped prose so the raw <adeptus-meta> block never reaches the client.
+    plan: list[PlanStep] | None = None
+    claims: list[Claim] | None = None
 
 
 class OllamaChatMessage(BaseModel):
@@ -203,5 +287,17 @@ class ChatTurnDebug(BaseModel):
     )
     raw_prompt: str = Field(description='The full prompt sent to the model (§14 "raw prompts").')
     model_output: str = Field(
-        description="The model's raw output for this turn (empty while pending/failed)."
+        description=(
+            "The model's raw output for this turn, INCLUDING the structured "
+            "<adeptus-meta> block (§14 — the debug view shows the unstripped output so a "
+            "power user can see exactly what was parsed). Empty while pending/failed."
+        )
+    )
+    plan: list[PlanStep] = Field(
+        default_factory=list,
+        description="The plan parsed from this turn's metadata block (§5.3 / §14).",
+    )
+    claims: list[Claim] = Field(
+        default_factory=list,
+        description="The certainty claims parsed from this turn's metadata block (§5.3 / §14).",
     )

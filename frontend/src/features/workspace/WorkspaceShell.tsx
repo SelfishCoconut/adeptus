@@ -7,6 +7,9 @@ import { ToolRunnerPanel } from '@/features/mcp/components/ToolRunnerPanel'
 import { GraphPane } from '@/features/graph/components'
 import { AuditPanel } from '@/features/audit/components/AuditPanel'
 import { ChatPanel } from '@/features/chat/components/ChatPanel'
+import { NodeCertaintyBadge } from '@/features/chat/components/NodeCertaintyBadge'
+import { useCertaintyByNode } from '@/features/chat/hooks/useCertaintyByNode'
+import { useLowConfidenceThreshold } from '@/features/chat/hooks/useLowConfidenceThreshold'
 
 interface WorkspaceShellProps {
   username: string
@@ -26,6 +29,12 @@ export function WorkspaceShell({
   privacyMode,
   engagementId,
 }: WorkspaceShellProps) {
+  // The graph-item certainty overlay (§5.3): a read-only map derived from the caller's own
+  // chat turns. The workspace is the composition layer that glues the chat-derived overlay
+  // onto the graph pane without either feature depending on the other (ADR-0001 / §8.2).
+  const certaintyByNode = useCertaintyByNode(engagementId)
+  const threshold = useLowConfidenceThreshold(engagementId)
+
   return (
     <div className="flex h-svh flex-col bg-background text-foreground">
       <header className="flex items-center justify-between border-b px-4 py-2">
@@ -65,7 +74,12 @@ export function WorkspaceShell({
         <section aria-label="Graph" className="overflow-y-auto bg-background p-4">
           <h2 className="mb-3 text-sm font-medium text-muted-foreground">Graph</h2>
           {engagementId ? (
-            <GraphPane engagementId={engagementId} />
+            <GraphPane
+              engagementId={engagementId}
+              nodeAccessory={(nodeId) => (
+                <NodeCertaintyBadge certainty={certaintyByNode.get(nodeId)} threshold={threshold} />
+              )}
+            />
           ) : (
             <p className="text-sm text-muted-foreground">
               Select an engagement to view the graph.

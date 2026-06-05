@@ -141,3 +141,40 @@ test.describe('AI debug panel journey (Slice 12)', () => {
     await expect(debugPanel.getByText('10.0.0.5')).toBeVisible()
   })
 })
+
+test.describe('Visible plan + certainty journey (Slice 13)', () => {
+  // This journey assumes the stubbed Ollama (ADEPTUS_OLLAMA_URL) streams a reply that ends
+  // with an <adeptus-meta> block carrying a plan + a certainty claim — the deterministic
+  // structured output a real model would emit (no real model in CI; pentest/external rule).
+  test('plan panel + certainty badge render and persist across reload', async ({ page }) => {
+    test.skip(!STACK_AVAILABLE, 'Set E2E_STACK=1 to run against the compose stack')
+
+    await loginAs(page, ADMIN_USERNAME, ADMIN_PASSWORD)
+
+    await page.getByRole('button', { name: /new engagement/i }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    await dialog.getByLabel(/name/i).fill(`Plan E2E ${Date.now()}`)
+    await dialog.getByLabel(/scope/i).fill('127.0.0.1/32')
+    await dialog.getByRole('button', { name: /create/i }).click()
+    await expect(dialog).not.toBeVisible()
+    await page.getByRole('link', { name: /open/i }).first().click()
+    await page.waitForURL('**/workspace', { timeout: 10_000 })
+
+    const chatPane = page.getByRole('region', { name: /ai chat/i })
+    await chatPane.getByLabel(/message the ai/i).fill('how should I approach testing the login flow?')
+    await chatPane.getByRole('button', { name: /send/i }).click()
+
+    // Step: once the turn finalizes, the Plan panel renders above the reply (§5.3) and an
+    // inline certainty badge shows a stated percentage.
+    await expect(chatPane.getByTestId('plan-panel')).toBeVisible({ timeout: 15_000 })
+    await expect(chatPane.getByTestId('certainty-badge').first()).toBeVisible({ timeout: 15_000 })
+    await expect(chatPane.getByTestId('certainty-badge').first()).toContainText('% certain')
+
+    // Step: reload re-renders the plan + badges from persisted history (§5.4).
+    await page.reload()
+    await page.waitForURL('**/workspace', { timeout: 10_000 })
+    await expect(chatPane.getByTestId('plan-panel')).toBeVisible({ timeout: 10_000 })
+    await expect(chatPane.getByTestId('certainty-badge').first()).toBeVisible({ timeout: 10_000 })
+  })
+})

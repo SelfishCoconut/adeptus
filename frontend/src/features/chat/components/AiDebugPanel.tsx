@@ -2,6 +2,9 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { GraphSubsetNode, GraphSubsetReason } from '@/shared/api'
 import { useChatTurnDebug } from '../api'
+import { useLowConfidenceThreshold } from '../hooks/useLowConfidenceThreshold'
+import { CertaintyBadge } from './CertaintyBadge'
+import { PlanPanel } from './PlanPanel'
 
 interface AiDebugPanelProps {
   engagementId: string
@@ -42,15 +45,18 @@ function NodeRow({ node }: { node: GraphSubsetNode }) {
 
 /**
  * The §14 AI debug panel for one assistant turn. Lazily fetches the turn's debug record
- * (the exact §5.3 relevant subset injected, the raw prompt, and the model output) and
- * renders the injected nodes grouped by inclusion reason, the injected edges, the
- * node/edge counts, and collapsible raw-prompt + model-output blocks.
+ * (the exact §5.3 relevant subset injected, the raw prompt, the model output, and — from
+ * Slice 13 — the parsed plan + certainty claims) and renders the injected nodes grouped by
+ * inclusion reason, the injected edges, the node/edge counts, the parsed plan/claims (so a
+ * power user sees exactly what the structured-output parser extracted), and collapsible
+ * raw-prompt + model-output blocks (the model_output shows the UNSTRIPPED block).
  *
  * "Tool calls" (§14) are out of scope until the AI can call tools (Slice 16) and are
  * intentionally omitted here.
  */
 export function AiDebugPanel({ engagementId, messageId }: AiDebugPanelProps) {
   const { data, isLoading, isError } = useChatTurnDebug(engagementId, messageId)
+  const threshold = useLowConfidenceThreshold(engagementId)
 
   if (isLoading) {
     return (
@@ -75,6 +81,8 @@ export function AiDebugPanel({ engagementId, messageId }: AiDebugPanelProps) {
   }
 
   const { nodes, edges } = data
+  const plan = data.plan ?? []
+  const claims = data.claims ?? []
   const labelById = new Map(nodes.map((n) => [n.id, n.label]))
 
   return (
@@ -125,6 +133,28 @@ export function AiDebugPanel({ engagementId, messageId }: AiDebugPanelProps) {
           </ul>
         </div>
       ) : null}
+
+      <div>
+        <h4 className="mb-1 font-semibold uppercase tracking-wide text-muted-foreground">
+          Parsed plan
+        </h4>
+        <PlanPanel plan={plan} />
+      </div>
+
+      <div>
+        <h4 className="mb-1 font-semibold uppercase tracking-wide text-muted-foreground">
+          Parsed claims
+        </h4>
+        {claims.length === 0 ? (
+          <p className="text-muted-foreground">No certainty claims parsed from this turn.</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {claims.map((claim, index) => (
+              <CertaintyBadge key={`${index}:${claim.text}`} claim={claim} threshold={threshold} />
+            ))}
+          </div>
+        )}
+      </div>
 
       <details>
         <summary className="cursor-pointer font-semibold text-muted-foreground">

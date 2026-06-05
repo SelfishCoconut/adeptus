@@ -23,6 +23,8 @@ export interface SelectedNodePanelProps {
   onEdit: (node: Node) => void
   /** Called after the node is deleted so the parent can clear the selection. */
   onDeleted?: () => void
+  /** Optional read-only decorator shown by the label (Slice-13 certainty overlay). */
+  accessory?: React.ReactNode
 }
 
 // ---------------------------------------------------------------------------
@@ -34,6 +36,7 @@ export function SelectedNodePanel({
   node,
   onEdit,
   onDeleted,
+  accessory,
 }: SelectedNodePanelProps) {
   // Select the stable map reference (same pattern as GraphCanvas) and derive
   // the boolean, rather than computing it inside the selector.
@@ -67,6 +70,7 @@ export function SelectedNodePanel({
         <div className="flex items-center gap-2">
           <Badge variant="outline">{node.type}</Badge>
           <span className="font-medium">{node.label}</span>
+          {accessory}
           {isPinned && (
             <Badge variant="secondary" data-testid="pinned-badge">
               Pinned

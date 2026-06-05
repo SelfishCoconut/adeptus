@@ -13,6 +13,7 @@ server with ``ADEPTUS_TEST_DATABASE_URL`` (defaults to the compose Postgres).
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -31,8 +32,8 @@ from app.core.errors import NotFoundError
 from app.features.audit.models import AuditChainHead, AuditEntry
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import Session, User
+from app.features.chat import plan_parser, service
 from app.features.chat import repository as chat_repo
-from app.features.chat import service
 from app.features.chat.models import ChatMessage
 from app.features.chat.ollama_client import OllamaUsage
 from app.features.chat.schemas import OllamaChatMessage
@@ -134,6 +135,16 @@ def _fake_stream(tokens: list[str]) -> FakeStream:
             usage.completion_tokens = len(tokens)
 
     return _gen
+
+
+def _meta(
+    *,
+    plan: list[dict[str, object]] | None = None,
+    claims: list[dict[str, object]] | None = None,
+) -> str:
+    """Render a well-formed trailing <adeptus-meta> block (Slice 13)."""
+    payload = {"plan": plan or [], "claims": claims or []}
+    return f"{plan_parser.START_MARKER}\n{json.dumps(payload)}\n{plan_parser.END_MARKER}"
 
 
 def _fake_unreachable() -> FakeStream:
@@ -483,3 +494,234 @@ async def test_full_subset_injected_end_to_end(
     assert "recent" in reasons["bravo-recent"]
     assert "mentioned" in reasons["charlie-mentioned"]
     assert "keyword" in reasons["delta-sqli"]
+
+
+# ---------------------------------------------------------------------------
+# §5.3 visible plan + uncertainty signaling (Slice 13)
+# ---------------------------------------------------------------------------
+
+
+async def test_turn_parses_plan_and_persists(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Headline §5.3 + §14 happy path: a faked reply with a well-formed metadata block →
+    stored content is block-stripped prose, the plan (3 steps) + a node-referencing claim
+    persist (real JSONB round-trip), the done frame carries them, and the single ai_call
+    entry records plan_steps=3 / claims_count=1."""
+    user = await _seed_user(pg_factory, "owner")
+    user_id = cast(uuid.UUID, user.id)
+    eng_id = await _seed_engagement(pg_factory, user_id)
+
+    async with pg_factory() as db:
+        node = await graph_repo.insert_node(
+            db, engagement_id=eng_id, node_type="service", label="apache", properties={}
+        )
+        await db.commit()
+        node_id = cast(uuid.UUID, node.id)
+
+    block = _meta(
+        plan=[
+            {"step": "Enumerate the login endpoint", "status": "done"},
+            {"step": "Test for SQL injection", "status": "in_progress"},
+            {"step": "Check session-cookie flags", "status": "todo"},
+        ],
+        claims=[{"text": "service is likely Apache", "certainty": 60, "node_id": str(node_id)}],
+    )
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(["Here is the approach.\n\n", block])
+    )
+
+    async with pg_factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=user, content="how should I test the login flow?"
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+
+    async with pg_factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=user_id
+        )
+    assert message is not None
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    done = chunks[-1]
+    assert done.type == "done"
+    assert done.plan is not None and len(done.plan) == 3
+    assert done.claims is not None and done.claims[0].node_id == node_id
+    token_data = "".join(c.data or "" for c in chunks if c.type == "token")
+    assert "adeptus-meta" not in token_data  # raw block never streamed
+
+    async with pg_factory() as db:
+        row = await chat_repo.get_message_for_owner(db, message_id=assistant_id, user_id=user_id)
+        assert row is not None
+        assert row.status == "complete"
+        assert row.content == "Here is the approach."  # block-stripped prose
+        gc = row.graph_context
+        assert gc is not None
+        assert len(gc["plan"]) == 3
+        assert gc["claims"][0]["node_id"] == str(node_id)  # survived validation (§17.1)
+        assert "adeptus-meta" in gc["model_output"]  # unstripped output kept for §14
+
+        audit_rows = (
+            (
+                await db.execute(
+                    select(AuditEntry).where(
+                        AuditEntry.action == "ai_call", AuditEntry.actor_user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(audit_rows) == 1
+    assert audit_rows[0].payload["plan_steps"] == 3
+    assert audit_rows[0].payload["claims_count"] == 1
+
+
+async def test_turn_with_foreign_node_id_drops_it(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim referencing a node id NOT in this engagement keeps its text but loses the
+    node_id (§17.1 / Risk 3) — the Graph-pane badge can never point at a foreign node."""
+    user = await _seed_user(pg_factory, "owner")
+    user_id = cast(uuid.UUID, user.id)
+    eng_id = await _seed_engagement(pg_factory, user_id)
+
+    foreign_id = uuid.uuid4()
+    block = _meta(claims=[{"text": "foreign claim", "certainty": 40, "node_id": str(foreign_id)}])
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["Answer.\n", block]))
+
+    async with pg_factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=user, content="anything?"
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+
+    async with pg_factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=user_id
+        )
+    assert message is not None
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    done = chunks[-1]
+    assert done.claims is not None
+    assert done.claims[0].text == "foreign claim"  # text survives
+    assert done.claims[0].node_id is None  # foreign id dropped
+
+    async with pg_factory() as db:
+        row = await chat_repo.get_message_for_owner(db, message_id=assistant_id, user_id=user_id)
+        assert row is not None
+        gc = row.graph_context
+        assert gc is not None
+        assert gc["claims"][0]["node_id"] is None
+
+
+async def test_turn_without_block_degrades_cleanly(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply with no metadata block → clean prose persisted, empty plan/claims, the turn
+    still completes, and the ai_call carries zero plan/claim counts (Risk 1 graceful)."""
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(["Just plain prose, ", "no block."])
+    )
+    user = await _seed_user(pg_factory, "owner")
+    user_id = cast(uuid.UUID, user.id)
+    eng_id = await _seed_engagement(pg_factory, user_id)
+
+    async with pg_factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=user, content="what port does https use?"
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+
+    async with pg_factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=user_id
+        )
+    assert message is not None
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    done = chunks[-1]
+    assert done.type == "done"
+    assert done.plan == []
+    assert done.claims == []
+
+    async with pg_factory() as db:
+        row = await chat_repo.get_message_for_owner(db, message_id=assistant_id, user_id=user_id)
+        assert row is not None
+        assert row.status == "complete"
+        assert row.content == "Just plain prose, no block."
+
+        audit_rows = (
+            (
+                await db.execute(
+                    select(AuditEntry).where(
+                        AuditEntry.action == "ai_call", AuditEntry.actor_user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(audit_rows) == 1
+    assert audit_rows[0].payload["plan_steps"] == 0
+    assert audit_rows[0].payload["claims_count"] == 0
+
+
+async def test_plan_private_per_user(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One member's plan/claims never appear in another member's own history (§5.4 / §17.1)."""
+    owner = await _seed_user(pg_factory, "owner")
+    other = await _seed_user(pg_factory, "other")
+    eng_id = await _seed_engagement(pg_factory, cast(uuid.UUID, owner.id))
+    async with pg_factory() as db:
+        await eng_repo.add_member(db, engagement_id=eng_id, user_id=cast(uuid.UUID, other.id))
+        await db.commit()
+
+    block = _meta(
+        plan=[{"step": "owner-only-step", "status": "done"}],
+        claims=[{"text": "owner-only-claim", "certainty": 55}],
+    )
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(["Owner answer.\n", block])
+    )
+
+    async with pg_factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=owner, content="owner question"
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+    async with pg_factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=cast(uuid.UUID, owner.id)
+        )
+    assert message is not None
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    # The owner sees their own plan/claims.
+    async with pg_factory() as db:
+        owner_page = await service.list_messages(
+            db, engagement_id=eng_id, requester=owner, cursor=None, limit=50
+        )
+    owner_steps = [s.step for m in owner_page.items for s in m.plan]
+    assert "owner-only-step" in owner_steps
+
+    # The other member's own history carries none of the owner's plan/claims.
+    async with pg_factory() as db:
+        other_page = await service.list_messages(
+            db, engagement_id=eng_id, requester=other, cursor=None, limit=50
+        )
+    other_steps = [s.step for m in other_page.items for s in m.plan]
+    other_claims = [c for m in other_page.items for c in m.claims]
+    assert "owner-only-step" not in other_steps
+    assert other_claims == []

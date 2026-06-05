@@ -7,6 +7,7 @@ UPDATE). Auth uses a real session cookie seeded into the test DB.
 from __future__ import annotations
 
 import datetime
+import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import cast
 from uuid import UUID, uuid4
@@ -21,8 +22,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
+from app.features.chat import plan_parser, service
 from app.features.chat import repository as chat_repo
-from app.features.chat import service
 from app.features.chat.ollama_client import OllamaUsage
 from app.features.chat.schemas import OllamaChatMessage
 from app.features.engagements import repository as eng_repo
@@ -107,6 +108,12 @@ async def _drain_ws(app: FastAPI, message_id: UUID, sid: str) -> None:
             frame = ws.receive_json()
             if frame["type"] in ("done", "error"):
                 break
+
+
+def _meta_block(plan: list[dict], claims: list[dict]) -> str:
+    """A well-formed trailing <adeptus-meta> block for the fake stream (Slice 13)."""
+    payload = {"plan": plan, "claims": claims}
+    return f"{plan_parser.START_MARKER}\n{json.dumps(payload)}\n{plan_parser.END_MARKER}"
 
 
 def _fake_stream(tokens: list[str]) -> Callable[..., AsyncIterator[str]]:
@@ -515,3 +522,82 @@ async def test_get_debug_401_unauthenticated(
             f"/api/v1/engagements/{uuid4()}/chat/messages/{uuid4()}/debug",
         )
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Slice 13 — changed response models carry plan/claims through the routes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_messages_response_has_plan_field(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, factory = app_and_factory
+    block = _meta_block(
+        [{"step": "do x", "status": "done"}], [{"text": "maybe apache", "certainty": 45}]
+    )
+    monkeypatch.setattr(
+        service.ollama_client, "stream_chat", _fake_stream(["Visible answer.", "\n\n", block])
+    )
+    user = await _seed_user(factory, "owner")
+    sid = await _seed_session(factory, cast(UUID, user.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, user.id))
+
+    async with _client(app) as client:
+        post = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": "hi"},
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assistant_id = post.json()["assistant_message"]["id"]
+    await _drain_ws(app, UUID(assistant_id), sid)
+
+    async with _client(app) as client:
+        resp = await client.get(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assert resp.status_code == 200
+    assistant = next(m for m in resp.json()["items"] if m["role"] == "assistant")
+    assert assistant["plan"] == [{"step": "do x", "status": "done"}]
+    assert assistant["claims"][0]["certainty"] == 45
+    assert assistant["claims"][0]["node_id"] is None
+    assert "adeptus-meta" not in assistant["content"]  # block stripped from stored prose
+
+
+@pytest.mark.asyncio
+async def test_get_debug_response_has_plan_and_claims(
+    app_and_factory: tuple[FastAPI, async_sessionmaker[AsyncSession]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, factory = app_and_factory
+    block = _meta_block(
+        [{"step": "enumerate", "status": "in_progress"}], [{"text": "unsure", "certainty": 20}]
+    )
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["Prose.", "\n", block]))
+    user = await _seed_user(factory, "owner")
+    sid = await _seed_session(factory, cast(UUID, user.id))
+    eng_id = await _seed_engagement(factory, cast(UUID, user.id))
+
+    async with _client(app) as client:
+        post = await client.post(
+            f"/api/v1/engagements/{eng_id}/chat/messages",
+            json={"content": "hi"},
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assistant_id = post.json()["assistant_message"]["id"]
+    await _drain_ws(app, UUID(assistant_id), sid)
+
+    async with _client(app) as client:
+        resp = await client.get(
+            f"/api/v1/engagements/{eng_id}/chat/messages/{assistant_id}/debug",
+            cookies={_SESSION_COOKIE: sid},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["plan"][0]["step"] == "enumerate"
+    assert body["claims"][0]["certainty"] == 20
+    # §14: the debug view shows the UNSTRIPPED output (block included).
+    assert "adeptus-meta" in body["model_output"]
