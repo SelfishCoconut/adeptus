@@ -6,12 +6,35 @@ import userEvent from '@testing-library/user-event'
 import { ChatComposer } from './ChatComposer'
 import { api } from '@/shared/api'
 import { usePinStore } from '@/features/graph/store/pinStore'
+import { usePersonaSelectionStore } from '@/features/personas/store'
 
 vi.mock('@/shared/api', () => ({
-  api: { GET: vi.fn(), POST: vi.fn() },
+  api: { GET: vi.fn(), POST: vi.fn(), PATCH: vi.fn(), DELETE: vi.fn() },
 }))
 
 const mockPost = vi.mocked(api.POST)
+const mockGet = vi.mocked(api.GET)
+
+const PERSONA_LIST = {
+  items: [
+    {
+      id: 'general-id',
+      name: 'General',
+      system_prompt: 'general prompt',
+      is_builtin: true,
+      slug: 'general',
+      created_at: '2026-01-01T00:00:00Z',
+    },
+    {
+      id: 'recon-id',
+      name: 'Recon',
+      system_prompt: 'recon prompt',
+      is_builtin: true,
+      slug: 'recon',
+      created_at: '2026-01-01T00:00:00Z',
+    },
+  ],
+}
 
 const ENGAGEMENT_ID = '00000000-0000-0000-0000-000000000001'
 
@@ -38,8 +61,10 @@ function renderComposer(props: Partial<Parameters<typeof ChatComposer>[0]> = {})
 
 beforeEach(() => {
   mockPost.mockReset()
+  mockGet.mockReset()
   localStorage.clear()
   usePinStore.setState({ pinnedByEngagement: {} })
+  usePersonaSelectionStore.setState({ selectedByEngagement: {} })
 })
 
 const sendResult = {
@@ -197,5 +222,42 @@ describe('ChatComposer', () => {
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2))
     const retry = mockPost.mock.calls[1][1] as { body: { confirmed_egress: boolean } }
     expect(retry.body.confirmed_egress).toBe(true)
+  })
+
+  // --- §5.3 persona selection (Slice 15) ---
+
+  it('defaults to general and sends the general persona_id', async () => {
+    mockGet.mockResolvedValue({ data: PERSONA_LIST, response: { status: 200 } } as never)
+    mockPost.mockResolvedValue({ data: sendResult, response: { status: 201 } } as never)
+
+    const user = userEvent.setup()
+    renderComposer()
+    // The switcher appears once the personas load, defaulting to General.
+    const switcher = await screen.findByRole('combobox', { name: /persona/i })
+    expect(switcher).toHaveValue('general-id')
+
+    await user.type(screen.getByLabelText(/message the ai/i), 'hello')
+    await user.click(screen.getByRole('button', { name: /^send$/i }))
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalled())
+    const body = mockPost.mock.calls[0][1] as { body: { persona_id?: string } }
+    expect(body.body.persona_id).toBe('general-id')
+  })
+
+  it('switching persona changes the next send body', async () => {
+    mockGet.mockResolvedValue({ data: PERSONA_LIST, response: { status: 200 } } as never)
+    mockPost.mockResolvedValue({ data: sendResult, response: { status: 201 } } as never)
+
+    const user = userEvent.setup()
+    renderComposer()
+    const switcher = await screen.findByRole('combobox', { name: /persona/i })
+    await user.selectOptions(switcher, 'recon-id')
+
+    await user.type(screen.getByLabelText(/message the ai/i), 'where do I start?')
+    await user.click(screen.getByRole('button', { name: /^send$/i }))
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalled())
+    const body = mockPost.mock.calls[0][1] as { body: { persona_id?: string } }
+    expect(body.body.persona_id).toBe('recon-id')
   })
 })

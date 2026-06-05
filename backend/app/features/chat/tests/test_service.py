@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from argon2 import PasswordHasher
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
@@ -29,6 +30,8 @@ from app.features.chat.ollama_client import OllamaUsage
 from app.features.chat.schemas import OllamaChatMessage
 from app.features.engagements import repository as eng_repo
 from app.features.graph import repository as graph_repo
+from app.features.personas import service as personas_service
+from app.features.personas.models import Persona as PersonaModel
 
 # A fake stream_chat: takes the prompt messages + optional usage holder, yields str tokens.
 FakeStream = Callable[..., AsyncIterator[str]]
@@ -829,6 +832,28 @@ async def test_get_turn_debug_non_assistant_404(db_session: AsyncSession) -> Non
         )
 
 
+def test_to_turn_debug_surfaces_persona() -> None:
+    """§14 / §17.6: the debug record surfaces the persona that shaped the turn (Slice 15)."""
+    pid = uuid4()
+    message = ChatMessage(
+        id=uuid4(),
+        engagement_id=uuid4(),
+        user_id=uuid4(),
+        role="assistant",
+        content="recon answer",
+        status="complete",
+        model="qwen3.5:9b",
+        graph_context={
+            "raw_prompt": "[system]\nRECON...",
+            "persona_id": str(pid),
+            "persona_name": "Recon",
+        },
+    )
+    debug = service._to_turn_debug(message)
+    assert debug.persona_id == pid
+    assert debug.persona_name == "Recon"
+
+
 # ---------------------------------------------------------------------------
 # stream_assistant_reply — §5.3 visible plan + certainty signaling (Slice 13)
 # ---------------------------------------------------------------------------
@@ -1533,3 +1558,224 @@ async def test_stream_cloud_flip_allows_confirmed_secret(
 
     chunks = [c async for c in service.stream_assistant_reply(message=message)]
     assert chunks[-1].type == "done"
+
+
+# ---------------------------------------------------------------------------
+# Persona threading (Slice 15) — send_message resolve/stash + stream prompt/audit
+# ---------------------------------------------------------------------------
+
+
+async def _seed_persona_turn(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    content: str = "where should I start?",
+    persona_prompt: str | None = None,
+    persona_name: str = "Recon X",
+    use_foreign: bool = False,
+    foreign_prompt: str = "FOREIGN-SECRET-PROMPT",
+    seed_builtins: bool = True,
+    node_specs: Sequence[tuple[str, str, dict[str, object]]] = (),
+    pin_labels: Sequence[str] = (),
+) -> tuple[ChatMessage, dict[str, object]]:
+    """Seed a turn through ``send_message`` with a selected persona; return (row, info).
+
+    ``persona_prompt`` creates + selects a custom persona owned by the sender; ``use_foreign``
+    selects another user's persona id (the §17.1 fallback case). Goes through the real
+    send path so the persona is resolved + stashed exactly as in production.
+    """
+    async with factory() as s:
+        owner = await _seed_user(s, f"owner-{uuid4().hex[:8]}")
+        eng_id = await _seed_engagement(s, cast(UUID, owner.id))
+        label_to_id: dict[str, UUID] = {}
+        for node_type, label, properties in node_specs:
+            node = await graph_repo.insert_node(
+                s, engagement_id=eng_id, node_type=node_type, label=label, properties=properties
+            )
+            label_to_id[label] = cast(UUID, node.id)
+        if seed_builtins:
+            await personas_service.bootstrap_system_personas(s)
+        persona_id: UUID | None = None
+        info: dict[str, object] = {"owner_id": cast(UUID, owner.id)}
+        if persona_prompt is not None:
+            created = await personas_service.create_persona(
+                s, requester=owner, name=persona_name, system_prompt=persona_prompt
+            )
+            persona_id = created.id
+            info["persona_id"] = created.id
+            info["persona_name"] = persona_name
+        if use_foreign:
+            other = await _seed_user(s, f"other-{uuid4().hex[:8]}")
+            others = await personas_service.create_persona(
+                s, requester=other, name="Bobs", system_prompt=foreign_prompt
+            )
+            persona_id = others.id
+            info["foreign_persona_id"] = others.id
+        await s.commit()
+        result = await service.send_message(
+            s,
+            engagement_id=eng_id,
+            requester=owner,
+            content=content,
+            persona_id=persona_id,
+            pinned_node_ids=[label_to_id[label] for label in pin_labels],
+        )
+        await s.commit()
+        assistant = await chat_repo.get_message_for_owner(
+            s, message_id=result.assistant_message.id, user_id=cast(UUID, owner.id)
+        )
+        assert assistant is not None
+        info["assistant_id"] = cast(UUID, assistant.id)
+        return assistant, info
+
+
+@pytest.mark.asyncio
+async def test_send_resolves_and_stashes_persona(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    message, info = await _seed_persona_turn(db_factory, persona_prompt="RECON-FOCUS")
+    gc = message.graph_context
+    assert gc is not None
+    assert gc["persona"]["id"] == str(info["persona_id"])
+    assert gc["persona"]["name"] == "Recon X"
+
+
+@pytest.mark.asyncio
+async def test_send_foreign_persona_falls_back_to_general(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """§17.1 — a foreign persona id is resolved to general at POST, never the foreign prompt."""
+    message, _info = await _seed_persona_turn(db_factory, use_foreign=True)
+    gc = message.graph_context
+    assert gc is not None
+    assert gc["persona"]["name"] == "General"
+
+
+@pytest.mark.asyncio
+async def test_prompt_uses_persona_system_prompt(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    message, _info = await _seed_persona_turn(
+        db_factory, persona_prompt="RECON-FOCUS: enumerate first."
+    )
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    system_content = captured[0][0].content
+    assert system_content.startswith("RECON-FOCUS: enumerate first.")
+    # The old fixed neutral prompt is NOT the base term anymore.
+    assert not system_content.startswith(service.SYSTEM_PROMPT)
+
+
+@pytest.mark.asyncio
+async def test_prompt_composes_persona_then_context_then_instruction(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    message, _info = await _seed_persona_turn(
+        db_factory,
+        content="what about the UNIQUELABEL endpoint?",
+        persona_prompt="PERSONA-BASE-PROMPT",
+        node_specs=[("endpoint", "UNIQUELABEL", {})],
+        pin_labels=["UNIQUELABEL"],
+    )
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    content = captured[0][0].content
+    persona_at = content.index("PERSONA-BASE-PROMPT")
+    context_at = content.index("UNIQUELABEL")
+    instruction_at = content.index(service.PLAN_CERTAINTY_INSTRUCTION)
+    # persona prompt → graph context block → structured-output instruction (order preserved).
+    assert persona_at < context_at < instruction_at
+
+
+@pytest.mark.asyncio
+async def test_default_general_prompt_byte_equal_to_legacy(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-persona send (built-ins seeded) uses the general built-in == the legacy prompt."""
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    message, _info = await _seed_persona_turn(db_factory, persona_prompt=None)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert captured[0][0].content == service.SYSTEM_PROMPT + service.PLAN_CERTAINTY_INSTRUCTION
+
+
+@pytest.mark.asyncio
+async def test_persona_recorded_on_turn_and_in_audit(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["done"]))
+    message, info = await _seed_persona_turn(
+        db_factory, persona_prompt="RECON", persona_name="Recon X"
+    )
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    gc = row.graph_context
+    assert gc is not None
+    assert gc["persona_id"] == str(info["persona_id"])
+    assert gc["persona_name"] == "Recon X"
+
+    mock_audit_record.assert_awaited_once()
+    payload = mock_audit_record.await_args.kwargs["payload"]  # type: ignore[union-attr]
+    assert payload["persona_id"] == str(info["persona_id"])
+    assert payload["persona_name"] == "Recon X"
+
+
+@pytest.mark.asyncio
+async def test_persona_deleted_between_post_and_stream_falls_back(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persona deleted after POST but before the stream re-resolves to general (Risk 6)."""
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    message, info = await _seed_persona_turn(db_factory, persona_prompt="DELETED-PROMPT")
+
+    # Delete the persona out from under the pending turn.
+    async with db_factory() as s:
+        await s.execute(delete(PersonaModel))
+        await s.commit()
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    # Falls back to general (the built-ins were also deleted → synthesized general prompt).
+    assert captured[0][0].content.startswith(service.SYSTEM_PROMPT)
+    assert "DELETED-PROMPT" not in captured[0][0].content
+
+
+@pytest.mark.asyncio
+async def test_persona_prompt_not_redacted(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§5.5 — a secret-looking persona prompt is forwarded verbatim, never stripped/rewritten."""
+    secret_prompt = "Use the key AKIAIOSFODNN7EXAMPLE when reasoning."  # gitleaks:allow
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    message, _info = await _seed_persona_turn(db_factory, persona_prompt=secret_prompt)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert secret_prompt in captured[0][0].content

@@ -771,6 +771,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/personas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Personas
+         * @description List the personas available to the caller: the four built-ins plus the caller's own.
+         */
+        get: operations["list_personas"];
+        put?: never;
+        /**
+         * Create Persona
+         * @description Create a custom persona owned by the caller (§5.3 "create … their own").
+         */
+        post: operations["create_persona"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/personas/{persona_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Persona
+         * @description Delete one of the caller's own custom personas (§5.3). A built-in or another user's
+         *     persona returns 404 (cannot be deleted).
+         */
+        delete: operations["delete_persona"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Persona
+         * @description Edit one of the caller's own custom personas (§5.3). A built-in or another user's
+         *     persona is invisible (404), so it cannot be edited.
+         */
+        patch: operations["update_persona"];
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -876,6 +926,11 @@ export interface components {
              * @default false
              */
             confirmed_egress: boolean;
+            /**
+             * Persona Id
+             * @description The persona whose system prompt should shape THIS turn (§5.3, Slice 15). Must be a built-in or one of the caller's own personas; an unknown/foreign id falls back to the `general` built-in server-side (§17.1, never errors). Null/absent → `general`. Chosen per send so the user can switch persona mid-chat without resetting the conversation.
+             */
+            persona_id?: string | null;
         };
         /**
          * ChatMessagePage
@@ -928,6 +983,16 @@ export interface components {
              * @description Certainty-tagged claims parsed from this turn (§5.3). Empty when none; drives the inline certainty badges and the Graph-pane overlay.
              */
             claims?: components["schemas"]["Claim"][];
+            /**
+             * Persona Id
+             * @description The persona used for this assistant turn (§5.3, Slice 15). Null for user/pending/pre-slice rows. A soft reference: the persona may since have been renamed/deleted.
+             */
+            persona_id?: string | null;
+            /**
+             * Persona Name
+             * @description The persona's display name at turn time, denormalized onto the turn so a renamed/deleted persona still labels the historical turn (the in-chat persona chip). Null for user/pending/pre-slice rows.
+             */
+            persona_name?: string | null;
         };
         /**
          * ChatMessageStatus
@@ -993,6 +1058,16 @@ export interface components {
              * @description The certainty claims parsed from this turn's metadata block (§5.3 / §14).
              */
             claims?: components["schemas"]["Claim"][];
+            /**
+             * Persona Id
+             * @description The persona that shaped this turn (§5.3 / §17.6, Slice 15). Null for user/pending/pre-slice rows. The raw_prompt's leading system content is this persona's prompt, so the panel shows exactly which persona was used.
+             */
+            persona_id?: string | null;
+            /**
+             * Persona Name
+             * @description The persona's display name at turn time (§5.3). Null when no persona.
+             */
+            persona_name?: string | null;
         };
         /**
          * Claim
@@ -1486,6 +1561,82 @@ export interface components {
             properties?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /**
+         * Persona
+         * @description One persona as exposed by the read/write API (§5.3).
+         *
+         *     A built-in carries a ``slug`` and ``is_builtin=true`` (read-only, shared); a custom
+         *     persona has ``slug=None`` and ``is_builtin=false`` (editable/deletable by its owner).
+         */
+        Persona: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Name
+             * @description Human-readable persona name (verbatim, §5.5). Unique per owner.
+             */
+            name: string;
+            /**
+             * System Prompt
+             * @description The persona's distinct system prompt (§5.3), sent verbatim (§5.5).
+             */
+            system_prompt: string;
+            /**
+             * Is Builtin
+             * @description True for the four global seeded personas (read-only, shared); false for a caller-owned custom persona (editable/deletable by the caller only).
+             */
+            is_builtin: boolean;
+            /**
+             * Slug
+             * @description Stable slug for a built-in (general/recon/web-exploit/report-writer); null for custom personas. Drives the default-persona lookup.
+             */
+            slug?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /**
+         * PersonaCreate
+         * @description Request body for POST /api/v1/personas — create a custom persona owned by the caller.
+         */
+        PersonaCreate: {
+            /**
+             * Name
+             * @description Persona name; must be unique among the caller's own personas.
+             */
+            name: string;
+            /**
+             * System Prompt
+             * @description The persona's system prompt, stored and sent verbatim (§5.5).
+             */
+            system_prompt: string;
+        };
+        /**
+         * PersonaList
+         * @description The personas available to the caller: the four built-ins plus the caller's own.
+         */
+        PersonaList: {
+            /** Items */
+            items: components["schemas"]["Persona"][];
+        };
+        /**
+         * PersonaUpdate
+         * @description Request body for PATCH /api/v1/personas/{persona_id}.
+         *
+         *     All fields optional; only provided (non-null) fields are updated. An empty body is a
+         *     no-op that returns the unchanged persona.
+         */
+        PersonaUpdate: {
+            /** Name */
+            name?: string | null;
+            /** System Prompt */
+            system_prompt?: string | null;
         };
         /**
          * PlanStep
@@ -2987,6 +3138,179 @@ export interface operations {
             };
             /** @description Message not found, not owned by caller, or not an assistant turn */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_personas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonaList"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_persona: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonaCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Persona"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller already has a custom persona with this name */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_persona: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Persona not found or not owned by caller (built-ins included) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_persona: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonaUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Persona"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Persona not found or not owned by caller (built-ins included) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller already has a custom persona with this name */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

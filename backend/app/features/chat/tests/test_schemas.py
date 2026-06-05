@@ -230,6 +230,48 @@ def test_chat_message_read_round_trips_with_plan_and_claims() -> None:
     assert again.claims[0].node_id == nid
 
 
+def test_persona_id_defaults_none_on_create() -> None:
+    """An absent persona_id defaults to None (server resolves it to general, Slice 15)."""
+    assert ChatMessageCreate(content="hi").persona_id is None
+
+
+def test_persona_id_accepts_uuid_on_create() -> None:
+    pid = uuid4()
+    assert ChatMessageCreate(content="hi", persona_id=pid).persona_id == pid
+
+
+def test_chat_message_read_defaults_persona_fields_none() -> None:
+    """A read row with no persona (user/pre-slice) defaults both persona fields to None."""
+    msg = ChatMessageRead(
+        id=uuid4(),
+        engagement_id=uuid4(),
+        role=ChatRole.USER,
+        content="hi",
+        status=ChatMessageStatus.COMPLETE,
+        created_at=datetime(2026, 1, 1),
+    )
+    assert msg.persona_id is None
+    assert msg.persona_name is None
+
+
+def test_chat_message_read_round_trips_persona_fields() -> None:
+    """An assistant read row carries its persona id + name through serialization."""
+    pid = uuid4()
+    msg = ChatMessageRead(
+        id=uuid4(),
+        engagement_id=uuid4(),
+        role=ChatRole.ASSISTANT,
+        content="recon answer",
+        status=ChatMessageStatus.COMPLETE,
+        created_at=datetime(2026, 1, 1),
+        persona_id=pid,
+        persona_name="Recon",
+    )
+    again = ChatMessageRead.model_validate(msg.model_dump())
+    assert again.persona_id == pid
+    assert again.persona_name == "Recon"
+
+
 def test_chat_turn_debug_defaults_plan_and_claims_empty() -> None:
     """ChatTurnDebug plan/claims default empty so a pre-slice turn validates."""
     debug = ChatTurnDebug(

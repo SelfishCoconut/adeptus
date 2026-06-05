@@ -17,6 +17,7 @@ from app.features.chat import models as _chat_models  # noqa: F401
 from app.features.engagements import models as _engagements_models  # noqa: F401
 from app.features.graph import models as _graph_models  # noqa: F401
 from app.features.mcp import models as _mcp_models  # noqa: F401
+from app.features.personas import models as _personas_models  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

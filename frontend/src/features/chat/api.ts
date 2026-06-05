@@ -38,6 +38,12 @@ export interface SendChatMessageInput {
    * engagement is cloud_enabled and the content matched a secret pattern.
    */
   confirmedEgress?: boolean
+  /**
+   * The persona whose system prompt should shape THIS turn (§5.3, Slice 15), chosen per send
+   * so the user can switch persona mid-chat. Omitted ⇒ the server uses the `general` built-in;
+   * a foreign/unknown id also falls back to general server-side (§17.1).
+   */
+  personaId?: string
 }
 
 /**
@@ -147,6 +153,7 @@ export function useSendChatMessage(engagementId: string) {
       recentNodeIds,
       mentionedNodeIds,
       confirmedEgress,
+      personaId,
     }) => {
       const { data, error, response } = await api.POST(
         '/api/v1/engagements/{engagement_id}/chat/messages',
@@ -158,6 +165,8 @@ export function useSendChatMessage(engagementId: string) {
             recent_node_ids: recentNodeIds ?? [],
             mentioned_node_ids: mentionedNodeIds ?? [],
             confirmed_egress: confirmedEgress ?? false,
+            // Included only when a persona is selected; omitted ⇒ server uses general.
+            ...(personaId ? { persona_id: personaId } : {}),
           },
         },
       )

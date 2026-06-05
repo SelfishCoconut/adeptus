@@ -95,6 +95,15 @@ export function AiDebugPanel({ engagementId, messageId }: AiDebugPanelProps) {
         {edges.length === 1 ? 'edge' : 'edges'} injected
       </p>
 
+      {data.persona_name ? (
+        <p className="text-muted-foreground">
+          Persona:{' '}
+          <Badge variant="secondary" className="text-[10px]" data-testid="debug-persona">
+            {data.persona_name}
+          </Badge>
+        </p>
+      ) : null}
+
       {nodes.length === 0 ? (
         <p className="text-muted-foreground">No graph entities matched this turn.</p>
       ) : (

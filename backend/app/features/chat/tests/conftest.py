@@ -39,6 +39,7 @@ from app.features.chat import models as chat_models
 from app.features.chat.router import router as chat_router
 from app.features.engagements import models as eng_models
 from app.features.graph import models as graph_models
+from app.features.personas import models as persona_models
 
 
 @pytest.fixture(autouse=True)
@@ -64,6 +65,8 @@ def _patch_sqlite_columns() -> None:
         # Slice 12: the chat streamer reads the live graph for the §5.3 subset.
         graph_models.GraphNode,
         graph_models.GraphEdge,
+        # Slice 15: the streamer resolves the turn's persona (chat → personas).
+        persona_models.Persona,
     ):
         id_col: Column = model.__table__.c.id  # type: ignore[assignment]
         id_col.default = ColumnDefault(uuid4)
@@ -84,6 +87,7 @@ _TABLES: list[Table] = [
         audit_models.AuditChainHead,
         graph_models.GraphNode,
         graph_models.GraphEdge,
+        persona_models.Persona,
     )
 ]
 

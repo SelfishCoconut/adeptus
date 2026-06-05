@@ -66,6 +66,21 @@ describe('AiDebugPanel', () => {
     await waitFor(() => expect(screen.getByText(/2 nodes · 1 edge injected/i)).toBeInTheDocument())
   })
 
+  it('shows the persona that shaped the turn (§17.6) when recorded', async () => {
+    resolveGet({ data: debugRecord({ persona_name: 'Recon' }), response: { status: 200 } })
+    renderPanel()
+
+    await waitFor(() => expect(screen.getByTestId('debug-persona')).toHaveTextContent('Recon'))
+  })
+
+  it('omits the persona line when the turn has no persona', async () => {
+    resolveGet({ data: debugRecord(), response: { status: 200 } })
+    renderPanel()
+
+    await waitFor(() => expect(screen.getByText(/2 nodes · 1 edge injected/i)).toBeInTheDocument())
+    expect(screen.queryByTestId('debug-persona')).toBeNull()
+  })
+
   it('renders the empty-subset state when nothing matched', async () => {
     resolveGet({
       data: debugRecord({ nodes: [], edges: [] }),

@@ -59,6 +59,9 @@ from app.features.chat.schemas import (
 )
 from app.features.engagements import repository as eng_repo
 from app.features.graph import repository as graph_repo
+from app.features.personas import service as personas_service
+from app.features.personas.models import Persona
+from app.features.personas.seed import GENERAL_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +73,12 @@ RECENT_WINDOW = 20
 # progressing model is never aborted (§5.1 / Risk 4).
 NO_PROGRESS_TIMEOUT_SECONDS = 600.0
 
-# Open Question 4: single neutral general-style system prompt until personas (Slice 15).
-SYSTEM_PROMPT = (
-    "You are a penetration-testing assistant embedded in the Adeptus platform. "
-    "Help the operator reason about their authorized engagement: explain techniques, "
-    "interpret tool output, and suggest next steps. Be concise and technical."
-)
+# Slice 15 (resolved Open Question 3): the base system prompt is now the ``general``
+# built-in persona's prompt, kept as the single source of truth in ``personas.seed`` and
+# re-imported here so the no-persona default stays byte-identical (the ``general`` built-in
+# IS the default). A turn with a selected persona replaces this base (Decision 4); a turn
+# with no persona resolves to ``general`` and so uses exactly this text.
+SYSTEM_PROMPT = GENERAL_SYSTEM_PROMPT
 
 # Slice 13 (§5.3): the structured-output instruction. Appended AFTER the base prompt and
 # the Slice-12 graph context block so the model emits a trailing, machine-readable metadata
@@ -183,6 +186,7 @@ async def send_message(
     recent_node_ids: Sequence[UUID] = (),
     mentioned_node_ids: Sequence[UUID] = (),
     confirmed_egress: bool = False,
+    persona_id: UUID | None = None,
 ) -> SendChatMessageResult:
     """Persist the user message + an empty ``pending`` assistant placeholder.
 
@@ -211,13 +215,26 @@ async def send_message(
 
     egress = _evaluate_egress(engagement.privacy_mode, content, confirmed_egress)
 
+    # Resolve the selected persona for this turn (§5.3, Slice 15). A built-in or one of the
+    # caller's own personas is used; an unknown/foreign id falls back to general (§17.1 —
+    # never errors, never another user's prompt). Resolving HERE (not only at stream time)
+    # lets the read schema + the audit reflect the actual persona even if it is deleted
+    # before streaming; the streamer re-resolves for defense in depth (Risk 6 / TOCTOU).
+    persona = await personas_service.resolve_for_turn(
+        db, persona_id=persona_id, user_id=_user_id(requester)
+    )
+
     user_message, assistant_message = await chat_repo.insert_user_and_pending_assistant(
         db,
         engagement_id=engagement_id,
         user_id=_user_id(requester),
         content=content,
         graph_context=_input_stash(
-            pinned_node_ids, recent_node_ids, mentioned_node_ids, egress=egress
+            pinned_node_ids,
+            recent_node_ids,
+            mentioned_node_ids,
+            egress=egress,
+            persona=persona,
         ),
     )
     return SendChatMessageResult(
@@ -357,6 +374,7 @@ def _build_prompt(
     window: Sequence[ChatMessage],
     *,
     current_assistant_id: UUID,
+    system_prompt: str = SYSTEM_PROMPT,
     context_block: str = "",
 ) -> list[OllamaChatMessage]:
     """Build the Ollama messages array: system + completed window verbatim (§5.4/§5.5).
@@ -364,12 +382,14 @@ def _build_prompt(
     Skips the in-flight assistant placeholder and any non-complete/empty rows; the
     triggering user message (always ``complete``) is included unchanged — no redaction.
 
-    ``context_block`` (Slice 12) is the rendered §5.3 relevant subset; when non-empty it is
-    appended to the single system message verbatim (§5.5). When empty the graph block is
-    omitted (Slice-11 prompt). The Slice-13 structured-output instruction is appended last,
-    after the (optional) context block, so the model always sees it.
+    ``system_prompt`` (Slice 15) is the selected persona's distinct prompt and REPLACES the
+    base term; it defaults to the neutral ``SYSTEM_PROMPT`` (= the ``general`` built-in) so a
+    no-persona turn is byte-identical to the pre-slice prompt. ``context_block`` (Slice 12)
+    is the rendered §5.3 relevant subset, appended after the persona prompt verbatim (§5.5)
+    when non-empty. The Slice-13 structured-output instruction is appended last, after the
+    (optional) context block, so the model always sees it (composition order unchanged).
     """
-    base = f"{SYSTEM_PROMPT}\n\n{context_block}" if context_block else SYSTEM_PROMPT
+    base = f"{system_prompt}\n\n{context_block}" if context_block else system_prompt
     system_content = f"{base}{PLAN_CERTAINTY_INSTRUCTION}"
     messages: list[OllamaChatMessage] = [OllamaChatMessage(role="system", content=system_content)]
     for m in window:
@@ -448,6 +468,10 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
         # payload. Both clients share stream_chat's signature, so only the bound fn differs.
         settings = get_settings()
         egress = _stash_egress(current.graph_context)
+        # The persona selected at POST time (Slice 15). Used for the audit on the early-fail
+        # paths below; re-resolved authoritatively before the prompt is built (Risk 6).
+        stashed_persona_id, stashed_persona_name = _stash_persona(current.graph_context)
+        stashed_persona_id_str = str(stashed_persona_id) if stashed_persona_id is not None else None
         privacy_mode = await _engagement_privacy_mode(session, engagement_id, user_id)
         if privacy_mode == "cloud_enabled" and not settings.ADEPTUS_ANTHROPIC_API_KEY:
             await _finalize_failed(
@@ -459,6 +483,8 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
                 prompt_count=0,
                 backend="cloud",
                 egress=egress,
+                persona_id=stashed_persona_id_str,
+                persona_name=stashed_persona_name,
             )
             yield WebSocketChatChunk(type="error", message=CLOUD_NOT_CONFIGURED_MESSAGE)
             return
@@ -495,6 +521,8 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
                     prompt_count=0,
                     backend="cloud",
                     egress=egress,
+                    persona_id=stashed_persona_id_str,
+                    persona_name=stashed_persona_name,
                 )
                 yield WebSocketChatChunk(type="error", message=EGRESS_UNCONFIRMED_MESSAGE)
                 return
@@ -509,10 +537,20 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
             message_text=_triggering_user_text(window),
             stash=current.graph_context,
         )
-        prompt = _build_prompt(
-            window, current_assistant_id=message_id, context_block=subset.context_block
+        # Re-resolve the persona at stream time (defense in depth, Risk 6 / TOCTOU): a persona
+        # deleted between POST and stream falls back to general; its prompt REPLACES the base
+        # system prompt (Decision 4). The id + name are recorded on the turn + audit.
+        persona = await personas_service.resolve_for_turn(
+            session, persona_id=stashed_persona_id, user_id=user_id
         )
-        debug_record = _debug_record(subset, _render_raw_prompt(prompt))
+        persona_id_str, persona_name = _persona_audit(persona)
+        prompt = _build_prompt(
+            window,
+            current_assistant_id=message_id,
+            system_prompt=persona.system_prompt,
+            context_block=subset.context_block,
+        )
+        debug_record = _debug_record(subset, _render_raw_prompt(prompt), persona=persona)
 
         usage = OllamaUsage()
         # full accumulates the raw reply (incl. the metadata block); emitted tracks how much
@@ -545,6 +583,8 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
                     subset=subset,
                     backend=backend,
                     egress=egress,
+                    persona_id=persona_id_str,
+                    persona_name=persona_name,
                 )
                 yield WebSocketChatChunk(type="error", message=UNREACHABLE_MESSAGE)
                 return
@@ -575,6 +615,8 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
             usage=usage,
             backend=backend,
             egress=egress,
+            persona_id=persona_id_str,
+            persona_name=persona_name,
         )
         yield WebSocketChatChunk(type="done", plan=plan, claims=claims)
 
@@ -594,15 +636,18 @@ async def _finalize_complete_turn(
     usage: OllamaUsage,
     backend: str = "local",
     egress: dict[str, Any] | None = None,
+    persona_id: str | None = None,
+    persona_name: str | None = None,
 ) -> tuple[list[PlanStep], list[Claim]]:
     """Parse, validate, persist, and audit a completed turn; return its plan + claims.
 
     Splits the §5.3 metadata block off ``full_reply``, validates each claim's ``node_id``
     against the engagement's live graph (foreign/unknown dropped, §17.1), persists the
     block-stripped prose as ``content`` plus plan/claims/unstripped-output into the per-turn
-    JSONB (merging the Slice-12 keys, Risk 6), and emits exactly one ``ai_call`` — only when
-    this call won the pending→terminal transition (a racing socket gets ``None`` and must
-    not re-emit, Risk 6). The caller yields the returned plan/claims on the ``done`` frame.
+    JSONB (merging the Slice-12 keys + the Slice-15 persona keys carried on ``debug_record``,
+    Risk 6/7), and emits exactly one ``ai_call`` — only when this call won the pending→
+    terminal transition (a racing socket gets ``None`` and must not re-emit, Risk 6). The
+    caller yields the returned plan/claims on the ``done`` frame.
     """
     prose, plan, claims = plan_parser.extract(full_reply)
     claims = _validate_claim_node_ids(claims, live_node_ids)
@@ -635,6 +680,8 @@ async def _finalize_complete_turn(
             claims_count=len(claims),
             backend=backend,
             egress=egress,
+            persona_id=persona_id,
+            persona_name=persona_name,
         )
     await session.commit()
     return plan, claims
@@ -652,13 +699,18 @@ async def _finalize_failed(
     subset: subset_builder.GraphSubset | None = None,
     backend: str = "local",
     egress: dict[str, Any] | None = None,
+    persona_id: str | None = None,
+    persona_name: str | None = None,
 ) -> None:
     """Persist the assistant row ``failed`` + emit the ``ai_call`` audit entry, atomic.
 
     Like the success path, the ``ai_call`` is emitted only when this call won the
     pending→failed transition (Risk 6 — exactly one ai_call per turn). The §14 debug record
-    (the resolved subset + raw prompt) is persisted even on failure so the debug panel can
-    show what the AI was shown on a turn that never produced output (model_output empty)."""
+    (the resolved subset + raw prompt, incl. the Slice-15 persona keys) is persisted even on
+    failure so the debug panel can show what the AI was shown on a turn that never produced
+    output (model_output empty). On the early-fail paths ``graph_context`` is None (the
+    POST-time stash — which still carries the persona — is left intact); the persona id/name
+    passed here are recorded in the ``ai_call`` payload regardless."""
     finalized = await chat_repo.finalize_assistant(
         session,
         message_id=message_id,
@@ -682,6 +734,8 @@ async def _finalize_failed(
             edges_injected=subset.edges_injected if subset is not None else 0,
             backend=backend,
             egress=egress,
+            persona_id=persona_id,
+            persona_name=persona_name,
         )
     await session.commit()
 
@@ -701,14 +755,17 @@ async def _emit_ai_call(
     claims_count: int = 0,
     backend: str = "local",
     egress: dict[str, Any] | None = None,
+    persona_id: str | None = None,
+    persona_name: str | None = None,
 ) -> None:
     """Record one ``ai_call`` audit entry attributed to the acting user (§14).
 
     The payload carries the §5.3 subset *counts* (Slice 12), the Slice-13 plan/claim counts,
-    and — from Slice 14 — the egress decision: ``backend`` (``local``|``cloud``),
-    ``egress_secret_flagged``, ``egress_confirmed``, and ``egress_match_categories`` (pattern
-    category NAMES only — NEVER the matched secret value, §5.5 / Risk 7). No new audit
-    action/table, just a widened payload (the ADR-0010 hash-chain covers it as written,
+    the Slice-14 egress decision: ``backend`` (``local``|``cloud``), ``egress_secret_flagged``,
+    ``egress_confirmed``, ``egress_match_categories`` (pattern category NAMES only — NEVER the
+    matched secret value, §5.5 / Risk 7), and — from Slice 15 — the ``persona_id`` +
+    ``persona_name`` that shaped the turn (the name is a non-secret display label). No new
+    audit action/table, just a widened payload (the ADR-0010 hash-chain covers it as written,
     Resolved decision 3)."""
     decision = egress if egress is not None else {}
     await audit_service.record(
@@ -731,6 +788,8 @@ async def _emit_ai_call(
             "egress_secret_flagged": bool(decision.get("secret_flagged", False)),
             "egress_confirmed": bool(decision.get("confirmed", False)),
             "egress_match_categories": list(decision.get("match_categories", [])),
+            "persona_id": persona_id,
+            "persona_name": persona_name,
         },
     )
 
@@ -757,14 +816,16 @@ def _input_stash(
     mentioned: Sequence[UUID],
     *,
     egress: dict[str, Any] | None = None,
+    persona: Persona | None = None,
 ) -> dict[str, Any]:
     """Serialize the client-supplied §5.3 union inputs for the pending-row stash (Decision 4).
 
     Stored as JSON-safe id strings under ``inputs`` so the streamer can re-resolve them
     against the live graph at stream time; overwritten with the canonical subset at finalize.
     The Slice-14 ``egress`` decision (``secret_flagged``/``confirmed``/``match_categories`` —
-    category NAMES only, §5.5) rides alongside under ``egress`` so the streamer can write it
-    into the ``ai_call`` audit payload before the stash is replaced at finalize.
+    category NAMES only, §5.5) rides alongside under ``egress``. The Slice-15 ``persona``
+    (resolved id + name) rides under ``persona`` so the streamer can re-resolve it and the
+    read schema / audit reflect it even before the canonical record is written at finalize.
     """
     stash: dict[str, Any] = {
         "inputs": {
@@ -775,7 +836,42 @@ def _input_stash(
     }
     if egress is not None:
         stash["egress"] = egress
+    if persona is not None:
+        stash["persona"] = _persona_stash(persona)
     return stash
+
+
+def _persona_stash(persona: Persona) -> dict[str, Any]:
+    """The JSON-safe persona record (id + name) stashed on the pending row (§5.3, Slice 15).
+
+    ``id`` is None only for the synthesized-general fallback when the built-ins are unseeded;
+    ``name`` is the verbatim display name (non-secret, §5.5), denormalized so a renamed/
+    deleted persona still labels the turn."""
+    return {
+        "id": str(persona.id) if persona.id is not None else None,
+        "name": persona.name,
+    }
+
+
+def _opt_uuid(value: object) -> UUID | None:
+    """Parse a stashed id string back to UUID, or None when absent/malformed."""
+    if value is None:
+        return None
+    try:
+        return UUID(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
+def _stash_persona(stash: dict[str, Any] | None) -> tuple[UUID | None, str | None]:
+    """Read the POST-time persona (id, name) back from the pending row's stash (Slice 15).
+
+    Tolerates absence (pre-slice rows, user rows) → (None, None)."""
+    raw = stash.get("persona") if isinstance(stash, dict) else None
+    if not isinstance(raw, dict):
+        return None, None
+    name = raw.get("name")
+    return _opt_uuid(raw.get("id")), name if isinstance(name, str) else None
 
 
 async def _engagement_privacy_mode(
@@ -868,18 +964,29 @@ def _render_raw_prompt(prompt: Sequence[OllamaChatMessage]) -> str:
     return "\n\n".join(f"[{m.role}]\n{m.content}" for m in prompt)
 
 
-def _debug_record(subset: subset_builder.GraphSubset, raw_prompt: str) -> dict[str, Any]:
+def _debug_record(
+    subset: subset_builder.GraphSubset, raw_prompt: str, *, persona: Persona
+) -> dict[str, Any]:
     """The base per-turn §14 debug record persisted into ``chat_messages.graph_context``.
 
-    Holds the Slice-12 keys (subset nodes/edges + context_block + raw_prompt). The Slice-13
-    plan/claims/model_output keys are layered on by ``_finalize_record`` on the success
-    path; on a failed turn this base record is stored as-is (no plan/claims/output)."""
+    Holds the Slice-12 keys (subset nodes/edges + context_block + raw_prompt) plus the
+    Slice-15 ``persona_id`` / ``persona_name`` for the persona that shaped this turn (carried
+    through to both finalize paths so the read schema labels the turn even on a failed turn).
+    The Slice-13 plan/claims/model_output keys are layered on by ``_finalize_record`` on the
+    success path; on a failed turn this base record is stored as-is."""
     return {
         "nodes": [n.model_dump(mode="json") for n in subset.nodes],
         "edges": [e.model_dump(mode="json") for e in subset.edges],
         "context_block": subset.context_block,
         "raw_prompt": raw_prompt,
+        "persona_id": str(persona.id) if persona.id is not None else None,
+        "persona_name": persona.name,
     }
+
+
+def _persona_audit(persona: Persona) -> tuple[str | None, str]:
+    """The (persona_id-str, persona_name) recorded on the turn + in the ``ai_call`` audit."""
+    return (str(persona.id) if persona.id is not None else None, persona.name)
 
 
 def _finalize_record(
@@ -926,6 +1033,7 @@ def _to_message_read(message: ChatMessage) -> ChatMessageRead:
     conversation re-renders the Plan panel + in-chat certainty badges without the lazy
     debug call. User/pending/pre-slice rows have no stored plan/claims → empty lists."""
     plan, claims = _stored_plan_claims(message)
+    persona_id, persona_name = _stored_persona(message)
     return ChatMessageRead(
         id=cast(UUID, message.id),
         engagement_id=cast(UUID, message.engagement_id),
@@ -935,7 +1043,23 @@ def _to_message_read(message: ChatMessage) -> ChatMessageRead:
         created_at=message.created_at,
         plan=plan,
         claims=claims,
+        persona_id=persona_id,
+        persona_name=persona_name,
     )
+
+
+def _stored_persona(message: ChatMessage) -> tuple[UUID | None, str | None]:
+    """Read the persona (id, name) for a turn back from its ``graph_context`` JSONB (Slice 15).
+
+    Reads the canonical finalized keys (``persona_id`` / ``persona_name``) when present, else
+    falls back to the POST-time stash (``persona.id`` / ``persona.name``) so a pending or
+    early-failed turn still carries its selected persona. (None, None) for user/pre-slice rows.
+    """
+    gc = message.graph_context if isinstance(message.graph_context, dict) else {}
+    if "persona_id" in gc or "persona_name" in gc:
+        name = gc.get("persona_name")
+        return _opt_uuid(gc.get("persona_id")), name if isinstance(name, str) else None
+    return _stash_persona(gc)
 
 
 def _stored_plan_claims(message: ChatMessage) -> tuple[list[PlanStep], list[Claim]]:
@@ -1035,6 +1159,7 @@ def _to_turn_debug(message: ChatMessage) -> ChatTurnDebug:
         else []
     )
     plan, claims = _stored_plan_claims(message)
+    persona_id, persona_name = _stored_persona(message)
     stored_output = gc.get("model_output")
     model_output = stored_output if isinstance(stored_output, str) else message.content
     return ChatTurnDebug(
@@ -1048,4 +1173,6 @@ def _to_turn_debug(message: ChatMessage) -> ChatTurnDebug:
         model_output=model_output,
         plan=plan,
         claims=claims,
+        persona_id=persona_id,
+        persona_name=persona_name,
     )

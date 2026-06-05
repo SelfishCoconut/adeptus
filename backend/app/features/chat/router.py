@@ -113,6 +113,7 @@ async def send_chat_message(
             recent_node_ids=body.recent_node_ids,
             mentioned_node_ids=body.mentioned_node_ids,
             confirmed_egress=body.confirmed_egress,
+            persona_id=body.persona_id,
         )
     except service.EgressConfirmationRequiredError as exc:
         return _conflict_body(EgressRefusalReason.EGRESS_SECRET_FLAGGED, exc.matched_categories)
