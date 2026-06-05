@@ -640,6 +640,33 @@ async def test_get_turn_debug_owner_only_404(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_turn_debug_wrong_engagement_404(db_session: AsyncSession) -> None:
+    """A user cannot read their own debug record through a different engagement's path (Risk 5)."""
+    owner = await _seed_user(db_session, "owner-xeng")
+    eng_a = await _seed_engagement(db_session, cast(UUID, owner.id))
+    eng_b = await _seed_engagement(db_session, cast(UUID, owner.id))
+
+    # Owner sends a message in engagement B and gets an assistant turn there.
+    result = await service.send_message(
+        db_session, engagement_id=eng_b, requester=owner, content="hello from B"
+    )
+    await db_session.commit()
+    assistant_id_b = result.assistant_message.id
+
+    # Reading via engagement B (correct path) succeeds.
+    debug = await service.get_turn_debug(
+        db_session, engagement_id=eng_b, requester=owner, message_id=assistant_id_b
+    )
+    assert debug.message_id == assistant_id_b
+
+    # Reading that same message via engagement A's path must 404 (cross-engagement leak guard).
+    with pytest.raises(NotFoundError):
+        await service.get_turn_debug(
+            db_session, engagement_id=eng_a, requester=owner, message_id=assistant_id_b
+        )
+
+
+@pytest.mark.asyncio
 async def test_get_turn_debug_non_assistant_404(db_session: AsyncSession) -> None:
     owner = await _seed_user(db_session, "owner")
     eng_id = await _seed_engagement(db_session, cast(UUID, owner.id))
