@@ -26,6 +26,7 @@ from app.features.chat.models import ChatMessage
 from app.features.chat.ollama_client import OllamaUsage
 from app.features.chat.schemas import OllamaChatMessage
 from app.features.engagements import repository as eng_repo
+from app.features.graph import repository as graph_repo
 
 # A fake stream_chat: takes the prompt messages + optional usage holder, yields str tokens.
 FakeStream = Callable[..., AsyncIterator[str]]
@@ -425,3 +426,233 @@ async def _seed_pending(
         await s.commit()
         await s.refresh(assistant)
         return assistant
+
+
+async def _seed_turn_with_graph(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    content: str = "what is sqli?",
+    node_specs: Sequence[tuple[str, str, dict[str, object]]] = (),
+    pin_labels: Sequence[str] = (),
+) -> ChatMessage:
+    """Seed an engagement with a graph + a pending turn whose stash pins ``pin_labels``.
+
+    Returns the (detached) pending assistant row ready for ``stream_assistant_reply``. Goes
+    through ``service.send_message`` so the §5.3 inputs are stashed exactly as in production.
+    """
+    async with factory() as s:
+        owner = await _seed_user(s, f"owner-{uuid4().hex[:8]}")
+        eng_id = await _seed_engagement(s, cast(UUID, owner.id))
+        label_to_id: dict[str, UUID] = {}
+        for node_type, label, properties in node_specs:
+            node = await graph_repo.insert_node(
+                s, engagement_id=eng_id, node_type=node_type, label=label, properties=properties
+            )
+            label_to_id[label] = cast(UUID, node.id)
+        await s.commit()
+
+        result = await service.send_message(
+            s,
+            engagement_id=eng_id,
+            requester=owner,
+            content=content,
+            pinned_node_ids=[label_to_id[label] for label in pin_labels],
+        )
+        await s.commit()
+        assistant = await chat_repo.get_message_for_owner(
+            s, message_id=result.assistant_message.id, user_id=cast(UUID, owner.id)
+        )
+        assert assistant is not None
+        return assistant
+
+
+# ---------------------------------------------------------------------------
+# stream_assistant_reply — §5.3 relevant-subset injection (Slice 12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_injects_pinned_node_into_prompt(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    message = await _seed_turn_with_graph(
+        db_factory,
+        content="anything",
+        node_specs=[("host", "target-host-xyz", {})],
+        pin_labels=["target-host-xyz"],
+    )
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    system_msg = captured[0][0]
+    assert system_msg.role == "system"
+    assert "target-host-xyz" in system_msg.content
+    assert "## Relevant graph subset" in system_msg.content
+
+
+@pytest.mark.asyncio
+async def test_stream_keyword_match_included(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    # No pin — the node is pulled in purely by the keyword arm matching its label.
+    message = await _seed_turn_with_graph(
+        db_factory,
+        content="what should I try against the login page?",
+        node_specs=[("endpoint", "/login", {})],
+    )
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert "/login" in captured[0][0].content
+
+
+@pytest.mark.asyncio
+async def test_stream_empty_graph_no_context_block(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    # Engagement with no graph at all — Slice-11 prompt must be preserved exactly.
+    message = await _seed_turn_with_graph(db_factory, content="hi there")
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    system_msg = captured[0][0]
+    assert system_msg.content == service.SYSTEM_PROMPT
+    assert "Relevant graph subset" not in system_msg.content
+
+
+@pytest.mark.asyncio
+async def test_stream_persists_graph_context_debug_record(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["done"]))
+    message = await _seed_turn_with_graph(
+        db_factory,
+        content="anything",
+        node_specs=[("host", "db-host", {})],
+        pin_labels=["db-host"],
+    )
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    gc = row.graph_context
+    assert gc is not None
+    assert [n["label"] for n in gc["nodes"]] == ["db-host"]
+    assert "pinned" in gc["nodes"][0]["reasons"]
+    assert "## Relevant graph subset" in gc["context_block"]
+    assert gc["raw_prompt"]  # the rendered raw prompt is captured for §14
+
+
+@pytest.mark.asyncio
+async def test_ai_call_payload_has_subset_counts(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["ok"]))
+    message = await _seed_turn_with_graph(
+        db_factory,
+        content="anything",
+        node_specs=[("host", "only-host", {})],
+        pin_labels=["only-host"],
+    )
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    mock_audit_record.assert_awaited_once()
+    call = mock_audit_record.await_args
+    assert call is not None
+    payload = call.kwargs["payload"]
+    assert payload["graph_nodes_injected"] == 1
+    assert payload["graph_edges_injected"] == 0
+
+
+@pytest.mark.asyncio
+async def test_prompt_graph_block_not_redacted(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    secret = "hunter2-SECRET-do-not-strip"
+    message = await _seed_turn_with_graph(
+        db_factory,
+        content="anything",
+        node_specs=[("credential", "db-root", {"password": secret})],
+        pin_labels=["db-root"],
+    )
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    # The secret-looking property value reaches the (local) model verbatim (§5.5 / Risk 6).
+    assert secret in captured[0][0].content
+
+
+# ---------------------------------------------------------------------------
+# get_turn_debug — §14 debug-panel data source (Slice 12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_turn_debug_owner_only_404(db_session: AsyncSession) -> None:
+    owner = await _seed_user(db_session, "owner")
+    other = await _seed_user(db_session, "other")
+    eng_id = await _seed_engagement(db_session, cast(UUID, owner.id))
+    await eng_repo.add_member(db_session, engagement_id=eng_id, user_id=cast(UUID, other.id))
+    await db_session.commit()
+
+    result = await service.send_message(
+        db_session, engagement_id=eng_id, requester=owner, content="private"
+    )
+    await db_session.commit()
+    assistant_id = result.assistant_message.id
+
+    # The owner can read their own turn's debug record.
+    debug = await service.get_turn_debug(
+        db_session, engagement_id=eng_id, requester=owner, message_id=assistant_id
+    )
+    assert debug.message_id == assistant_id
+
+    # Another member of the same engagement cannot (per-user, §5.4 / Risk 5).
+    with pytest.raises(NotFoundError):
+        await service.get_turn_debug(
+            db_session, engagement_id=eng_id, requester=other, message_id=assistant_id
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_turn_debug_non_assistant_404(db_session: AsyncSession) -> None:
+    owner = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, owner.id))
+    result = await service.send_message(
+        db_session, engagement_id=eng_id, requester=owner, content="hi"
+    )
+    await db_session.commit()
+
+    # The USER row is owned by the caller but is not an assistant turn → 404.
+    with pytest.raises(NotFoundError):
+        await service.get_turn_debug(
+            db_session,
+            engagement_id=eng_id,
+            requester=owner,
+            message_id=result.user_message.id,
+        )
