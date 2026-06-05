@@ -31,6 +31,7 @@ async def insert_user_and_pending_assistant(
     engagement_id: UUID,
     user_id: UUID,
     content: str,
+    graph_context: dict[str, Any] | None = None,
 ) -> tuple[ChatMessage, ChatMessage]:
     """Insert the user message and an empty ``pending`` assistant placeholder in one
     flush (persist-first). Returns ``(user_message, assistant_message)``.
@@ -39,6 +40,11 @@ async def insert_user_and_pending_assistant(
     mid-stream leaves a recoverable ``pending`` row rather than a lost message. The
     assistant ``created_at`` is one microsecond after the user's so the pair has a
     stable, deterministic order. The caller commits.
+
+    ``graph_context`` (Slice 12, Decision 4) stashes the turn's raw §5.3 union *inputs*
+    (the client-supplied id lists) onto the pending assistant row, so the WS streamer can
+    resolve them at stream time without the WS frame carrying them — surviving a dropped
+    socket. ``stream_assistant_reply`` overwrites it with the canonical subset at finalize.
     """
     now = datetime.now(UTC)
     user_message = ChatMessage(
@@ -55,6 +61,7 @@ async def insert_user_and_pending_assistant(
         role="assistant",
         content="",
         status="pending",
+        graph_context=graph_context,
         created_at=now + timedelta(microseconds=1),
     )
     db.add_all([user_message, assistant_message])
@@ -162,6 +169,7 @@ async def finalize_assistant(
     model: str | None,
     prompt_tokens: int | None,
     completion_tokens: int | None,
+    graph_context: dict[str, Any] | None = None,
 ) -> ChatMessage | None:
     """Atomically transition a ``pending`` assistant row to its terminal state.
 
@@ -171,17 +179,25 @@ async def finalize_assistant(
     ``ai_call`` audit emission and the §14 exactly-once guarantee holds (Risk 6). Returns
     the refreshed row on a real transition, else ``None`` (already terminal or missing).
     The caller commits (atomically with the ``ai_call`` audit entry).
+
+    When ``graph_context`` is provided (Slice 12) it overwrites the stashed POST-time
+    inputs with the canonical per-turn §14 debug record (resolved subset + raw_prompt).
+    When omitted the column is left untouched, so a caller that doesn't track graph
+    context never clobbers a previously-stashed record.
     """
+    values: dict[str, Any] = {
+        "content": content,
+        "status": status,
+        "model": model,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+    }
+    if graph_context is not None:
+        values["graph_context"] = graph_context
     result = await db.execute(
         update(ChatMessage)
         .where(ChatMessage.id == message_id, ChatMessage.status == "pending")
-        .values(
-            content=content,
-            status=status,
-            model=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        )
+        .values(**values)
     )
     # execute() is typed as returning Result; a DML statement yields a CursorResult that
     # carries rowcount. cast satisfies both mypy configs (see the mypy-divergence note).

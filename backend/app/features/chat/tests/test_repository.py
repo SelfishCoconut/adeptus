@@ -219,3 +219,72 @@ async def test_finalize_assistant_missing_returns_none(db_session: AsyncSession)
         completion_tokens=None,
     )
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_insert_stashes_graph_context_on_assistant_only(db_session: AsyncSession) -> None:
+    """The POST-time §5.3 input stash lands on the assistant row; the user row stays NULL."""
+    eng, user = uuid4(), uuid4()
+    stash = {"inputs": {"pinned_node_ids": [str(uuid4())], "recent_node_ids": []}}
+    user_msg, assistant_msg = await repo.insert_user_and_pending_assistant(
+        db_session, engagement_id=eng, user_id=user, content="hi", graph_context=stash
+    )
+    await db_session.commit()
+
+    assert assistant_msg.graph_context == stash
+    assert user_msg.graph_context is None  # NULL for user rows (§8.2)
+
+
+@pytest.mark.asyncio
+async def test_finalize_assistant_persists_graph_context(db_session: AsyncSession) -> None:
+    """finalize overwrites the stash with the canonical per-turn debug record (Decision 4)."""
+    eng, user = uuid4(), uuid4()
+    _, assistant_msg = await _seed_turn(db_session, engagement_id=eng, user_id=user, content="q")
+    msg_id = cast(UUID, assistant_msg.id)
+
+    record = {
+        "nodes": [{"id": str(uuid4()), "type": "host", "label": "h", "reasons": ["pinned"]}],
+        "edges": [],
+        "context_block": "## Relevant graph subset\n- (host) h",
+        "raw_prompt": "system...\nuser...",
+    }
+    updated = await repo.finalize_assistant(
+        db_session,
+        message_id=msg_id,
+        content="the answer",
+        status="complete",
+        model="qwen3.5:9b",
+        prompt_tokens=1,
+        completion_tokens=1,
+        graph_context=record,
+    )
+    await db_session.commit()
+
+    assert updated is not None
+    assert updated.graph_context == record
+
+
+@pytest.mark.asyncio
+async def test_finalize_without_graph_context_preserves_stash(db_session: AsyncSession) -> None:
+    """Omitting graph_context leaves a previously-stashed record untouched (no clobber)."""
+    eng, user = uuid4(), uuid4()
+    stash = {"inputs": {"pinned_node_ids": [str(uuid4())]}}
+    _, assistant_msg = await repo.insert_user_and_pending_assistant(
+        db_session, engagement_id=eng, user_id=user, content="q", graph_context=stash
+    )
+    await db_session.commit()
+    msg_id = cast(UUID, assistant_msg.id)
+
+    updated = await repo.finalize_assistant(
+        db_session,
+        message_id=msg_id,
+        content="answer",
+        status="complete",
+        model="qwen3.5:9b",
+        prompt_tokens=1,
+        completion_tokens=1,
+    )
+    await db_session.commit()
+
+    assert updated is not None
+    assert updated.graph_context == stash
