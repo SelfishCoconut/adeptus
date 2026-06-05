@@ -168,7 +168,10 @@ async def test_decide_on_terminal_returns_none(db_session: AsyncSession) -> None
 
 async def test_concurrent_decide_only_one_wins(db_session: AsyncSession) -> None:
     # Interleave two decides on the same pending request; the guarded conditional UPDATE
-    # means exactly one claims the row and the other gets None (no double-execution).
+    # means exactly one claims the row and the other gets None (no double-execution). This
+    # proves the WHERE status='pending' predicate; the TRUE concurrent row-locking guarantee
+    # (FOR UPDATE is ignored by SQLite) is a Postgres-only property exercised end-to-end by
+    # test_integration.test_double_approve_runs_only_once.
     req = await _make(db_session)
     winner = await repo.decide_request(
         db_session,

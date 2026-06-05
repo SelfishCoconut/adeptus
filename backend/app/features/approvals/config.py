@@ -62,7 +62,9 @@ AGGRESSIVE_SCAN_TOOLS: frozenset[str] = _env_set(
 
 CREDENTIAL_ATTACK_TOOLS: frozenset[str] = _env_set(
     "ADEPTUS_CREDENTIAL_ATTACK_TOOLS",
-    frozenset({"hydra", "medusa", "ncrack", "patator", "crowbar"}),
+    # ffuf is included (the spec's canonical example) so a login-endpoint fuzz gates as a
+    # credential attack even without a brute/spray arg signal; its weight=heavy also gates it.
+    frozenset({"hydra", "medusa", "ncrack", "patator", "crowbar", "ffuf"}),
 )
 
 # Resolved preset names that always mean an aggressive scan (§5.2 second bullet).

@@ -5,8 +5,9 @@ import { chatKeys } from '@/features/chat/api'
 /**
  * The "running automatically" card payload for the no-gate path (§5.2 autonomous). NOT a
  * generated type — it rides the chat WebSocket `proposed_action` frame (hand-mirrored from
- * the backend value object), so it is declared here and consumed by both the card and the
- * chat stream hook. No DB row exists for an autonomous command.
+ * the backend value object at `backend/app/features/approvals/schemas.py::AutonomousAction`),
+ * so it is declared here and consumed by both the card and the chat stream hook. Keep the two
+ * in sync. No DB row exists for an autonomous command.
  */
 export interface AutonomousAction {
   server_name: string

@@ -16,9 +16,11 @@ Three entry points:
   tool-run pipeline attributed to the **initiator**.
 
 Services raise domain exceptions; the router translates them (NotFoundError→404; the two
-409s carry an ``ApprovalConflict`` body). The caller (router/chat streamer) owns the
-commit — except that ``mcp.service.execute_tool_run(async_mode=True)`` commits internally,
-so on approve the claim + audit are flushed first and commit atomically with the run row.
+409s carry an ``ApprovalConflict`` body). ``decide`` owns its commit explicitly (like the
+chat/mcp async-action paths) so the router does NOT commit a decision again: on reject the
+service commits the decision + audit atomically; on approve ``execute_tool_run`` is the
+single atomic commit point for the decision + audit + run, with the ``tool_run_id`` link a
+best-effort follow-up commit. Read paths (``list_requests``) do no writes and no commit.
 """
 
 from __future__ import annotations
@@ -54,7 +56,10 @@ from app.features.mcp.registry import ConfigError, get_registry
 logger = logging.getLogger(__name__)
 
 # The dangerous command, once approved, enters the existing concurrency model unchanged
-# (§6.2). A fixed default budget mirrors the manual tool-run default (Slice 04/05).
+# (§6.2). The per-request budget intentionally mirrors the manual tool-run default
+# (``ToolRunCreate.timeout_seconds`` = 30s, Slice 04/05): an approved command gets exactly
+# the same budget a member's manual run would, so approval changes the *gate*, not the
+# execution envelope. The tool-run pipeline's own kill/extend/timeout UX (Slice 06) applies.
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 30
 
 
@@ -111,11 +116,20 @@ def _resolve_tool_config(server_name: str, tool_name: str) -> ToolConfig | None:
     """Resolve a proposed action's manifest classification from the live MCP registry.
 
     Returns ``None`` when the server or tool is unknown (the action is then dropped —
-    §17.1, no hallucinated-tool execution).
+    §17.1, no hallucinated-tool execution). A registry that is not loaded / mis-configured
+    is logged loudly (and the action is dropped, never run): a broken registry must fail
+    closed, but it is an operator problem, not a silently-dropped proposal.
     """
     try:
         registry = get_registry()
-    except ConfigError:
+    except ConfigError as exc:
+        logger.error(
+            "MCP registry unavailable while classifying %s/%s; dropping the proposed "
+            "action (fail-closed). Fix the MCP config: %s",
+            server_name,
+            tool_name,
+            exc,
+        )
         return None
     server = registry.get(server_name)
     if server is None:
@@ -341,23 +355,55 @@ async def decide(
     )
 
     if decision == "approve":
-        # Run the AI-on-behalf-of-the-initiator command (Resolved decision 3): attributed
-        # to the INITIATOR, never the approver. Only the winning branch reaches here.
-        run = await mcp_service.execute_tool_run(
+        return await _execute_approved_run(
             db,
             engagement_id=engagement_id,
-            server_name=request.server_name,
-            tool_name=request.tool_name,
-            args=request.args,
-            timeout_seconds=DEFAULT_APPROVAL_TIMEOUT_SECONDS,
-            user_id=initiator_id,
-            async_mode=True,
-            preset_name=request.preset_name,
+            request_id=request_id,
+            request=request,
+            initiator_id=initiator_id,
+            claimed=claimed,
         )
-        await repo.set_tool_run_id(db, request_id=request_id, tool_run_id=run.tool_run_id)
-        final = await repo.get_request_for_engagement(
-            db, engagement_id=engagement_id, request_id=request_id
-        )
-        return await _to_read(db, final if final is not None else claimed)
 
+    # Reject: the decision + its audit entry are the whole transaction — commit them
+    # atomically here (the service owns the commit for a decision, like the chat/mcp
+    # async-action paths; the router does NOT commit again).
+    await db.commit()
     return await _to_read(db, claimed)
+
+
+async def _execute_approved_run(
+    db: AsyncSession,
+    *,
+    engagement_id: UUID,
+    request_id: UUID,
+    request: ApprovalRequest,
+    initiator_id: UUID,
+    claimed: ApprovalRequest,
+) -> ApprovalRequestRead:
+    """Run an approved command and link it back, with an explicit commit ordering (Risk 4).
+
+    ``execute_tool_run(async_mode=True)`` is the single atomic commit point for the
+    decision UPDATE + the ``approval_granted`` audit row + the inserted ``tool_runs`` row
+    (all already flushed): they commit together, so a crash before it rolls the whole
+    decision back cleanly (no decided-but-unaudited gap, no orphan run). The command runs
+    on the INITIATOR's behalf (Resolved decision 3). The ``tool_run_id`` back-link is then a
+    best-effort convenience pointer (the audit log is the source of truth) committed
+    separately; a crash before it only loses the denormalized link, not the run or its audit.
+    """
+    run = await mcp_service.execute_tool_run(
+        db,
+        engagement_id=engagement_id,
+        server_name=request.server_name,
+        tool_name=request.tool_name,
+        args=request.args,
+        timeout_seconds=DEFAULT_APPROVAL_TIMEOUT_SECONDS,
+        user_id=initiator_id,
+        async_mode=True,
+        preset_name=request.preset_name,
+    )
+    await repo.set_tool_run_id(db, request_id=request_id, tool_run_id=run.tool_run_id)
+    await db.commit()
+    final = await repo.get_request_for_engagement(
+        db, engagement_id=engagement_id, request_id=request_id
+    )
+    return await _to_read(db, final if final is not None else claimed)

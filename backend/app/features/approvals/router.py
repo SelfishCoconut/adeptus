@@ -127,7 +127,7 @@ async def _decide(
         return _conflict("already_decided", status_value=ApprovalStatus(exc.status))
     except service.EngagementArchivedError:
         return _conflict("engagement_archived")
-    await db.commit()
+    # service.decide owns its commit (explicit ordering — Risk 4); no second commit here.
     return result
 
 

@@ -372,13 +372,20 @@ benign-but-heavy tool runs… no: a `heavy` tool is dangerous (it has a classifi
 `light` tool with declared non-dangerous flags is autonomous. The only autonomous tools are
 ones with a **present, validated, non-dangerous** classification. This is enforced two ways:
 
-- **Runtime guard in the classifier:** the missing/empty case returns `requires_approval` +
-  `unclassified_manifest` (never silently autonomous).
-- **Startup/config validation:** every tool the live MCP config exposes must have a non-empty
-  manifest classification (a present `weight` and a present — possibly empty after vetting —
-  `capability_flags` list that has been explicitly set). A `validate_tool_manifests()` helper
-  (called at registry load) logs a loud warning for any tool missing weight or flags so the
-  admin notices a mis-manifested server; such tools still gate at runtime via the escape hatch.
+- **Live enforcement — fail-closed at config load (authoritative).** The MCP registry parser
+  (`mcp/registry.py`) **requires** a present, valid `weight` (`light`/`heavy`) for every tool:
+  a tool with no/invalid weight raises `ConfigError` at startup and is **never registered**, so
+  it can never be proposed or run **at all** — strictly stronger than gating. This is the real
+  live guarantee that an un-manifested tool cannot run ungated (proven by
+  `mcp/tests/test_registry.py::TestFailClosedOnMissingWeight`).
+- **Defense-in-depth — runtime guard in the classifier.** The classifier additionally gates any
+  `ToolConfig` with `weight is None` as `requires_approval` + `unclassified_manifest`
+  (never silently autonomous). Because layer 1 prevents a weightless tool from ever reaching the
+  live `_resolve_tool_config` path, this hatch is a *belt-and-suspenders* guarantee covering the
+  pure-classifier boundary and any future/alternate resolver; paired with
+  `validate_tool_manifests()` (a loud load-time warning), it ensures "never silently autonomous"
+  even if layer 1 is ever relaxed. (Resolution of the code-review finding that the runtime hatch
+  alone is unreachable in the live path — the *system* is fail-closed; the hatch is defensive.)
 
 `out_of_scope` is **reserved, never returned here** (Slice 17 adds the scope check that
 appends it). The dangerous lists/sets/flag-set live in config (`approvals/config.py`

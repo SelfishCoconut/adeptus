@@ -84,14 +84,12 @@ async def list_for_engagement(
     Postgres- and SQLite-compatible. ``next_cursor`` is the ``(created_at, id)`` of the
     last returned row, or ``None`` when the page is the last.
     """
-    stmt = (
-        select(ApprovalRequest)
-        .where(ApprovalRequest.engagement_id == engagement_id)
-        .order_by(desc(ApprovalRequest.created_at), desc(ApprovalRequest.id))
-        .limit(limit + 1)
-    )
+    stmt = select(ApprovalRequest).where(ApprovalRequest.engagement_id == engagement_id)
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
+    stmt = stmt.order_by(desc(ApprovalRequest.created_at), desc(ApprovalRequest.id)).limit(
+        limit + 1
+    )
     if cursor is not None:
         c_created, c_id = cursor
         stmt = stmt.where(

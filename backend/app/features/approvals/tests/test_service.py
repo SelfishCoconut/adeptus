@@ -340,3 +340,29 @@ async def test_args_not_redacted(
     # Verbatim everywhere: the read schema, the persisted row, and the run handoff (§5.5).
     assert read.args == secret_args
     assert _await_kwargs(exec_run)["args"] == secret_args
+
+
+async def test_decide_lost_race_raises_already_decided(
+    db_session: AsyncSession,
+    member_active: AsyncMock,
+    exec_run: AsyncMock,
+    audit_record: AsyncMock,
+    resolve_username: AsyncMock,
+) -> None:
+    # W2 (Slice 16): the request looked pending at load, but the guarded UPDATE claimed
+    # nothing (another decider won between our load and our claim) — decide() must raise
+    # AlreadyDecidedError from the claimed-is-None branch and NOT execute the command.
+    eng, initiator = uuid4(), uuid4()
+    req_id = await _pending(db_session, engagement_id=eng, initiator_id=initiator)
+    with patch.object(service.repo, "decide_request", new_callable=AsyncMock) as decide_mock:
+        decide_mock.return_value = None  # lost the race
+        with pytest.raises(service.AlreadyDecidedError):
+            await service.decide(
+                db_session,
+                engagement_id=eng,
+                request_id=req_id,
+                requester=_user(user_id=initiator),
+                decision="approve",
+            )
+    exec_run.assert_not_awaited()
+    audit_record.assert_not_awaited()

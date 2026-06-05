@@ -7,11 +7,22 @@ inputs are the parsed ``ProposedAction`` + the resolved manifest ``ToolConfig``
 
 **Inverted default (Resolved decision 2):** a command is AUTONOMOUS *unless* it matches an
 explicit dangerous predicate — ``weight=heavy``, a dangerous capability flag, membership
-on a dangerous list/preset, or a credential arg-signal. The single compensation that keeps
-this safe is the **escape hatch**: a tool with NO present weight is gated as
-``unclassified_manifest`` even when it carries no dangerous signal, so a tool that was
-never classified can never run ungated. The only AUTONOMOUS tools are those with a
-present, non-dangerous classification (a present ``weight`` + no dangerous flag/list/arg).
+on a dangerous list/preset, or a credential arg-signal. The only AUTONOMOUS tools are those
+with a present, non-dangerous classification (a present ``weight`` + no dangerous flag/list/arg).
+
+**Layered fail-safe for an un-manifested tool.** The safety story for the inverted default
+has two layers, belt-and-suspenders:
+
+1. **Live enforcement (fail-closed at config load):** the MCP registry parser REQUIRES a
+   present, valid ``weight`` (``light``/``heavy``) for every tool — a tool with no/invalid
+   weight raises ``ConfigError`` and the server does not register it, so it can never be
+   proposed or run at all (stricter than gating). This is the authoritative live guarantee.
+2. **Defense-in-depth (this module):** the **escape hatch** below gates any ``ToolConfig``
+   with no present ``weight`` as ``unclassified_manifest`` rather than letting it run. It
+   covers the pure-classifier boundary and any future/alternate resolver that might yield a
+   weightless ``ToolConfig`` without going through the strict registry parser; paired with
+   ``validate_tool_manifests`` (a loud load-time warning), it ensures "never silently
+   autonomous" even if layer 1 is ever relaxed.
 
 ``out_of_scope`` is reserved in the reason enum but **never returned here** — Slice 17
 adds the scope check that appends it. This module is the single boundary Slice 18's
@@ -112,7 +123,13 @@ def classify(action: ProposedAction, *, tool_config: ToolConfig) -> Classificati
         reasons.append(ApprovalReason.UNCLASSIFIED_MANIFEST)
 
     if reasons:
-        return ClassificationResult(tier=ApprovalTier.REQUIRES_APPROVAL, reasons=reasons)
+        # Dedupe defensively (preserve first-seen order) so overlapping config lists can
+        # never surface the same reason twice on the card.
+        deduped: list[ApprovalReason] = []
+        for reason in reasons:
+            if reason not in deduped:
+                deduped.append(reason)
+        return ClassificationResult(tier=ApprovalTier.REQUIRES_APPROVAL, reasons=deduped)
     return ClassificationResult(tier=ApprovalTier.AUTONOMOUS, reasons=[])
 
 

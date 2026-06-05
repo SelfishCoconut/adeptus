@@ -155,7 +155,10 @@ class ClassificationResult(BaseModel):
 
 class AutonomousAction(BaseModel):
     """The lightweight "running automatically" card payload for the no-gate path —
-    no DB row is created. Mirrored in the frontend WebSocket-frame contract.
+    no DB row is created. Rides the chat WebSocket ``proposed_action`` frame, which is
+    outside OpenAPI, so it is **hand-mirrored** in the frontend at
+    ``frontend/src/features/approvals/api.ts`` (interface ``AutonomousAction``) — keep the
+    two in sync when changing this shape.
     """
 
     server_name: str
