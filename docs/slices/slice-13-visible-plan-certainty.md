@@ -732,3 +732,6 @@ wrong node (§5.4 / §17.1 / §8.2, Risks 3–4) — both covered by named tests
 ## Progress
 
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
+- 2026-06-05T13:07:38Z — 1caa56e docs(slice-13): add slice spec; mark slice 13 in-progress
+- 2026-06-05T13:08:51Z — 1caa56e docs(slice-13): add slice spec; mark slice 13 in-progress
+- 2026-06-05T13:55:51Z — b9b8b0c test(slice-13): E2E plan/certainty journey (stack-gated)
