@@ -65,21 +65,25 @@ allowed-tools: Read, Bash, Grep, Edit
    - If the audit flags **a plan that no longer matches reality** (drift better mended via an ADR / slice-planner than a code fix): surface it and ask the user how to proceed before opening the PR.
    - Only when the verdict is clean — or the user explicitly accepts the noted drift — proceed. Capture the verdict for the PR body's Reviewers line.
 
-9. Push and open PR:
-   ```
-   git push -u origin slice-NN-<kebab>
-   gh pr create --title "Slice NN: <goal>" --body "<generated body>" --label slice
-   ```
+9. **Flip the plan status to `done` as part of the slice PR, then push and open it.** Do this *right before* `gh pr create` so the status change rides inside the slice PR — there is NO separate follow-up flip PR (master is protected, so a post-merge edit would otherwise need its own PR just to move one line):
+   - In `docs/slices/PROJECT_PLAN.md`, set this slice `Status: in-progress` → `Status: done` and commit it on the slice branch:
+     ```
+     git commit -am "chore(plan): flip slice NN -> done (#<issue-or-pr>)"
+     ```
+   - Why `done` and why it's safe to write it before the merge: **master is the source of truth and only reflects this commit once the PR merges**, so on master `done` still means "merged." Carrying the flip inside the slice PR keeps the slice self-contained. `in-review` is no longer written by this skill — it stays a manual-only status for a slice deliberately parked mid-review.
+   - Then push and open the PR:
+     ```
+     git push -u origin slice-NN-<kebab>
+     gh pr create --title "Slice NN: <goal>" --body "<generated body>" --label slice
+     ```
 
-10. Update PROJECT_PLAN.md: `Status: in-progress` → `Status: in-review`. The PR is open but NOT merged, so the slice is NOT `done` yet. `in-review` deliberately does not satisfy dependencies, so pick-next-slice won't unblock dependents built on unmerged code. The slice becomes `done` only after the human merges the PR (mark it then — e.g. on the next pick-next-slice, confirm the PR merged and flip in-review → done).
-
-11. Output to the user:
+10. Output to the user:
     - PR URL
     - Code review summary (one paragraph)
     - Security review verdict (if applicable)
     - Drift audit verdict (one line)
-    - Status note: "Slice is now `in-review` (PR open, not merged). It won't unblock dependents until it's `done`."
-    - Suggestion: "After the PR merges, flip this slice to `done` in PROJECT_PLAN.md, then run pick-next-slice for the next one."
+    - Status note: "PROJECT_PLAN marks this slice `done` inside the PR; master reflects `done` the moment the PR merges — no follow-up flip PR needed. Until the merge, master still shows the pre-slice status, so pick-next-slice won't unblock dependents built on unmerged code."
+    - Suggestion: "After the PR merges, run pick-next-slice for the next one."
 
 ## Hard rules
 - Never open the PR if the gate is red or reviewers flag Critical findings.
