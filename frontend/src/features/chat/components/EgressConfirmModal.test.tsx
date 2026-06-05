@@ -62,6 +62,22 @@ describe('EgressConfirmModal', () => {
     expect(screen.queryByText(/AKIAIOSFODNN7EXAMPLE/)).not.toBeInTheDocument() // gitleaks:allow
   })
 
+  it('treats closing via Escape as a cancel (no send)', async () => {
+    const onCancel = vi.fn()
+    const onConfirm = vi.fn()
+    render(
+      <EgressConfirmModal
+        open={true}
+        categories={['aws_access_key']}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    )
+    await userEvent.keyboard('{Escape}')
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onConfirm).not.toHaveBeenCalled()
+  })
+
   it('does not render when closed', () => {
     render(
       <EgressConfirmModal
