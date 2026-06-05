@@ -691,3 +691,4 @@ isolation** of the new debug endpoint and the foreign-id rejection in the subset
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-06-05T11:36:56Z — fd3ca4e chore(workflow): finish-slice flips plan to done inside the slice PR (#35)
 - 2026-06-05T11:39:42Z — fd3ca4e chore(workflow): finish-slice flips plan to done inside the slice PR (#35)
+- 2026-06-05T12:19:12Z — 9055780 test(slice-12): E2E journey for the AI debug panel
