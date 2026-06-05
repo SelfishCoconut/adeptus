@@ -543,3 +543,4 @@ boundary), so the reviewer (or a focused self-review at finish-slice) should con
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-06-05T23:04:49Z — 384a83b Slice 16: Two-tier autonomy + approval flow (#45)
 - 2026-06-05T23:04:56Z — 384a83b Slice 16: Two-tier autonomy + approval flow (#45)
+- 2026-06-05T23:27:31Z — 485d0dc test(slice-17): ApprovalQueue renders out-of-scope request (task 9)
