@@ -33,11 +33,15 @@ async def create_request(
     reasons: Sequence[str],
     preset_name: str | None = None,
     rationale: str | None = None,
+    out_of_scope_host: str | None = None,
+    scope_checked_against: str | None = None,
 ) -> ApprovalRequest:
     """Insert a ``pending`` approval request and return it with server defaults populated.
 
     ``reasons`` is stored verbatim (the ``ApprovalReason`` *values*); ``args`` is stored
-    verbatim with no redaction (§5.5). The caller is responsible for committing.
+    verbatim with no redaction (§5.5). ``out_of_scope_host`` / ``scope_checked_against``
+    are the Slice-17 soft-scope render context, null for every non-out_of_scope request
+    (so Slice-16 call paths are unchanged). The caller is responsible for committing.
     """
     request = ApprovalRequest(
         engagement_id=engagement_id,
@@ -49,6 +53,8 @@ async def create_request(
         reasons=list(reasons),
         preset_name=preset_name,
         rationale=rationale,
+        out_of_scope_host=out_of_scope_host,
+        scope_checked_against=scope_checked_against,
     )
     db.add(request)
     await db.flush()

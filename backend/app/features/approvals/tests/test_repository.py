@@ -52,6 +52,30 @@ async def test_create_persists_pending_request(db_session: AsyncSession) -> None
     assert req.decided_at is None
 
 
+async def test_create_persists_out_of_scope_context(db_session: AsyncSession) -> None:
+    req = await repo.create_request(
+        db_session,
+        engagement_id=uuid4(),
+        chat_message_id=uuid4(),
+        initiator_user_id=uuid4(),
+        server_name="httpx-server",
+        tool_name="httpx",
+        args={"target": "http://example.com"},
+        reasons=["out_of_scope"],
+        out_of_scope_host="example.com",
+        scope_checked_against="juice-shop, 10.0.0.0/24",
+    )
+    await db_session.commit()
+    assert req.out_of_scope_host == "example.com"
+    assert req.scope_checked_against == "juice-shop, 10.0.0.0/24"
+
+
+async def test_create_without_scope_context_is_null(db_session: AsyncSession) -> None:
+    req = await _make(db_session)
+    assert req.out_of_scope_host is None
+    assert req.scope_checked_against is None
+
+
 async def test_get_request_for_engagement_scopes_by_engagement(db_session: AsyncSession) -> None:
     eng = uuid4()
     req = await _make(db_session, engagement_id=eng)
