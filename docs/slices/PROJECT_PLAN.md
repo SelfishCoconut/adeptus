@@ -181,7 +181,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §5.2 (fully)
 - **Depends on**: 11, 10
 - **Risky**: yes (approval flow, audit)
-- **Status**: in-progress
+- **Status**: done
 
 ### Slice 17: Soft scope enforcement
 - **Goal**: Out-of-scope target triggers AI warning + explicit confirmation prompt
