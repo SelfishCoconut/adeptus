@@ -47,7 +47,7 @@ describe('useChatStream', () => {
   it('does not open a socket when the id is null', () => {
     const { result } = renderHook(() => useChatStream(null))
     expect(FakeWebSocket.instances).toHaveLength(0)
-    expect(result.current).toEqual({ text: '', isDone: false, error: null })
+    expect(result.current).toEqual({ text: '', isDone: false, error: null, plan: [], claims: [] })
   })
 
   it('opens a ws:// socket targeting the message id', () => {
@@ -83,6 +83,46 @@ describe('useChatStream', () => {
     expect(result.current.isDone).toBe(true)
     expect(result.current.text).toBe('hi')
     expect(socket.close).toHaveBeenCalled()
+  })
+
+  it('surfaces the plan and claims from the done frame', () => {
+    const { result } = renderHook(() => useChatStream(MESSAGE_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit({ type: 'token', data: 'Answer.' })
+      socket.emit({
+        type: 'done',
+        plan: [
+          { step: 'Enumerate login', status: 'done' },
+          { step: 'Test SQLi', status: 'in_progress' },
+        ],
+        claims: [{ text: 'likely Apache', certainty: 60, node_id: null }],
+      })
+    })
+
+    expect(result.current.isDone).toBe(true)
+    expect(result.current.text).toBe('Answer.')
+    expect(result.current.plan).toEqual([
+      { step: 'Enumerate login', status: 'done' },
+      { step: 'Test SQLi', status: 'in_progress' },
+    ])
+    expect(result.current.claims).toHaveLength(1)
+    expect(result.current.claims[0].certainty).toBe(60)
+  })
+
+  it('leaves plan and claims empty when the done frame omits them', () => {
+    const { result } = renderHook(() => useChatStream(MESSAGE_ID))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit({ type: 'token', data: 'plain' })
+      socket.emit({ type: 'done' })
+    })
+
+    expect(result.current.isDone).toBe(true)
+    expect(result.current.plan).toEqual([])
+    expect(result.current.claims).toEqual([])
   })
 
   it('surfaces a stable error reason on an error frame', () => {
