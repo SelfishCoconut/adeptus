@@ -85,12 +85,12 @@ _OP_AUDIT_ACTION: dict[str, AuditAction] = {
 }
 
 # The audit action for an *undo-applied* inverse (pop_undo_stack → _apply_inverse).
-# Undoing a create soft-deletes; undoing a delete restores; undoing an update reverts
-# one step. Edges have no update action, so undo of delete_edge maps to "created".
+# Undoing a create soft-deletes; undoing a delete RESTORES the entity (it reappears →
+# "created", matching the delete_edge parallel); undoing an update reverts one step.
 _UNDO_AUDIT_ACTION: dict[str, AuditAction] = {
     "create_node": AuditAction.GRAPH_NODE_DELETED,
     "update_node": AuditAction.GRAPH_NODE_UPDATED,
-    "delete_node": AuditAction.GRAPH_NODE_UPDATED,
+    "delete_node": AuditAction.GRAPH_NODE_CREATED,
     "create_edge": AuditAction.GRAPH_EDGE_DELETED,
     "delete_edge": AuditAction.GRAPH_EDGE_CREATED,
 }

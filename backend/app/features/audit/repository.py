@@ -126,7 +126,12 @@ async def list_global(
     cursor_seq: int | None = None,
     limit: int = 50,
 ) -> tuple[list[AuditEntry], int | None]:
-    """Return (entries, next_cursor_seq) for instance-global (no-engagement) events."""
+    """Return (entries, next_cursor_seq) for instance-global (no-engagement) events.
+
+    No ``self_approved`` filter (unlike ``list_for_engagement``): instance-global events
+    are logins/logouts which never carry a non-null ``self_approved``; approval entries
+    are always engagement-scoped.
+    """
     stmt = select(AuditEntry).where(AuditEntry.engagement_id.is_(None))
     if action is not None:
         stmt = stmt.where(AuditEntry.action == action)
@@ -138,7 +143,12 @@ async def list_global(
 
 
 def _split_page(rows: list[AuditEntry], limit: int) -> tuple[list[AuditEntry], int | None]:
-    """Trim an over-fetched (limit+1) result to one page + the next cursor seq."""
+    """Trim an over-fetched (limit+1) result to one page + the next cursor seq.
+
+    The returned cursor is the smallest ``seq`` on this page and is an EXCLUSIVE upper
+    bound: the next page fetches ``seq < cursor_seq`` (rows are ordered ``seq DESC``), so
+    pages never overlap or skip an entry.
+    """
     if len(rows) > limit:
         page = rows[:limit]
         return page, page[-1].seq

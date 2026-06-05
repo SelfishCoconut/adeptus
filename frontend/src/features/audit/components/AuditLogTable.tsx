@@ -9,6 +9,10 @@ interface AuditLogTableProps {
   engagementId: string
 }
 
+// Exhaustive list of AuditAction values for the filter dropdown. Typed AuditAction[]
+// so any non-existent value is a type error — but new actions added to the generated
+// `AuditAction` union (e.g. Slice 11/16) must be appended here manually (a missing one
+// is NOT a type error, only a missing dropdown option). Keep in sync with schema.ts.
 const AUDIT_ACTIONS: AuditAction[] = [
   'login',
   'logout',

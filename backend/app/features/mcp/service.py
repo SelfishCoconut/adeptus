@@ -642,7 +642,9 @@ async def execute_tool_run(
     # never before, so the audit_chain_head lock is not held across the (possibly
     # minutes-long) tool run (Risk 7). Both commit with the result in the router's
     # transaction. McpServerDown propagates earlier, so a run that never produced a row
-    # also produces no audit entry (consistent).
+    # also produces no audit entry (consistent). The invocation entry deliberately carries
+    # NO transient `status` (it is written post-execution for lock safety, so any status
+    # would be misleading); the terminal status + exit_code live on the completion entry.
     audit_payload = {
         "server": server_name,
         "tool": tool_name,
@@ -655,7 +657,7 @@ async def execute_tool_run(
         engagement_id=engagement_id,
         target_type="tool_run",
         target_id=str(updated.id),
-        payload={**audit_payload, "status": "running"},
+        payload=dict(audit_payload),
     )
     await audit_service.record(
         db,

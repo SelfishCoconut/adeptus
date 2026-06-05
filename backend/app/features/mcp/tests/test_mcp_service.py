@@ -332,7 +332,12 @@ async def test_sync_tool_run_writes_invocation_and_completion(
         assert call.kwargs["actor_user_id"] == user_id
         assert call.kwargs["engagement_id"] == engagement_id
         assert call.kwargs["target_type"] == "tool_run"
+    # Invocation carries no transient status (it is written post-execution); the terminal
+    # status + exit_code live on the completion entry only.
+    invocation = mock_audit_record.await_args_list[0].kwargs
+    assert "status" not in invocation["payload"]
     completion = mock_audit_record.await_args_list[1].kwargs
+    assert completion["payload"]["status"] == "completed"
     assert completion["payload"]["exit_code"] == 0
 
 

@@ -24,7 +24,7 @@ this slice (downstream slices add the caller; this module imports neither featur
 """
 
 import base64
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -118,8 +118,9 @@ async def list_global_audit(
 
 
 def _user_id(user: User) -> UUID:
-    # User.id is a Mapped[UUID]; narrow for the membership lookup signature.
-    return user.id  # type: ignore[return-value]
+    # User.id is a Mapped[UUID]; cast (not type:ignore) to satisfy both mypy configs —
+    # see the project's "mypy two configs diverge" convention.
+    return cast(UUID, user.id)
 
 
 def _to_page(rows: list[AuditEntry], next_seq: int | None) -> AuditPage:

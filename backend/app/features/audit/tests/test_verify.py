@@ -106,6 +106,21 @@ async def test_verify_detects_tail_truncation(db_session: AsyncSession) -> None:
     assert verified == 2
 
 
+async def test_verify_detects_missing_head(db_session: AsyncSession) -> None:
+    # The authoritative head row vanishing (e.g. a truncation that dropped it) is a
+    # hard failure, not a skipped check.
+    from app.features.audit.models import AuditChainHead
+
+    await _append_n(db_session, 2)
+    await db_session.execute(delete(AuditChainHead))
+    await db_session.commit()
+
+    ok, _, broke = await verify.verify(db_session)
+    assert not ok
+    assert broke is not None
+    assert broke.kind == "head-missing"
+
+
 async def test_run_nonzero_exit_and_stderr_on_break(
     db_session: AsyncSession, capsys: pytest.CaptureFixture[str]
 ) -> None:

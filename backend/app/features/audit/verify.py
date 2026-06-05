@@ -11,9 +11,10 @@ head cross-check:
     row was inserted/duplicated).
   * **broken-link** — ``prev_hash`` does not equal the previous entry's ``entry_hash`` (a
     row was reordered or relinked).
-  * **head-mismatch** — after the scan, ``audit_chain_head`` still points at a
-    seq/hash that the table no longer ends with (the tail was truncated). This is why
-    the head pointer is authoritative, not derived from ``MAX(seq)``.
+  * **head-mismatch** / **head-missing** — after the scan, ``audit_chain_head`` still
+    points at a seq/hash that the table no longer ends with (the tail was truncated), or
+    the authoritative head row is gone entirely. This is why the head pointer is
+    authoritative, not derived from ``MAX(seq)``.
 
 Exit 0 + ``audit chain OK — N entries verified`` on an intact chain; exit 1 and a
 description of the FIRST break (its ``seq``/``id``/expected-vs-actual) otherwise.
@@ -128,7 +129,22 @@ async def verify(db: AsyncSession) -> tuple[bool, int, ChainBreak | None]:
 
     # Head cross-check: the authoritative head pointer must match the chain's actual tail.
     head = await repository.get_chain_head(db)
-    if head is not None and (head.last_seq != last_seq or head.head_hash.strip() != last_hash):
+    if head is None:
+        # The authoritative head is seeded by the migration and never legitimately
+        # removed; its absence is itself tampering (e.g. a truncation that also dropped
+        # the head row), so it is a hard failure rather than a skipped check.
+        return (
+            False,
+            verified,
+            ChainBreak(
+                seq=last_seq,
+                entry_id="<chain-head>",
+                kind="head-missing",
+                expected="a seeded audit_chain_head row",
+                actual="no audit_chain_head row",
+            ),
+        )
+    if head.last_seq != last_seq or head.head_hash.strip() != last_hash:
         return (
             False,
             verified,
