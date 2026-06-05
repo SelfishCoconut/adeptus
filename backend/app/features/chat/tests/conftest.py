@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import (
 from app.core.config import get_settings
 from app.core.db import Base, get_db
 from app.core.errors import register_error_handlers
+from app.features.approvals import models as approvals_models
 from app.features.audit import models as audit_models
 from app.features.auth import models as auth_models
 from app.features.auth.router import router as auth_router
@@ -67,6 +68,8 @@ def _patch_sqlite_columns() -> None:
         graph_models.GraphEdge,
         # Slice 15: the streamer resolves the turn's persona (chat → personas).
         persona_models.Persona,
+        # Slice 16: the read/replay paths query this turn's approval cards.
+        approvals_models.ApprovalRequest,
     ):
         id_col: Column = model.__table__.c.id  # type: ignore[assignment]
         id_col.default = ColumnDefault(uuid4)
@@ -88,6 +91,7 @@ _TABLES: list[Table] = [
         graph_models.GraphNode,
         graph_models.GraphEdge,
         persona_models.Persona,
+        approvals_models.ApprovalRequest,
     )
 ]
 

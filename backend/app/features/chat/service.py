@@ -29,16 +29,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.db import get_sessionmaker
 from app.core.errors import ConflictError, NotFoundError
+from app.features.approvals import service as approvals_service
+from app.features.approvals.schemas import ApprovalRequestRead, AutonomousAction, ProposedAction
 from app.features.audit import service as audit_service
 from app.features.audit.schemas import AuditAction
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
 from app.features.chat import (
+    action_parser,
     anthropic_client,
     egress_scan,
     ollama_client,
     plan_parser,
     subset_builder,
+    tool_calling,
 )
 from app.features.chat import repository as chat_repo
 from app.features.chat.models import ChatMessage
@@ -59,6 +63,7 @@ from app.features.chat.schemas import (
 )
 from app.features.engagements import repository as eng_repo
 from app.features.graph import repository as graph_repo
+from app.features.mcp import service as mcp_service
 from app.features.personas import service as personas_service
 from app.features.personas.models import Persona
 from app.features.personas.seed import GENERAL_SYSTEM_PROMPT
@@ -72,6 +77,10 @@ RECENT_WINDOW = 20
 # for this long, mark the turn failed and close. Reset by every token, so a slow-but-
 # progressing model is never aborted (§5.1 / Risk 4).
 NO_PROGRESS_TIMEOUT_SECONDS = 600.0
+
+# Slice 16: per-request budget for an AI-proposed autonomous command, mirroring the manual
+# tool-run default (Slice 04/05). Approved dangerous commands use the same default.
+AUTONOMOUS_TOOL_TIMEOUT_SECONDS = 30
 
 # Slice 15 (resolved Open Question 3): the base system prompt is now the ``general``
 # built-in persona's prompt, kept as the single source of truth in ``personas.seed`` and
@@ -304,8 +313,15 @@ async def list_messages(
         if next_cursor_raw is not None
         else None
     )
+    reads = [_to_message_read(r) for r in rows]
+    # Slice 16: attach each assistant turn's approval cards so a reloaded conversation
+    # re-renders them + their decisions (§5.2). One batch query for the page.
+    assistant_ids = [read.id for read in reads if read.role == ChatRole.ASSISTANT]
+    by_message = await approvals_service.reads_for_messages(db, message_ids=assistant_ids)
+    for read in reads:
+        read.approval_requests = by_message.get(read.id, [])
     return ChatMessagePage(
-        items=[_to_message_read(r) for r in rows],
+        items=reads,
         next_cursor=next_cursor,
         low_confidence_threshold=get_settings().ADEPTUS_CHAT_LOW_CONFIDENCE_THRESHOLD,
     )
@@ -449,12 +465,21 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
 
         if current.status == "complete":
             # Reconnect replay: re-emit the stored (already block-stripped) prose, then a
-            # done frame carrying the stored plan/claims so the panel + badges re-render
-            # on a reconnect exactly as on the live turn (Slice 13).
+            # done frame carrying the stored plan/claims + this turn's approval cards so the
+            # panel, badges, and cards re-render on a reconnect exactly as on the live turn
+            # (Slice 13 + Slice 16).
             if current.content:
                 yield WebSocketChatChunk(type="token", data=current.content)
             stored_plan, stored_claims = _stored_plan_claims(current)
-            yield WebSocketChatChunk(type="done", plan=stored_plan, claims=stored_claims)
+            replay_reqs = (
+                await approvals_service.reads_for_messages(session, message_ids=[message_id])
+            ).get(message_id, [])
+            yield WebSocketChatChunk(
+                type="done",
+                plan=stored_plan,
+                claims=stored_claims,
+                approval_requests=replay_reqs,
+            )
             return
         if current.status == "failed":
             yield WebSocketChatChunk(type="error", message=UNREACHABLE_MESSAGE)
@@ -544,15 +569,23 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
             session, persona_id=stashed_persona_id, user_id=user_id
         )
         persona_id_str, persona_name = _persona_audit(persona)
+        # Slice 16 (§5.2 / Resolved decision 1): native tool-calling by default; in the
+        # fallback mode the model is instructed to emit an <adeptus-meta> "actions" block
+        # instead (both paths normalize to the same ProposedAction list after the stream).
+        toolcall_mode = tool_calling.resolve_mode()
+        system_prompt = persona.system_prompt
+        if toolcall_mode == "fallback":
+            system_prompt += action_parser.FALLBACK_ACTION_INSTRUCTION
         prompt = _build_prompt(
             window,
             current_assistant_id=message_id,
-            system_prompt=persona.system_prompt,
+            system_prompt=system_prompt,
             context_block=subset.context_block,
         )
         debug_record = _debug_record(subset, _render_raw_prompt(prompt), persona=persona)
 
         usage = OllamaUsage()
+        proposed_calls = tool_calling.ProposedCalls() if toolcall_mode == "native" else None
         # full accumulates the raw reply (incl. the metadata block); emitted tracks how much
         # has been streamed as clean prose. Once the sentinel marker is seen we stop emitting
         # so the raw <adeptus-meta> block never reaches the client (Risk 2). A partial-marker
@@ -560,7 +593,9 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
         full = ""
         emitted = 0
         block_started = False
-        agen = stream_fn(messages=prompt, model=model_name, usage=usage).__aiter__()
+        agen = stream_fn(
+            messages=prompt, model=model_name, usage=usage, proposed=proposed_calls
+        ).__aiter__()
 
         while True:
             try:
@@ -599,9 +634,21 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
         if not block_started and emitted < len(full):
             yield WebSocketChatChunk(type="token", data=full[emitted:])
 
+        # Slice 16: gather the turn's proposed commands from whichever mechanism produced
+        # them (native tool-calls or the fallback <adeptus-meta> "actions" block); both
+        # normalize to the same ProposedAction list before classification.
+        if toolcall_mode == "native":
+            actions = (
+                tool_calling.to_proposed_actions(proposed_calls.calls)
+                if proposed_calls is not None
+                else []
+            )
+        else:
+            actions = action_parser.extract_actions(full)
+
         # Parse, validate, persist, and audit the completed turn (extracted to keep this
-        # generator readable); then deliver the parsed plan/claims on the done frame.
-        plan, claims = await _finalize_complete_turn(
+        # generator readable); then deliver the parsed plan/claims + proposal cards.
+        plan, claims, autonomous_cards, gated_cards = await _finalize_complete_turn(
             session,
             message_id=message_id,
             actor_user_id=user_id,
@@ -613,12 +660,21 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
             live_node_ids=live_node_ids,
             subset=subset,
             usage=usage,
+            actions=actions,
             backend=backend,
             egress=egress,
             persona_id=persona_id_str,
             persona_name=persona_name,
         )
-        yield WebSocketChatChunk(type="done", plan=plan, claims=claims)
+        # Emit one proposed_action frame per command (autonomous = running now; gated =
+        # approval card), then the done frame repeating the full gated list for reconcile.
+        for card in autonomous_cards:
+            yield WebSocketChatChunk(type="proposed_action", autonomous_action=card)
+        for request in gated_cards:
+            yield WebSocketChatChunk(type="proposed_action", approval_request=request)
+        yield WebSocketChatChunk(
+            type="done", plan=plan, claims=claims, approval_requests=gated_cards
+        )
 
 
 async def _finalize_complete_turn(
@@ -634,20 +690,27 @@ async def _finalize_complete_turn(
     live_node_ids: set[UUID],
     subset: subset_builder.GraphSubset,
     usage: OllamaUsage,
+    actions: list[ProposedAction],
     backend: str = "local",
     egress: dict[str, Any] | None = None,
     persona_id: str | None = None,
     persona_name: str | None = None,
-) -> tuple[list[PlanStep], list[Claim]]:
-    """Parse, validate, persist, and audit a completed turn; return its plan + claims.
+) -> tuple[list[PlanStep], list[Claim], list[AutonomousAction], list[ApprovalRequestRead]]:
+    """Parse, validate, persist, and audit a completed turn; return plan/claims + proposals.
 
     Splits the §5.3 metadata block off ``full_reply``, validates each claim's ``node_id``
     against the engagement's live graph (foreign/unknown dropped, §17.1), persists the
     block-stripped prose as ``content`` plus plan/claims/unstripped-output into the per-turn
     JSONB (merging the Slice-12 keys + the Slice-15 persona keys carried on ``debug_record``,
     Risk 6/7), and emits exactly one ``ai_call`` — only when this call won the pending→
-    terminal transition (a racing socket gets ``None`` and must not re-emit, Risk 6). The
-    caller yields the returned plan/claims on the ``done`` frame.
+    terminal transition (a racing socket gets ``None`` and must not re-emit, Risk 6).
+
+    Slice 16: only the winner also classifies the turn's proposed ``actions`` (§5.2) —
+    autonomous commands run immediately via the tool-run pipeline (attributed to the
+    initiator) and gated commands create pending approval requests. The ``ai_call`` is
+    emitted BEFORE the autonomous run so it commits atomically with the finalize + the
+    gated rows (the run's own commit, Risk 6). Returns the plan/claims plus the autonomous
+    "running automatically" cards and the gated approval cards for the WS frames.
     """
     prose, plan, claims = plan_parser.extract(full_reply)
     claims = _validate_claim_node_ids(claims, live_node_ids)
@@ -665,7 +728,19 @@ async def _finalize_complete_turn(
         completion_tokens=usage.completion_tokens,
         graph_context=graph_context,
     )
+    autonomous_cards: list[AutonomousAction] = []
+    gated_cards: list[ApprovalRequestRead] = []
     if finalized is not None:
+        classified = await approvals_service.create_requests_for_turn(
+            session,
+            engagement_id=engagement_id,
+            chat_message_id=message_id,
+            initiator_user_id=actor_user_id,
+            actions=actions,
+        )
+        gated_cards = classified.gated
+        # ai_call BEFORE the autonomous run so it commits atomically with finalize + the
+        # gated rows (execute_tool_run async_mode commits the session, Risk 6).
         await _emit_ai_call(
             session,
             actor_user_id=actor_user_id,
@@ -682,9 +757,56 @@ async def _finalize_complete_turn(
             egress=egress,
             persona_id=persona_id,
             persona_name=persona_name,
+            proposed_actions=len(actions),
+            gated_actions=len(gated_cards),
+        )
+        autonomous_cards = await _run_autonomous_actions(
+            session,
+            engagement_id=engagement_id,
+            initiator_user_id=actor_user_id,
+            actions=classified.autonomous,
         )
     await session.commit()
-    return plan, claims
+    return plan, claims, autonomous_cards, gated_cards
+
+
+async def _run_autonomous_actions(
+    session: AsyncSession,
+    *,
+    engagement_id: UUID,
+    initiator_user_id: UUID,
+    actions: list[ProposedAction],
+) -> list[AutonomousAction]:
+    """Execute each autonomous (non-gated) command via the existing tool-run pipeline.
+
+    Attributed to the INITIATOR (Resolved decision 3) — the AI runs the command on the
+    turn owner's behalf. Returns the "running automatically" cards (each carrying the run
+    id already handed to the pipeline) for the ``proposed_action`` WS frames.
+    """
+    cards: list[AutonomousAction] = []
+    for action in actions:
+        run = await mcp_service.execute_tool_run(
+            session,
+            engagement_id=engagement_id,
+            server_name=action.server_name,
+            tool_name=action.tool_name,
+            args=action.args,
+            timeout_seconds=AUTONOMOUS_TOOL_TIMEOUT_SECONDS,
+            user_id=initiator_user_id,
+            async_mode=True,
+            preset_name=action.preset_name,
+        )
+        cards.append(
+            AutonomousAction(
+                server_name=action.server_name,
+                tool_name=action.tool_name,
+                args=action.args,
+                preset_name=action.preset_name,
+                rationale=action.rationale,
+                tool_run_id=run.tool_run_id,
+            )
+        )
+    return cards
 
 
 async def _finalize_failed(
@@ -757,6 +879,8 @@ async def _emit_ai_call(
     egress: dict[str, Any] | None = None,
     persona_id: str | None = None,
     persona_name: str | None = None,
+    proposed_actions: int = 0,
+    gated_actions: int = 0,
 ) -> None:
     """Record one ``ai_call`` audit entry attributed to the acting user (§14).
 
@@ -790,6 +914,9 @@ async def _emit_ai_call(
             "egress_match_categories": list(decision.get("match_categories", [])),
             "persona_id": persona_id,
             "persona_name": persona_name,
+            # Slice 16 forensic counts (no new audit action — just a widened payload).
+            "proposed_actions": proposed_actions,
+            "gated_actions": gated_actions,
         },
     )
 

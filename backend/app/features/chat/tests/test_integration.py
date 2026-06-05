@@ -132,6 +132,7 @@ def _fake_stream(tokens: list[str]) -> FakeStream:
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         for tok in tokens:
             yield tok
@@ -158,6 +159,7 @@ def _fake_unreachable() -> FakeStream:
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         if False:  # pragma: no cover
             yield ""
@@ -203,6 +205,7 @@ def _boom_stream() -> FakeStream:
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         raise AssertionError("this backend must not be called")
         yield ""  # pragma: no cover
@@ -1016,6 +1019,7 @@ def _capture_prompt(captured: list[Sequence[OllamaChatMessage]], tokens: list[st
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         captured.append(messages)
         for tok in tokens:

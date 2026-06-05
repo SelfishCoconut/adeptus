@@ -124,6 +124,24 @@ async def list_for_chat_message(db: AsyncSession, *, message_id: UUID) -> list[A
     return list(result.scalars().all())
 
 
+async def list_for_messages(
+    db: AsyncSession, *, message_ids: Sequence[UUID]
+) -> list[ApprovalRequest]:
+    """Batch variant of :func:`list_for_chat_message` for a page of chat turns (oldest-first).
+
+    One query (``chat_message_id IN ...``) so the chat read path avoids N+1 when attaching
+    each assistant turn's cards. Returns ``[]`` for an empty id list.
+    """
+    if not message_ids:
+        return []
+    result = await db.execute(
+        select(ApprovalRequest)
+        .where(ApprovalRequest.chat_message_id.in_(list(message_ids)))
+        .order_by(ApprovalRequest.created_at, ApprovalRequest.id)
+    )
+    return list(result.scalars().all())
+
+
 async def decide_request(
     db: AsyncSession,
     *,

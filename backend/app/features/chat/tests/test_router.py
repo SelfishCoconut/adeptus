@@ -129,6 +129,7 @@ def _fake_stream(tokens: list[str]) -> Callable[..., AsyncIterator[str]]:
         messages: Sequence[OllamaChatMessage],
         model: str | None = None,
         usage: OllamaUsage | None = None,
+        proposed: object = None,
     ) -> AsyncIterator[str]:
         for tok in tokens:
             yield tok

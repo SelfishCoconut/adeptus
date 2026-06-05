@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Sequence
 from typing import Literal, cast
 from uuid import UUID
 
@@ -221,6 +222,24 @@ async def create_requests_for_turn(
         )
         gated.append(await _to_read(db, row))
     return ClassifiedTurnResult(autonomous=autonomous, gated=gated)
+
+
+async def reads_for_messages(
+    db: AsyncSession, *, message_ids: Sequence[UUID]
+) -> dict[UUID, list[ApprovalRequestRead]]:
+    """Group each chat turn's approval requests as read schemas (for the chat read path).
+
+    Returns ``{chat_message_id: [ApprovalRequestRead, ...]}``; a turn with no request is
+    simply absent from the map. Used by the chat ``list_messages`` so a reloaded
+    conversation re-renders its inline cards + decisions (§5.2).
+    """
+    rows = await repo.list_for_messages(db, message_ids=message_ids)
+    cache: dict[UUID, str | None] = {}
+    grouped: dict[UUID, list[ApprovalRequestRead]] = {}
+    for row in rows:
+        read = await _to_read(db, row, username_cache=cache)
+        grouped.setdefault(cast(UUID, row.chat_message_id), []).append(read)
+    return grouped
 
 
 async def list_requests(

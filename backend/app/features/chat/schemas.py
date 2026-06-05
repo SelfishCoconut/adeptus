@@ -16,6 +16,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.features.approvals.schemas import ApprovalRequestRead, AutonomousAction
+
 __all__ = [
     "ChatMessageCreate",
     "ChatMessagePage",
@@ -240,6 +242,14 @@ class ChatMessageRead(BaseModel):
             "for user/pending/pre-slice rows."
         ),
     )
+    approval_requests: list[ApprovalRequestRead] = Field(
+        default_factory=list,
+        description=(
+            "Approval requests this assistant turn created (§5.2, Slice 16). Empty for "
+            "user/pending rows and turns that proposed no dangerous command; each renders an "
+            "inline approval card so a reloaded conversation re-shows the cards + decisions."
+        ),
+    )
 
 
 class SendChatMessageResult(BaseModel):
@@ -277,7 +287,7 @@ class WebSocketChatChunk(BaseModel):
                   being offline).
     """
 
-    type: Literal["token", "done", "error"]
+    type: Literal["token", "proposed_action", "done", "error"]
     data: str | None = None
     message: str | None = None
     # Slice 13: the "done" frame carries the parsed running plan + certainty claims for the
@@ -285,6 +295,13 @@ class WebSocketChatChunk(BaseModel):
     # block-stripped prose so the raw <adeptus-meta> block never reaches the client.
     plan: list[PlanStep] | None = None
     claims: list[Claim] | None = None
+    # Slice 16 (§5.2): a "proposed_action" frame carries EITHER a single gated request
+    # (render the approval card) OR a single autonomous command running now (render the
+    # "running automatically" card). The terminal "done" frame repeats the full gated list
+    # for idempotent reconciliation.
+    approval_request: ApprovalRequestRead | None = None
+    autonomous_action: AutonomousAction | None = None
+    approval_requests: list[ApprovalRequestRead] | None = None
 
 
 class OllamaChatMessage(BaseModel):
