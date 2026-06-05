@@ -196,9 +196,11 @@ def _uuid(value: Any) -> UUID:
 def _distinct_capped(ids: Sequence[UUID], cap: int) -> list[UUID]:
     """Distinct ids preserving first-seen (most-recent-first) order, truncated to ``cap``."""
     seen: list[UUID] = []
+    seen_set: set[UUID] = set()
     for nid in ids:
-        if nid not in seen:
+        if nid not in seen_set:
             seen.append(nid)
+            seen_set.add(nid)
         if len(seen) >= cap:
             break
     return seen
