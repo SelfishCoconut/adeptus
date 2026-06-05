@@ -4,7 +4,9 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 
 **Status values**: `todo` | `planned` | `in-progress` | `in-review` | `done` | `blocked`
 
-- `in-review`: PR opened but not yet merged. Does NOT satisfy a dependency — `pick-next-slice` treats only `done` (merged) as unblocking dependents.
+- A dependency is satisfied ONLY when its status is `done` (PR merged). Any other status — including a slice whose PR is open but not yet merged — does NOT unblock dependents.
+- `finish-slice` flips a slice `in-progress` → `done` **inside the slice PR**, so master shows `done` exactly when the PR merges (no separate flip PR). While that PR is open and unmerged, master still shows `in-progress`.
+- `in-review` is a manual-only park status for a slice deliberately held open mid-review; it is not produced by the automated flow.
 
 **Phase legend**:
 - A: Foundation

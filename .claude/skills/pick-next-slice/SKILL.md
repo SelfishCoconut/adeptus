@@ -21,8 +21,8 @@ allowed-tools: Read, Grep
 3. Filter to slices where every entry in `Depends on:` has `Status: done`. Only `done` (i.e. PR merged) satisfies a dependency. A dependency that is `in-review` (PR open but not merged) does NOT count — do not unblock a slice whose dependency is merely in-review.
 
 4. If the candidate list is empty:
-   - If there are `in-review` slices, surface them: their PRs are open but unmerged, so their dependents stay blocked until merged. Suggest the user merge the PR and then flip the slice `in-review` → `done` in PROJECT_PLAN.md.
-   - If there are `in-progress` slices, suggest the user finish them first.
+   - If there are `in-progress` slices, surface them: one whose slice PR is already open is just awaiting merge (merging it flips it to `done` and may unblock dependents); one with no PR yet still needs implementing/finishing. Suggest the user merge the open PR or finish the work.
+   - If any slice is `in-review` (the manual park status), surface it the same way — its PR must merge before it counts as `done`.
    - If there are `blocked` slices and nothing else, list them and surface why.
    - Otherwise: "All slices are done."
    - STOP.
@@ -43,5 +43,5 @@ allowed-tools: Read, Grep
 ## Hard rules
 - Never write the spec yourself. Always delegate to slice-planner.
 - A dependency is satisfied ONLY when its status is `done` (PR merged). `in-review` (PR open, unmerged) does NOT satisfy a dependency — never unblock a slice on top of unmerged code.
-- Never modify PROJECT_PLAN.md. Status transitions are owned by start-slice (todo/planned → in-progress) and finish-slice (in-progress → in-review). The final `in-review` → `done` flip happens after the human merges the PR.
+- Never modify PROJECT_PLAN.md. Status transitions are owned by start-slice (todo/planned → in-progress) and finish-slice (in-progress → done, committed *inside the slice PR* so master flips to `done` exactly when the PR merges). `in-review` is a manual-only park status (a slice deliberately held open mid-review) and is not part of the automated flow.
 - If the user names a different slice (e.g. "actually do slice 15 instead"), surface the dependency status before delegating — if 15's dependencies aren't done, warn but pass the choice to the user.
