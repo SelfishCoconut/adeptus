@@ -65,6 +65,25 @@ describe('ApprovalQueue', () => {
     expect(call.params.query.status).toBe('pending')
   })
 
+  it('lists an out-of-scope pending request with the scope reason label', async () => {
+    mockGet.mockResolvedValue({
+      data: {
+        items: [
+          request('req-1', {
+            reasons: ['out_of_scope'],
+            out_of_scope_host: 'example.com',
+            scope_checked_against: 'juice-shop, 10.0.0.0/24',
+          }),
+        ],
+        next_cursor: null,
+      },
+    } as never)
+    renderQueue()
+    await waitFor(() => expect(screen.getByTestId('approval-card')).toBeInTheDocument())
+    expect(screen.getByText('target is outside the declared scope')).toBeInTheDocument()
+    expect(screen.getByTestId('scope-context')).toHaveTextContent('example.com is not in scope:')
+  })
+
   it('shows the empty state when none are pending', async () => {
     mockGet.mockResolvedValue({ data: { items: [], next_cursor: null } } as never)
     renderQueue()
