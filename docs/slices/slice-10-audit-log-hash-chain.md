@@ -402,5 +402,35 @@ Graph: audited at the `_push_undo` chokepoint (all 5 ordinary mutators, one entr
 AND at `pop_undo_stack` for undo-applied inverses (mapped via `_UNDO_AUDIT_ACTION`) — no
 double-count (the inverse bypasses the mutators).
 
-**Remaining:** finish-slice (full gate + code-reviewer + **required security-reviewer** +
-PR). Not yet run.
+**Remaining:** open the PR (deferred at the user's request — reviews run, PR not opened).
+
+### 2026-06-05 — reviews complete (code-reviewer + required security-reviewer)
+
+**Security review: APPROVED** — all eight integrity guarantees (a–h) confirmed against
+real Postgres (no fork, writer/verifier hash identity, tamper/deletion/reorder detection,
+append-only, no provenance leak, no-FK durability sound, membership/admin read auth,
+self_approved plumbing). Only LOW/INFO findings.
+
+**Code review: no Critical**; fixes applied (commit `fix(slice-10): address review …`):
+- W2 — undo-of-`delete_node` now maps to `graph_node_created` (a restore reappears),
+  matching the `delete_edge → graph_edge_created` parallel.
+- W1 (core) — the sync tool-run **invocation** entry no longer carries a misleading
+  `status` (it is emitted post-execution for lock safety; the completion entry holds the
+  terminal status + exit_code). W1's *suggested mechanism* (emit before the subprocess)
+  was deliberately **rejected**: it would hold the `audit_chain_head` lock across the run
+  — the contention the security review explicitly validated we avoid.
+- LOW-1 hardening — a **missing** `audit_chain_head` row is now a hard verify failure
+  (`head-missing`), not a skipped check.
+- W3/S5 (cursor + list_global docstrings), S2 (`cast` not `type:ignore`), W4 (test
+  assertion), S1 (frontend `AUDIT_ACTIONS` drift comment).
+
+**Deferred follow-ups (not this slice):**
+- LOW-1 (full anti-truncation): a pure in-DB chain cannot detect a DB-admin adversary who
+  truncates the tail *and* rewrites/removes the head. Out of scope per §14 ("no external
+  timestamping"); a future slice needs an external append-only anchor (head-hash
+  notarization / WORM export).
+- LOW-2: `POST /api/v1/auth/login` has no rate limit, so failed-login auditing is an
+  unauthenticated unbounded write (audit-spam + head-lock contention). Pre-existing auth
+  gap, independent of this slice — track with the auth checklist.
+- Async/background `tool_run_completed` (needs `user_id` threaded into `_stream_to_channel`
+  + a ToolRun attribution seam).
