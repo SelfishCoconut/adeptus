@@ -81,7 +81,10 @@ export function ChatMessageList({
           return <UserRow key={message.id} message={message} />
         }
 
-        const isStreaming = message.id === streamingId
+        // Treat the message as live only while it is still pending: once the refetched
+        // row is complete/failed it renders as history (Markdown / offline notice), even
+        // though streamingId may still point at it.
+        const isStreaming = message.id === streamingId && message.status === 'pending'
 
         if (isStreaming && streamError) {
           return (
