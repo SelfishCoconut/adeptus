@@ -77,6 +77,9 @@ class _Row:
         self.self_approved: bool | None = True if decided else None
         self.tool_run_id: UUID | None = uuid4() if decided else None
         self.decided_at: datetime | None = datetime(2026, 6, 5, 1, tzinfo=UTC) if decided else None
+        # Slice 17 scope-context columns: null on every non-out_of_scope row (the default).
+        self.out_of_scope_host: str | None = None
+        self.scope_checked_against: str | None = None
         # Only a decided row carries a resolved username; a pending row has NO such
         # attribute at all (the read schema's default must fill it).
         if decided:
@@ -93,6 +96,24 @@ def test_read_from_pending_orm_row_without_username_attr() -> None:
     assert read.self_approved is None
     # Args carried verbatim (§5.5 — no redaction).
     assert read.args == {"cmd": "hydra -l admin -P rockyou.txt ssh://10.0.0.5"}
+
+
+def test_scope_context_defaults_to_none() -> None:
+    # A Slice-16 row (no scope attrs at all) validates with both fields defaulting None.
+    read = ApprovalRequestRead.model_validate(_Row(decided=False))
+    assert read.out_of_scope_host is None
+    assert read.scope_checked_against is None
+
+
+def test_out_of_scope_row_carries_scope_context() -> None:
+    row = _Row(decided=False)
+    row.reasons = ["out_of_scope"]
+    row.out_of_scope_host = "example.com"
+    row.scope_checked_against = "juice-shop, 10.0.0.0/24"
+    read = ApprovalRequestRead.model_validate(row)
+    assert read.reasons == [ApprovalReason.OUT_OF_SCOPE]
+    assert read.out_of_scope_host == "example.com"
+    assert read.scope_checked_against == "juice-shop, 10.0.0.0/24"
 
 
 def test_read_from_decided_orm_row_resolves_username() -> None:
