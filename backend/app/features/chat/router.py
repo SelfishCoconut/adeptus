@@ -100,6 +100,12 @@ async def send_chat_message(
     "/api/v1/engagements/{engagement_id}/chat/messages/{message_id}/debug",
     response_model=ChatTurnDebug,
     operation_id="get_chat_turn_debug",
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {"description": "Not authenticated"},
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Message not found, not owned by caller, or not an assistant turn"
+        },
+    },
 )
 async def get_chat_turn_debug(
     engagement_id: UUID,

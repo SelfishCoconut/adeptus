@@ -2851,6 +2851,20 @@ export interface operations {
                     "application/json": components["schemas"]["ChatTurnDebug"];
                 };
             };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Message not found, not owned by caller, or not an assistant turn */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {

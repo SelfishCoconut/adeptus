@@ -1759,6 +1759,12 @@
               }
             }
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "Message not found, not owned by caller, or not an assistant turn"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
