@@ -16,10 +16,10 @@ random-UUID ``id`` is only a defensive tiebreaker.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import CursorResult, and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.features.chat.models import ChatMessage
@@ -163,21 +163,36 @@ async def finalize_assistant(
     prompt_tokens: int | None,
     completion_tokens: int | None,
 ) -> ChatMessage | None:
-    """Transition a ``pending`` assistant row to its terminal state.
+    """Atomically transition a ``pending`` assistant row to its terminal state.
 
-    Sets the final ``content`` + ``status`` (``complete`` or ``failed``) and the
-    model/token metadata. Returns the refreshed row, or ``None`` if it no longer exists.
+    The UPDATE is conditional on ``status = 'pending'`` so that exactly one finalization
+    can win even if two sockets race on the same message (two tabs / a fast reconnect):
+    the loser matches zero rows and gets ``None`` back, so the caller skips the
+    ``ai_call`` audit emission and the §14 exactly-once guarantee holds (Risk 6). Returns
+    the refreshed row on a real transition, else ``None`` (already terminal or missing).
     The caller commits (atomically with the ``ai_call`` audit entry).
     """
-    result = await db.execute(select(ChatMessage).where(ChatMessage.id == message_id))
-    message = result.scalar_one_or_none()
-    if message is None:
+    result = await db.execute(
+        update(ChatMessage)
+        .where(ChatMessage.id == message_id, ChatMessage.status == "pending")
+        .values(
+            content=content,
+            status=status,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+    )
+    # execute() is typed as returning Result; a DML statement yields a CursorResult that
+    # carries rowcount. cast satisfies both mypy configs (see the mypy-divergence note).
+    if cast("CursorResult[Any]", result).rowcount == 0:
         return None
 
-    message.content = content
-    message.status = status
-    message.model = model
-    message.prompt_tokens = prompt_tokens
-    message.completion_tokens = completion_tokens
-    await db.flush()
-    return message
+    # populate_existing refreshes the identity-mapped instance (the Core UPDATE bypassed
+    # the ORM), so the returned row reflects the just-written terminal state.
+    refreshed = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.id == message_id)
+        .execution_options(populate_existing=True)
+    )
+    return refreshed.scalar_one_or_none()

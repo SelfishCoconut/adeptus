@@ -16,6 +16,7 @@ Domain exceptions translate via the registered handlers (app.core.errors.handler
   EngagementArchivedError  → 409  (subclass of ConflictError; archived = read-only, §4)
 """
 
+from contextlib import aclosing
 from typing import Annotated
 from uuid import UUID
 
@@ -117,10 +118,16 @@ async def stream_chat_ws(websocket: WebSocket, assistant_message_id: UUID) -> No
 
     await websocket.accept()
     try:
-        async for chunk in service.stream_assistant_reply(message=message):
-            await websocket.send_json(chunk.model_dump(mode="json", exclude_none=True))
+        # aclosing guarantees the streaming generator is closed on EVERY exit path —
+        # including a mid-stream client disconnect (send_json raises WebSocketDisconnect).
+        # Closing it promptly runs the generator's `async with session` cleanup so the DB
+        # session is released immediately rather than at GC. On a disconnect before
+        # finalization the row simply stays `pending` and is re-streamed on reconnect
+        # (Risk 2); after finalization the committed row is replayed on reconnect.
+        async with aclosing(service.stream_assistant_reply(message=message)) as stream:
+            async for chunk in stream:
+                await websocket.send_json(chunk.model_dump(mode="json", exclude_none=True))
         await websocket.close(code=1000)
     except WebSocketDisconnect:
-        # Client went away mid-stream; the turn stays pending and is re-streamed on
-        # reconnect (Risk 2). Exit quietly.
+        # Client went away mid-stream; exit quietly (the generator was closed by aclosing).
         return

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Literal, cast
 from uuid import UUID
@@ -225,6 +225,9 @@ async def authenticate_ws_chat_message(
     if message is None or message.role != "assistant":
         return None
 
+    # Re-check membership even though the owner necessarily had it at send time: it may
+    # have been revoked after the message was persisted (§17.1), and a removed member
+    # must not keep streaming the engagement's model.
     membership = await eng_repo.get_engagement_for_member(
         db, cast(UUID, message.engagement_id), cast(UUID, user.id)
     )
@@ -254,6 +257,9 @@ def _build_prompt(
         if m.id == current_assistant_id:
             continue
         if m.status != "complete" or not m.content:
+            # A failed/empty earlier turn is excluded from context; log it so the
+            # shortened window (and the audit prompt_message_count) is explainable.
+            logger.debug("Skipping non-complete message %s from chat prompt window", m.id)
             continue
         messages.append(
             OllamaChatMessage(role=cast(Literal["user", "assistant"], m.role), content=m.content)
@@ -269,7 +275,7 @@ def _build_prompt(
 async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would obscure it
     *,
     message: ChatMessage,
-) -> AsyncIterator[WebSocketChatChunk]:
+) -> AsyncGenerator[WebSocketChatChunk, None]:
     """Stream the assistant reply for an authenticated assistant message.
 
     Opens a FRESH session (the auth session is already closed). Re-reads the row so the
@@ -339,7 +345,7 @@ async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would
             yield WebSocketChatChunk(type="token", data=token)
 
         full_content = "".join(chunks)
-        await chat_repo.finalize_assistant(
+        finalized = await chat_repo.finalize_assistant(
             session,
             message_id=message_id,
             content=full_content,
@@ -348,15 +354,19 @@ async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
         )
-        await _emit_ai_call(
-            session,
-            actor_user_id=user_id,
-            engagement_id=engagement_id,
-            message_id=message_id,
-            model_name=model_name,
-            prompt_count=len(prompt),
-            status="complete",
-        )
+        # Emit the audit entry only when THIS call won the pending→terminal transition;
+        # a racing socket that already finalized the row gets None and must not re-emit
+        # (Risk 6 — exactly one ai_call per turn).
+        if finalized is not None:
+            await _emit_ai_call(
+                session,
+                actor_user_id=user_id,
+                engagement_id=engagement_id,
+                message_id=message_id,
+                model_name=model_name,
+                prompt_count=len(prompt),
+                status="complete",
+            )
         await session.commit()
         yield WebSocketChatChunk(type="done")
 
@@ -370,8 +380,11 @@ async def _finalize_failed(
     model_name: str,
     prompt_count: int,
 ) -> None:
-    """Persist the assistant row ``failed`` + emit the ``ai_call`` audit entry, atomic."""
-    await chat_repo.finalize_assistant(
+    """Persist the assistant row ``failed`` + emit the ``ai_call`` audit entry, atomic.
+
+    Like the success path, the ``ai_call`` is emitted only when this call won the
+    pending→failed transition (Risk 6 — exactly one ai_call per turn)."""
+    finalized = await chat_repo.finalize_assistant(
         session,
         message_id=message_id,
         content="",
@@ -380,15 +393,16 @@ async def _finalize_failed(
         prompt_tokens=None,
         completion_tokens=None,
     )
-    await _emit_ai_call(
-        session,
-        actor_user_id=actor_user_id,
-        engagement_id=engagement_id,
-        message_id=message_id,
-        model_name=model_name,
-        prompt_count=prompt_count,
-        status="failed",
-    )
+    if finalized is not None:
+        await _emit_ai_call(
+            session,
+            actor_user_id=actor_user_id,
+            engagement_id=engagement_id,
+            message_id=message_id,
+            model_name=model_name,
+            prompt_count=prompt_count,
+            status="failed",
+        )
     await session.commit()
 
 

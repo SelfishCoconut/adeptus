@@ -1,4 +1,9 @@
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQueryClient,
+  type InfiniteData,
+} from '@tanstack/react-query'
 import {
   api,
   type ChatMessage,
@@ -15,11 +20,8 @@ export const chatKeys = {
 
 const PAGE_LIMIT = 50
 
-/** Shape TanStack Query stores for an infinite query (pages + their params). */
-interface InfiniteChatData {
-  pages: ChatMessagePage[]
-  pageParams: unknown[]
-}
+/** What TanStack Query stores in the cache for this infinite query. */
+type InfiniteChatData = InfiniteData<ChatMessagePage>
 
 // --- Queries ---
 
@@ -53,7 +55,9 @@ export function useChatMessages(engagementId: string, options?: { enabled?: bool
 /** Flatten the infinite pages into a single oldest-first message list for rendering. */
 export function flattenChatPages(data: InfiniteChatData | undefined): ChatMessage[] {
   if (!data) return []
-  // Older pages come later in `pages`; reverse so the oldest batch renders first.
+  // pages[0] is the newest batch; later pages (from fetchNextPage) are older batches.
+  // Reverse so the oldest batch renders at the top, then flatten (each page is already
+  // oldest-first internally).
   return [...data.pages].reverse().flatMap((page) => page.items)
 }
 

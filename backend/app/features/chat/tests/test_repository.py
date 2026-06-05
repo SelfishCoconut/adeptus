@@ -171,6 +171,43 @@ async def test_finalize_assistant_failed(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_finalize_assistant_is_no_op_on_already_terminal(db_session: AsyncSession) -> None:
+    """A second finalize matches zero pending rows and returns None (Risk 6 race guard)."""
+    eng, user = uuid4(), uuid4()
+    _, assistant_msg = await _seed_turn(db_session, engagement_id=eng, user_id=user, content="q")
+    msg_id = cast(UUID, assistant_msg.id)
+
+    first = await repo.finalize_assistant(
+        db_session,
+        message_id=msg_id,
+        content="winner",
+        status="complete",
+        model="qwen3.5:9b",
+        prompt_tokens=1,
+        completion_tokens=1,
+    )
+    assert first is not None and first.status == "complete"
+
+    # A racing second finalization finds no pending row → None, and must not overwrite.
+    second = await repo.finalize_assistant(
+        db_session,
+        message_id=msg_id,
+        content="loser",
+        status="failed",
+        model="other",
+        prompt_tokens=None,
+        completion_tokens=None,
+    )
+    await db_session.commit()
+    assert second is None
+
+    row = await repo.get_message_for_owner(db_session, message_id=msg_id, user_id=user)
+    assert row is not None
+    assert row.status == "complete"
+    assert row.content == "winner"
+
+
+@pytest.mark.asyncio
 async def test_finalize_assistant_missing_returns_none(db_session: AsyncSession) -> None:
     result = await repo.finalize_assistant(
         db_session,
