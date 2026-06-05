@@ -13,7 +13,7 @@ Two groups:
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -123,7 +123,7 @@ class ApprovalConflict(BaseModel):
     approve-and-run is blocked in an archived engagement (§4); ``status`` is omitted.
     """
 
-    reason: str  # "already_decided" | "engagement_archived"
+    reason: Literal["already_decided", "engagement_archived"]
     status: ApprovalStatus | None = None
 
 
