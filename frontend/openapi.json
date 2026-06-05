@@ -1787,6 +1787,181 @@
           }
         }
       }
+    },
+    "/api/v1/personas": {
+      "get": {
+        "tags": [
+          "personas"
+        ],
+        "summary": "List Personas",
+        "description": "List the personas available to the caller: the four built-ins plus the caller's own.",
+        "operationId": "list_personas",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "personas"
+        ],
+        "summary": "Create Persona",
+        "description": "Create a custom persona owned by the caller (\u00a75.3 \"create \u2026 their own\").",
+        "operationId": "create_persona",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonaCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Persona"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "409": {
+            "description": "The caller already has a custom persona with this name"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/personas/{persona_id}": {
+      "patch": {
+        "tags": [
+          "personas"
+        ],
+        "summary": "Update Persona",
+        "description": "Edit one of the caller's own custom personas (\u00a75.3). A built-in or another user's\npersona is invisible (404), so it cannot be edited.",
+        "operationId": "update_persona",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonaUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Persona"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "Persona not found or not owned by caller (built-ins included)"
+          },
+          "409": {
+            "description": "The caller already has a custom persona with this name"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "personas"
+        ],
+        "summary": "Delete Persona",
+        "description": "Delete one of the caller's own custom personas (\u00a75.3). A built-in or another user's\npersona returns 404 (cannot be deleted).",
+        "operationId": "delete_persona",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "Persona not found or not owned by caller (built-ins included)"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2002,6 +2177,19 @@
             "title": "Confirmed Egress",
             "description": "The user has seen the cloud egress-friction modal for THIS content and chose to send it unmodified anyway (\u00a75.1, Slice 14). Consulted only when the engagement is cloud_enabled and the content matched a secret pattern; ignored otherwise. Never suppresses the audit record (a confirmed send is audited as confirmed).",
             "default": false
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Id",
+            "description": "The persona whose system prompt should shape THIS turn (\u00a75.3, Slice 15). Must be a built-in or one of the caller's own personas; an unknown/foreign id falls back to the `general` built-in server-side (\u00a717.1, never errors). Null/absent \u2192 `general`. Chosen per send so the user can switch persona mid-chat without resetting the conversation."
           }
         },
         "type": "object",
@@ -2090,6 +2278,31 @@
             "type": "array",
             "title": "Claims",
             "description": "Certainty-tagged claims parsed from this turn (\u00a75.3). Empty when none; drives the inline certainty badges and the Graph-pane overlay."
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Id",
+            "description": "The persona used for this assistant turn (\u00a75.3, Slice 15). Null for user/pending/pre-slice rows. A soft reference: the persona may since have been renamed/deleted."
+          },
+          "persona_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Name",
+            "description": "The persona's display name at turn time, denormalized onto the turn so a renamed/deleted persona still labels the historical turn (the in-chat persona chip). Null for user/pending/pre-slice rows."
           }
         },
         "type": "object",
@@ -3058,6 +3271,132 @@
         "type": "object",
         "title": "NodeUpdate",
         "description": "Request body for PATCH .../graph/nodes/{node_id}.\n\nAt least one of ``label`` or ``properties`` must be present.\n``properties`` fully replaces the prior blob when provided."
+      },
+      "Persona": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Human-readable persona name (verbatim, \u00a75.5). Unique per owner."
+          },
+          "system_prompt": {
+            "type": "string",
+            "title": "System Prompt",
+            "description": "The persona's distinct system prompt (\u00a75.3), sent verbatim (\u00a75.5)."
+          },
+          "is_builtin": {
+            "type": "boolean",
+            "title": "Is Builtin",
+            "description": "True for the four global seeded personas (read-only, shared); false for a caller-owned custom persona (editable/deletable by the caller only)."
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug",
+            "description": "Stable slug for a built-in (general/recon/web-exploit/report-writer); null for custom personas. Drives the default-persona lookup."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "system_prompt",
+          "is_builtin",
+          "created_at"
+        ],
+        "title": "Persona",
+        "description": "One persona as exposed by the read/write API (\u00a75.3).\n\nA built-in carries a ``slug`` and ``is_builtin=true`` (read-only, shared); a custom\npersona has ``slug=None`` and ``is_builtin=false`` (editable/deletable by its owner)."
+      },
+      "PersonaCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "description": "Persona name; must be unique among the caller's own personas."
+          },
+          "system_prompt": {
+            "type": "string",
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "System Prompt",
+            "description": "The persona's system prompt, stored and sent verbatim (\u00a75.5)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "system_prompt"
+        ],
+        "title": "PersonaCreate",
+        "description": "Request body for POST /api/v1/personas \u2014 create a custom persona owned by the caller."
+      },
+      "PersonaList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Persona"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "PersonaList",
+        "description": "The personas available to the caller: the four built-ins plus the caller's own."
+      },
+      "PersonaUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 80,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "system_prompt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 8192,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Prompt"
+          }
+        },
+        "type": "object",
+        "title": "PersonaUpdate",
+        "description": "Request body for PATCH /api/v1/personas/{persona_id}.\n\nAll fields optional; only provided (non-null) fields are updated. An empty body is a\nno-op that returns the unchanged persona."
       },
       "PlanStep": {
         "properties": {
