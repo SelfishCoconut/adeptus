@@ -202,3 +202,80 @@ async def test_api_key_never_appears_in_logs(
             await _collect([OllamaChatMessage(role="user", content="hi")])
 
     assert _API_KEY not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Slice 16: native tool-calling surfacing (tool_use content blocks)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_use_block_populates_proposed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.features.chat.tool_calling import ProposedCalls
+
+    body = _sse(
+        _start(5),
+        _text_delta("Running "),
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "tu_1",
+                "name": "propose_command",
+                "input": {},
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": '{"server": "shell-exec", '},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": '"tool": "run", "args": {"cmd": "id"}}',
+            },
+        },
+        {"type": "content_block_stop", "index": 1},
+        _STOP,
+    )
+    captured = _patch_transport(monkeypatch, lambda req: httpx.Response(200, content=body))
+
+    proposed = ProposedCalls()
+    tokens = [
+        tok
+        async for tok in stream_chat(
+            messages=[OllamaChatMessage(role="user", content="hi")], proposed=proposed
+        )
+    ]
+    assert tokens == ["Running "]
+    assert len(proposed.calls) == 1
+    assert proposed.calls[0].name == "propose_command"
+    assert proposed.calls[0].arguments == {
+        "server": "shell-exec",
+        "tool": "run",
+        "args": {"cmd": "id"},
+    }
+    sent = json.loads(captured[0].content)
+    assert sent["tools"][0]["name"] == "propose_command"
+
+
+@pytest.mark.asyncio
+async def test_text_only_stream_leaves_proposed_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.features.chat.tool_calling import ProposedCalls
+
+    body = _sse(_start(3), _text_delta("just prose"), _STOP)
+    _patch_transport(monkeypatch, lambda req: httpx.Response(200, content=body))
+
+    proposed = ProposedCalls()
+    tokens = [
+        tok
+        async for tok in stream_chat(
+            messages=[OllamaChatMessage(role="user", content="hi")], proposed=proposed
+        )
+    ]
+    assert tokens == ["just prose"]
+    assert proposed.calls == []

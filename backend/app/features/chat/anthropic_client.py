@@ -34,8 +34,10 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
+from app.features.chat import tool_calling
 from app.features.chat.ollama_client import LlmUnreachableError, OllamaUsage
 from app.features.chat.schemas import OllamaChatMessage
+from app.features.chat.tool_calling import ProposedCalls, ProposedToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,7 @@ async def stream_chat(
     messages: Sequence[OllamaChatMessage],
     model: str | None = None,
     usage: OllamaUsage | None = None,
+    proposed: ProposedCalls | None = None,
 ) -> AsyncIterator[str]:
     """Stream an assistant reply from Claude token-by-token (Messages API, SSE).
 
@@ -102,6 +105,9 @@ async def stream_chat(
             A leading ``system`` entry is hoisted into the top-level ``system`` param.
         model: Claude model name; defaults to ``ADEPTUS_ANTHROPIC_MODEL`` (claude-sonnet-4-6).
         usage: Optional holder populated with the final token counts (read after iterating).
+        proposed: Optional ``ProposedCalls`` holder (Slice 16). When provided, the
+            ``propose_command`` tool is sent and ``tool_use`` content blocks are accumulated
+            into it out-of-band (text deltas still stream unchanged); read after iterating.
 
     Yields:
         Incremental assistant text slices (empty deltas are skipped).
@@ -125,6 +131,11 @@ async def stream_chat(
     }
     if system_parts:
         payload["system"] = "\n\n".join(system_parts)
+    if proposed is not None:
+        payload["tools"] = tool_calling.anthropic_tools()
+
+    # Per-index accumulators for streamed tool_use blocks (Slice 16): index → (name, json buf).
+    tool_blocks: dict[int, dict[str, str]] = {}
 
     headers = {
         "x-api-key": api_key,
@@ -159,12 +170,20 @@ async def stream_chat(
                         continue
 
                     frame_type = frame.get("type")
-                    if frame_type == "content_block_delta":
+                    if frame_type == "content_block_start":
+                        if proposed is not None:
+                            _begin_tool_block(frame, tool_blocks)
+                    elif frame_type == "content_block_delta":
                         delta = frame.get("delta", {})
                         if delta.get("type") == "text_delta":
                             text = delta.get("text", "")
                             if text:
                                 yield text
+                        elif delta.get("type") == "input_json_delta" and proposed is not None:
+                            _accumulate_tool_input(frame, delta, tool_blocks)
+                    elif frame_type == "content_block_stop":
+                        if proposed is not None:
+                            _finish_tool_block(frame, tool_blocks, proposed)
                     elif frame_type == "message_start":
                         if usage is not None:
                             counts = frame.get("message", {}).get("usage", {})
@@ -180,3 +199,45 @@ async def stream_chat(
     except httpx.HTTPError as exc:
         # Collapse every transport error to the domain error with a stable, key-free message.
         raise LlmUnreachableError("Cloud model is unreachable") from exc
+
+
+def _begin_tool_block(frame: dict[str, Any], tool_blocks: dict[int, dict[str, str]]) -> None:
+    """Start accumulating a ``tool_use`` content block (Slice 16)."""
+    block = frame.get("content_block", {})
+    if block.get("type") != "tool_use":
+        return
+    index = frame.get("index")
+    name = block.get("name")
+    if isinstance(index, int) and isinstance(name, str):
+        tool_blocks[index] = {"name": name, "json": ""}
+
+
+def _accumulate_tool_input(
+    frame: dict[str, Any], delta: dict[str, Any], tool_blocks: dict[int, dict[str, str]]
+) -> None:
+    """Append an ``input_json_delta`` fragment to its block's JSON buffer (Slice 16)."""
+    index = frame.get("index")
+    if isinstance(index, int) and index in tool_blocks:
+        partial = delta.get("partial_json", "")
+        if isinstance(partial, str):
+            tool_blocks[index]["json"] += partial
+
+
+def _finish_tool_block(
+    frame: dict[str, Any], tool_blocks: dict[int, dict[str, str]], proposed: ProposedCalls
+) -> None:
+    """Finalize a ``tool_use`` block: parse its accumulated JSON into a ProposedToolCall."""
+    index = frame.get("index")
+    if not isinstance(index, int):
+        return
+    block = tool_blocks.pop(index, None)
+    if block is None:
+        return
+    raw = block["json"].strip()
+    try:
+        arguments = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        arguments = {}
+    proposed.calls.append(ProposedToolCall(name=block["name"], arguments=arguments))
