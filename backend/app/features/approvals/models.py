@@ -125,3 +125,10 @@ class ApprovalRequest(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Slice 17 — soft-scope render context: the resolved out-of-scope host (max DNS name
+    # length) and the engagement scope text it was matched against, echoed verbatim (§5.5)
+    # for an informative confirmation prompt. Null unless ``out_of_scope`` is in ``reasons``.
+    # Render-only fields on the request itself (not a provenance smear on a shared entity,
+    # §8.2/§17.4); no FK, no index.
+    out_of_scope_host: Mapped[str | None] = mapped_column(String(253), nullable=True)
+    scope_checked_against: Mapped[str | None] = mapped_column(Text, nullable=True)

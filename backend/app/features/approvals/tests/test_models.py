@@ -59,6 +59,28 @@ async def test_json_columns_round_trip(db_session: AsyncSession) -> None:
     assert stored.rationale == "Aggressive scan to enumerate services."
 
 
+async def test_scope_context_columns_round_trip(db_session: AsyncSession) -> None:
+    # Slice 17 — the two soft-scope render columns default null and round-trip when set.
+    pending = _new_request()
+    db_session.add(pending)
+    await db_session.commit()
+    stored = (await db_session.execute(select(ApprovalRequest))).scalar_one()
+    assert stored.out_of_scope_host is None
+    assert stored.scope_checked_against is None
+
+    oos = _new_request(
+        reasons=["out_of_scope"],
+        out_of_scope_host="example.com",
+        scope_checked_against="juice-shop, 10.0.0.0/24",
+    )
+    db_session.add(oos)
+    await db_session.commit()
+    rows = (await db_session.execute(select(ApprovalRequest))).scalars().all()
+    saved = next(r for r in rows if r.reasons == ["out_of_scope"])
+    assert saved.out_of_scope_host == "example.com"
+    assert saved.scope_checked_against == "juice-shop, 10.0.0.0/24"
+
+
 async def test_status_check_constraint_rejects_unknown(db_session: AsyncSession) -> None:
     db_session.add(_new_request(status="bogus"))
     with pytest.raises(IntegrityError):

@@ -24,9 +24,12 @@ has two layers, belt-and-suspenders:
    ``validate_tool_manifests`` (a loud load-time warning), it ensures "never silently
    autonomous" even if layer 1 is ever relaxed.
 
-``out_of_scope`` is reserved in the reason enum but **never returned here** — Slice 17
-adds the scope check that appends it. This module is the single boundary Slice 18's
-standing-autonomy toggle will short-circuit and Slice 17's scope check will extend.
+``out_of_scope`` is appended (Slice 17) by the optional scope arm: when the call site
+passes the engagement's parsed ``scope`` and the proposed command's resolved
+``target_host``, a target outside the scope list appends ``out_of_scope`` and forces
+``REQUIRES_APPROVAL``. The arm is opt-in (both args default ``None``) so the function
+stays pure and Slice-16-identical when scope is not supplied. This module is the single
+boundary Slice 18's standing-autonomy toggle will short-circuit.
 """
 
 import logging
@@ -40,6 +43,7 @@ from app.features.approvals.schemas import (
     ClassificationResult,
     ProposedAction,
 )
+from app.features.approvals.scope import ScopeList, is_in_scope
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +92,24 @@ def _arg_signal(action: ProposedAction, signals: frozenset[str]) -> bool:
     return any(sig in haystack for sig in signals)
 
 
-def classify(action: ProposedAction, *, tool_config: ToolConfig) -> ClassificationResult:
-    """Classify one proposed command into the two-tier risk model (§5.2)."""
+def classify(
+    action: ProposedAction,
+    *,
+    tool_config: ToolConfig,
+    scope: ScopeList | None = None,
+    target_host: str | None = None,
+) -> ClassificationResult:
+    """Classify one proposed command into the two-tier risk model (§5.2).
+
+    ``scope`` / ``target_host`` are the Slice-17 soft-scope arm: when **both** are
+    supplied and ``target_host`` is not within ``scope``, ``out_of_scope`` is **appended**
+    to the reasons (combining with any dangerous reason) and the tier is forced to
+    ``REQUIRES_APPROVAL``. Scope only ever *adds* a reason — it never removes one and
+    never downgrades a gated command to autonomous. When ``scope`` or ``target_host`` is
+    ``None`` (the chat call site passes ``None`` for a targetless command) the behaviour is
+    identical to Slice 16; the function stays pure (the scope match is computed in the
+    pure ``scope`` module, no I/O, no DB).
+    """
     reasons: list[ApprovalReason] = []
     flags = {_norm(f) for f in tool_config.capability_flags}
     weight = _norm(tool_config.weight) if tool_config.weight is not None else None
@@ -121,6 +141,14 @@ def classify(action: ProposedAction, *, tool_config: ToolConfig) -> Classificati
     # classification; a light tool with no dangerous flag stays autonomous.)
     if not reasons and weight is None:
         reasons.append(ApprovalReason.UNCLASSIFIED_MANIFEST)
+
+    # §5.2 fourth dangerous category (Slice 17) — a command against a target outside the
+    # declared scope. Appended AFTER the escape hatch so a weightless tool still earns its
+    # unclassified_manifest reason and out_of_scope combines with it; soft posture means a
+    # targetless command (target_host is None) or an opt-out call site (scope is None) is
+    # never flagged out-of-scope. is_in_scope returns True for an empty scope.
+    if scope is not None and target_host is not None and not is_in_scope(target_host, scope):
+        reasons.append(ApprovalReason.OUT_OF_SCOPE)
 
     if reasons:
         # Dedupe defensively (preserve first-seen order) so overlapping config lists can

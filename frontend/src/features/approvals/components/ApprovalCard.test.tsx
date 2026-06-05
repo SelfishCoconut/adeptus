@@ -61,6 +61,68 @@ describe('ApprovalCard — gated', () => {
     expect(screen.getByText('tool not classified in its manifest')).toBeInTheDocument()
   })
 
+  it('renders the out_of_scope reason label', () => {
+    renderCard(
+      <ApprovalCard
+        engagementId={ENG}
+        request={request({ reasons: ['out_of_scope'], out_of_scope_host: 'example.com' })}
+      />,
+    )
+    expect(screen.getByText('target is outside the declared scope')).toBeInTheDocument()
+  })
+
+  it('shows the out-of-scope host and scope context', () => {
+    renderCard(
+      <ApprovalCard
+        engagementId={ENG}
+        request={request({
+          reasons: ['out_of_scope'],
+          out_of_scope_host: 'example.com',
+          scope_checked_against: 'juice-shop, 10.0.0.0/24, *.target.test',
+        })}
+      />,
+    )
+    const ctx = screen.getByTestId('scope-context')
+    expect(ctx).toHaveTextContent('example.com is not in scope:')
+    expect(ctx).toHaveTextContent('juice-shop, 10.0.0.0/24, *.target.test')
+  })
+
+  it('shows both danger and out_of_scope labels when combined', () => {
+    renderCard(
+      <ApprovalCard
+        engagementId={ENG}
+        request={request({
+          reasons: ['aggressive_scan', 'out_of_scope'],
+          out_of_scope_host: 'example.com',
+          scope_checked_against: 'juice-shop',
+        })}
+      />,
+    )
+    expect(screen.getByText('aggressive scan')).toBeInTheDocument()
+    expect(screen.getByText('target is outside the declared scope')).toBeInTheDocument()
+  })
+
+  it('does not render scope context for a non-out-of-scope request', () => {
+    renderCard(<ApprovalCard engagementId={ENG} request={request({ reasons: ['credential_attack'] })} />)
+    expect(screen.queryByTestId('scope-context')).not.toBeInTheDocument()
+  })
+
+  it('renders gracefully when the out-of-scope host is set but scope text is null', () => {
+    renderCard(
+      <ApprovalCard
+        engagementId={ENG}
+        request={request({
+          reasons: ['out_of_scope'],
+          out_of_scope_host: 'example.com',
+          scope_checked_against: null,
+        })}
+      />,
+    )
+    const ctx = screen.getByTestId('scope-context')
+    expect(ctx).toHaveTextContent('example.com is not in scope:')
+    expect(ctx).toHaveTextContent('(scope not recorded)')
+  })
+
   it('approve → shows "Approved by @user" and hides the buttons', async () => {
     mockPost.mockResolvedValue({
       data: request({ status: 'approved', acted_by_username: 'alice', self_approved: true }),

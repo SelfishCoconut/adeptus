@@ -987,6 +987,10 @@ export interface components {
             created_at: string;
             /** Decided At */
             decided_at?: string | null;
+            /** Out Of Scope Host */
+            out_of_scope_host?: string | null;
+            /** Scope Checked Against */
+            scope_checked_against?: string | null;
         };
         /**
          * ApprovalStatus

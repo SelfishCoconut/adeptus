@@ -8,6 +8,7 @@ the escape hatch, the inverted default, ``validate_tool_manifests``, the reserve
 
 from app.features.approvals.classifier import ToolConfig, classify, validate_tool_manifests
 from app.features.approvals.schemas import ApprovalReason, ApprovalTier, ProposedAction
+from app.features.approvals.scope import parse_scope
 
 
 def _action(
@@ -182,10 +183,12 @@ def test_multiple_reasons_combine() -> None:
     assert len(result.reasons) == len(set(result.reasons))
 
 
-# --- Reserved out_of_scope (Slice 17) -------------------------------------------------
+# --- out_of_scope only when the scope args are supplied -------------------------------
 
 
-def test_out_of_scope_never_returned_in_this_slice() -> None:
+def test_out_of_scope_not_returned_without_scope_args() -> None:
+    # The scope arm is opt-in: with no scope/target_host args (the Slice-16 call shape)
+    # classify never produces out_of_scope, regardless of the command.
     cases = [
         (_action(), ToolConfig()),
         (_action(tool="hydra"), ToolConfig(weight="heavy", capability_flags=("shell-exec",))),
@@ -195,6 +198,107 @@ def test_out_of_scope_never_returned_in_this_slice() -> None:
     for action, cfg in cases:
         result = classify(action, tool_config=cfg)
         assert ApprovalReason.OUT_OF_SCOPE not in result.reasons
+
+
+# --- Scope arm (Slice 17) -------------------------------------------------------------
+
+
+def test_out_of_scope_host_appends_out_of_scope_reason() -> None:
+    scope = parse_scope("juice-shop")
+    result = classify(
+        _action(tool="httpx", args={"target": "http://example.com"}),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+        scope=scope,
+        target_host="example.com",
+    )
+    assert result.tier is ApprovalTier.REQUIRES_APPROVAL
+    assert result.reasons == [ApprovalReason.OUT_OF_SCOPE]
+
+
+def test_in_scope_host_does_not_append() -> None:
+    scope = parse_scope("juice-shop, example.com")
+    result = classify(
+        _action(tool="httpx", args={"target": "http://example.com"}),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+        scope=scope,
+        target_host="example.com",
+    )
+    assert result.tier is ApprovalTier.AUTONOMOUS
+    assert result.reasons == []
+
+
+def test_no_scope_arg_is_slice16_behaviour() -> None:
+    # Without the scope/target args the function is byte-for-byte Slice 16: an otherwise
+    # autonomous light tool stays autonomous even with an out-of-scope-looking target.
+    result = classify(
+        _action(tool="httpx", args={"target": "http://example.com"}),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+    )
+    assert result.tier is ApprovalTier.AUTONOMOUS
+    assert ApprovalReason.OUT_OF_SCOPE not in result.reasons
+
+
+def test_targetless_command_never_out_of_scope() -> None:
+    # A None target_host has no host to test — soft posture never flags it out-of-scope.
+    scope = parse_scope("juice-shop")
+    result = classify(
+        _action(server="shell-exec", tool="run", args={"cmd": "id"}),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+        scope=scope,
+        target_host=None,
+    )
+    assert result.tier is ApprovalTier.AUTONOMOUS
+    assert ApprovalReason.OUT_OF_SCOPE not in result.reasons
+
+
+def test_empty_scope_never_out_of_scope() -> None:
+    scope = parse_scope("")  # no declared scope ⇒ nothing is outside it
+    result = classify(
+        _action(tool="httpx", args={"target": "http://example.com"}),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+        scope=scope,
+        target_host="example.com",
+    )
+    assert result.tier is ApprovalTier.AUTONOMOUS
+    assert result.reasons == []
+
+
+def test_out_of_scope_combines_with_aggressive_scan() -> None:
+    scope = parse_scope("juice-shop")
+    result = classify(
+        _action(server="nmap-server", tool="nmap", args={"target": "http://example.com"}),
+        tool_config=ToolConfig(weight="heavy", capability_flags=("network",)),
+        scope=scope,
+        target_host="example.com",
+    )
+    assert result.tier is ApprovalTier.REQUIRES_APPROVAL
+    assert set(result.reasons) == {ApprovalReason.AGGRESSIVE_SCAN, ApprovalReason.OUT_OF_SCOPE}
+    assert len(result.reasons) == len(set(result.reasons))  # no duplicates
+
+
+def test_in_scope_dangerous_command_has_only_danger_reason() -> None:
+    # An in-scope but dangerous command gates for its DANGER, not for scope.
+    scope = parse_scope("example.com")
+    result = classify(
+        _action(server="nmap-server", tool="nmap", args={"target": "http://example.com"}),
+        tool_config=ToolConfig(weight="heavy", capability_flags=("network",)),
+        scope=scope,
+        target_host="example.com",
+    )
+    assert result.reasons == [ApprovalReason.AGGRESSIVE_SCAN]
+    assert ApprovalReason.OUT_OF_SCOPE not in result.reasons
+
+
+def test_out_of_scope_forces_requires_approval_even_if_otherwise_autonomous() -> None:
+    scope = parse_scope("10.0.0.0/24")
+    result = classify(
+        _action(tool="httpx", args={"target": "http://203.0.113.9"}),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+        scope=scope,
+        target_host="203.0.113.9",
+    )
+    assert result.tier is ApprovalTier.REQUIRES_APPROVAL
+    assert result.reasons == [ApprovalReason.OUT_OF_SCOPE]
 
 
 # --- validate_tool_manifests ----------------------------------------------------------

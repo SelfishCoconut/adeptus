@@ -106,6 +106,10 @@ class ApprovalRequestRead(BaseModel):
     tool_run_id: UUID | None = None
     created_at: datetime
     decided_at: datetime | None = None
+    # Slice 17 — scope-context for an out_of_scope card (§5.2 soft). Both non-null ONLY
+    # when ``reasons`` contains ``out_of_scope``; null for every other gated request.
+    out_of_scope_host: str | None = None
+    scope_checked_against: str | None = None
 
 
 class ApprovalRequestPage(BaseModel):

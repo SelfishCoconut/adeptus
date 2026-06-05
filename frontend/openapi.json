@@ -2393,6 +2393,28 @@
               }
             ],
             "title": "Decided At"
+          },
+          "out_of_scope_host": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Out Of Scope Host"
+          },
+          "scope_checked_against": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Checked Against"
           }
         },
         "type": "object",
