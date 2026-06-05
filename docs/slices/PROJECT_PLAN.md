@@ -174,7 +174,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §5.3 (personas), §5.4
 - **Depends on**: 11
 - **Risky**: no
-- **Status**: in-progress
+- **Status**: done
 
 ### Slice 16: Two-tier autonomy + approval flow
 - **Goal**: Dangerous command posts inline approval card; any engagement member approves/rejects; attribution recorded
