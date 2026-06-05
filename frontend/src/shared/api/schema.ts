@@ -714,6 +714,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/engagements/{engagement_id}/chat/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Chat Messages
+         * @description List the calling user's private chat messages for an engagement, oldest-first.
+         *
+         *     Returns only the caller's own conversation (§5.4 per-user privacy). Requires
+         *     membership; a non-member or missing engagement returns 404 (no existence disclosure).
+         */
+        get: operations["list_chat_messages"];
+        put?: never;
+        /**
+         * Send Chat Message
+         * @description Persist a user message and an empty pending assistant message, then return both.
+         *
+         *     Stream the assistant reply over ``WS /ws/chat/{assistant_message_id}``. Requires
+         *     membership (404); an archived engagement is read-only (409, §4).
+         */
+        post: operations["send_chat_message"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -780,6 +810,68 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /**
+         * ChatMessageCreate
+         * @description Request body for POST .../chat/messages.
+         */
+        ChatMessageCreate: {
+            /**
+             * Content
+             * @description The user's message text, sent verbatim to the model (no redaction, §5.5).
+             */
+            content: string;
+        };
+        /**
+         * ChatMessagePage
+         * @description A page of chat messages (oldest-first) with an opaque cursor for the next
+         *     (older) page; ``next_cursor`` is null on the last page.
+         */
+        ChatMessagePage: {
+            /** Items */
+            items: components["schemas"]["ChatMessageRead"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /**
+         * ChatMessageRead
+         * @description One chat message as exposed by the read/write API.
+         */
+        ChatMessageRead: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Engagement Id
+             * Format: uuid
+             */
+            engagement_id: string;
+            role: components["schemas"]["ChatRole"];
+            /** Content */
+            content: string;
+            status: components["schemas"]["ChatMessageStatus"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /**
+         * ChatMessageStatus
+         * @description Lifecycle of a chat message. Mirrors ``models.CHAT_STATUSES``.
+         *
+         *     ``user`` messages are always ``complete``. An ``assistant`` message is ``pending``
+         *     until its stream finishes (``complete``) or errors (``failed``).
+         * @enum {string}
+         */
+        ChatMessageStatus: "complete" | "pending" | "failed";
+        /**
+         * ChatRole
+         * @description Chat message author role. Mirrors ``models.CHAT_ROLES``.
+         * @enum {string}
+         */
+        ChatRole: "user" | "assistant";
         /**
          * Edge
          * @description Response model for a graph edge.
@@ -1199,6 +1291,15 @@ export interface components {
              * Format: date-time
              */
             enqueued_at: string;
+        };
+        /**
+         * SendChatMessageResult
+         * @description Result of POST .../chat/messages: the persisted user message plus a ``pending``
+         *     assistant placeholder. Stream the assistant reply via WS using its id.
+         */
+        SendChatMessageResult: {
+            user_message: components["schemas"]["ChatMessageRead"];
+            assistant_message: components["schemas"]["ChatMessageRead"];
         };
         /**
          * TimeoutDecision
@@ -2507,6 +2608,75 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuditPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_chat_messages: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatMessagePage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    send_chat_message: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChatMessageCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendChatMessageResult"];
                 };
             };
             /** @description Validation Error */

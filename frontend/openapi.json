@@ -1593,6 +1593,130 @@
           }
         }
       }
+    },
+    "/api/v1/engagements/{engagement_id}/chat/messages": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "List Chat Messages",
+        "description": "List the calling user's private chat messages for an engagement, oldest-first.\n\nReturns only the caller's own conversation (\u00a75.4 per-user privacy). Requires\nmembership; a non-member or missing engagement returns 404 (no existence disclosure).",
+        "operationId": "list_chat_messages",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatMessagePage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Send Chat Message",
+        "description": "Persist a user message and an empty pending assistant message, then return both.\n\nStream the assistant reply over ``WS /ws/chat/{assistant_message_id}``. Requires\nmembership (404); an archived engagement is read-only (409, \u00a74).",
+        "operationId": "send_chat_message",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatMessageCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendChatMessageResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1766,6 +1890,111 @@
         ],
         "title": "AuditPage",
         "description": "A page of audit entries with an opaque cursor for the next (older) page."
+      },
+      "ChatMessageCreate": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "maxLength": 32768,
+            "minLength": 1,
+            "title": "Content",
+            "description": "The user's message text, sent verbatim to the model (no redaction, \u00a75.5)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "ChatMessageCreate",
+        "description": "Request body for POST .../chat/messages."
+      },
+      "ChatMessagePage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChatMessageRead"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "ChatMessagePage",
+        "description": "A page of chat messages (oldest-first) with an opaque cursor for the next\n(older) page; ``next_cursor`` is null on the last page."
+      },
+      "ChatMessageRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "engagement_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Engagement Id"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ChatRole"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ChatMessageStatus"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "engagement_id",
+          "role",
+          "content",
+          "status",
+          "created_at"
+        ],
+        "title": "ChatMessageRead",
+        "description": "One chat message as exposed by the read/write API."
+      },
+      "ChatMessageStatus": {
+        "type": "string",
+        "enum": [
+          "complete",
+          "pending",
+          "failed"
+        ],
+        "title": "ChatMessageStatus",
+        "description": "Lifecycle of a chat message. Mirrors ``models.CHAT_STATUSES``.\n\n``user`` messages are always ``complete``. An ``assistant`` message is ``pending``\nuntil its stream finishes (``complete``) or errors (``failed``)."
+      },
+      "ChatRole": {
+        "type": "string",
+        "enum": [
+          "user",
+          "assistant"
+        ],
+        "title": "ChatRole",
+        "description": "Chat message author role. Mirrors ``models.CHAT_ROLES``."
       },
       "Edge": {
         "properties": {
@@ -2534,6 +2763,23 @@
         ],
         "title": "QueuedRun",
         "description": "A single run waiting for admission in the FIFO queue.\n\nReturned as part of ``ToolQueueSnapshot``; the ``position`` field is\n1-based (1 = next to admit).  ``target_host`` is ``None`` for tools that\ntake no ``target`` arg (they acquire only a slot, no host lock).\n``enqueued_at`` is the wall-clock time the ticket was created \u2014 it lives\nin the in-process queue only and is NOT persisted to the DB."
+      },
+      "SendChatMessageResult": {
+        "properties": {
+          "user_message": {
+            "$ref": "#/components/schemas/ChatMessageRead"
+          },
+          "assistant_message": {
+            "$ref": "#/components/schemas/ChatMessageRead"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_message",
+          "assistant_message"
+        ],
+        "title": "SendChatMessageResult",
+        "description": "Result of POST .../chat/messages: the persisted user message plus a ``pending``\nassistant placeholder. Stream the assistant reply via WS using its id."
       },
       "TimeoutDecision": {
         "properties": {
