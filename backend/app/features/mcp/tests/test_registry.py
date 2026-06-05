@@ -496,3 +496,28 @@ class TestToolPresetsAndArgSchema:
 
         preset = get_registry()["httpx"].tools[0].presets[0]
         assert preset.args == {}
+
+
+# ---------------------------------------------------------------------------
+# Slice 16: approvals manifest-validation hook is invoked at load
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalsValidationHook:
+    def test_load_registry_invokes_validate_tool_manifests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from app.features.approvals import classifier
+
+        spy = MagicMock(return_value=[])
+        monkeypatch.setattr(classifier, "validate_tool_manifests", spy)
+
+        load_registry(config_path=_write(tmp_path, _VALID_YAML))
+
+        spy.assert_called_once()
+        # The hook passes (name, ToolConfig) pairs built from the manifest.
+        (passed_tools,) = spy.call_args.args
+        names = [name for name, _ in passed_tools]
+        assert "shell-exec/run_command" in names
