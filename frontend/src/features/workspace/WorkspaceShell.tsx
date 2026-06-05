@@ -5,6 +5,7 @@ import { PrivacyModeBanner } from './components/PrivacyModeBanner'
 import { HealthIndicator } from './HealthIndicator'
 import { ToolRunnerPanel } from '@/features/mcp/components/ToolRunnerPanel'
 import { GraphPane } from '@/features/graph/components'
+import { AuditPanel } from '@/features/audit/components/AuditPanel'
 
 interface WorkspaceShellProps {
   username: string
@@ -62,7 +63,11 @@ export function WorkspaceShell({
         <section aria-label="Console" className="col-span-2 overflow-y-auto bg-background p-4">
           <h2 className="mb-3 text-sm font-medium text-muted-foreground">Console</h2>
           {engagementId ? (
-            <ToolRunnerPanel engagementId={engagementId} />
+            <div className="flex flex-col gap-4">
+              <ToolRunnerPanel engagementId={engagementId} />
+              {/* Admin-only forensic surface (§14): the audit log for this engagement. */}
+              {role === 'admin' ? <AuditPanel engagementId={engagementId} /> : null}
+            </div>
           ) : (
             <p className="text-sm text-muted-foreground">Select an engagement to use the tool runner.</p>
           )}

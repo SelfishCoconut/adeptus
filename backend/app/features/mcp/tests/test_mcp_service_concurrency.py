@@ -27,6 +27,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.features.audit.schemas import AuditAction
 from app.features.mcp import concurrency as concurrency_module
 from app.features.mcp.concurrency import ToolQueueFullError
 from app.features.mcp.registry import McpServerConfig, McpToolConfig
@@ -714,6 +715,54 @@ async def test_execute_tool_run_async_light_inserts_running() -> None:
     # Admission manager untouched.
     snap = concurrency_module.snapshot(engagement_id)
     assert snap.running_count == 0
+
+
+@pytest.mark.asyncio
+async def test_async_tool_run_writes_invocation_only(mock_audit_record: AsyncMock) -> None:
+    """async_mode=True emits the attributed tool_run invocation; completion is deferred."""
+    engagement_id = uuid4()
+    user_id = uuid4()
+    tool_run = _make_tool_run_mock(engagement_id=engagement_id, status="running")
+    db = AsyncMock()
+
+    def _close_coro(coro: Any) -> MagicMock:
+        coro.close()
+        return MagicMock()
+
+    light_tool = _make_tool_config(name=_LIGHT_TOOL_NAME, weight="light")
+    registry = _make_registry_with_tools(light_tool)
+
+    with (
+        patch(
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
+            new_callable=AsyncMock,
+            return_value=(_make_engagement_mock(), _make_member_mock()),
+        ),
+        patch("app.features.mcp.service.get_registry", return_value=registry),
+        patch(
+            "app.features.mcp.service.mcp_repo.create_tool_run",
+            new_callable=AsyncMock,
+            return_value=tool_run,
+        ),
+        patch("asyncio.create_task", side_effect=_close_coro),
+    ):
+        await execute_tool_run(
+            db,
+            engagement_id=engagement_id,
+            server_name=_SERVER_NAME,
+            tool_name=_LIGHT_TOOL_NAME,
+            args={"target": _TARGET},
+            timeout_seconds=_TIMEOUT,
+            user_id=user_id,
+            async_mode=True,
+        )
+
+    actions = [c.kwargs["action"] for c in mock_audit_record.await_args_list]
+    assert actions == [AuditAction.TOOL_RUN]  # no completion entry on the async path
+    inv = mock_audit_record.await_args_list[0].kwargs
+    assert inv["actor_user_id"] == user_id
+    assert inv["target_type"] == "tool_run"
+    assert inv["payload"]["server"] == _SERVER_NAME
 
 
 @pytest.mark.asyncio

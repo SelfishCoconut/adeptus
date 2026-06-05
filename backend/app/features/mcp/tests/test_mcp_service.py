@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.features.audit.schemas import AuditAction
 from app.features.mcp.registry import McpServerConfig, McpToolConfig
 from app.features.mcp.schemas import McpServerInfo, McpToolDeclaration, ToolRunResult
 from app.features.mcp.service import (
@@ -279,6 +280,65 @@ async def test_execute_tool_run_happy_path() -> None:
     assert result.exit_code == 0
     assert result.stdout == "hello\n"
     assert result.engagement_id == engagement_id
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_run_writes_invocation_and_completion(
+    mock_audit_record: AsyncMock,
+) -> None:
+    """The sync path emits an attributed tool_run (invocation) + tool_run_completed (§14)."""
+    engagement_id = uuid4()
+    user_id = uuid4()
+    tool_run = _make_tool_run(engagement_id=engagement_id)
+    raw = McpRawResult(exit_code=0, stdout="hello\n", stderr="")
+    db = _make_db_with_engagement(_make_engagement_mock())
+
+    with (
+        patch(
+            "app.features.mcp.service.eng_repo.get_engagement_for_member",
+            new_callable=AsyncMock,
+            return_value=(_make_engagement_mock(), _make_member_mock()),
+        ),
+        patch("app.features.mcp.service.get_registry", return_value=_make_registry()),
+        patch(
+            "app.features.mcp.service.mcp_repo.create_tool_run",
+            new_callable=AsyncMock,
+            return_value=tool_run,
+        ),
+        patch(
+            "app.features.mcp.service.subprocess_manager.send_tool_call",
+            new_callable=AsyncMock,
+            return_value=raw,
+        ),
+        patch(
+            "app.features.mcp.service.mcp_repo.update_tool_run_result",
+            new_callable=AsyncMock,
+            return_value=tool_run,
+        ),
+    ):
+        await execute_tool_run(
+            db,
+            engagement_id=engagement_id,
+            server_name=_SERVER_NAME,
+            tool_name=_TOOL_NAME,
+            args=_ARGS,
+            timeout_seconds=_TIMEOUT,
+            user_id=user_id,
+        )
+
+    actions = [c.kwargs["action"] for c in mock_audit_record.await_args_list]
+    assert actions == [AuditAction.TOOL_RUN, AuditAction.TOOL_RUN_COMPLETED]
+    for call in mock_audit_record.await_args_list:
+        assert call.kwargs["actor_user_id"] == user_id
+        assert call.kwargs["engagement_id"] == engagement_id
+        assert call.kwargs["target_type"] == "tool_run"
+    # Invocation carries no transient status (it is written post-execution); the terminal
+    # status + exit_code live on the completion entry only.
+    invocation = mock_audit_record.await_args_list[0].kwargs
+    assert "status" not in invocation["payload"]
+    completion = mock_audit_record.await_args_list[1].kwargs
+    assert completion["payload"]["status"] == "completed"
+    assert completion["payload"]["exit_code"] == 0
 
 
 @pytest.mark.asyncio

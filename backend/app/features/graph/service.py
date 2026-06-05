@@ -40,6 +40,8 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import NotFoundError
+from app.features.audit import service as audit_service
+from app.features.audit.schemas import AuditAction
 from app.features.engagements import repository as eng_repo
 from app.features.engagements.models import Engagement
 from app.features.graph import repository as repo
@@ -71,6 +73,27 @@ from app.features.graph.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# §14 audit (Slice 10): map a graph write's op_type to its AuditAction. Emitted at the
+# _push_undo chokepoint, the single point every ordinary node/edge write flows through.
+_OP_AUDIT_ACTION: dict[str, AuditAction] = {
+    "create_node": AuditAction.GRAPH_NODE_CREATED,
+    "update_node": AuditAction.GRAPH_NODE_UPDATED,
+    "delete_node": AuditAction.GRAPH_NODE_DELETED,
+    "create_edge": AuditAction.GRAPH_EDGE_CREATED,
+    "delete_edge": AuditAction.GRAPH_EDGE_DELETED,
+}
+
+# The audit action for an *undo-applied* inverse (pop_undo_stack → _apply_inverse).
+# Undoing a create soft-deletes; undoing a delete RESTORES the entity (it reappears →
+# "created", matching the delete_edge parallel); undoing an update reverts one step.
+_UNDO_AUDIT_ACTION: dict[str, AuditAction] = {
+    "create_node": AuditAction.GRAPH_NODE_DELETED,
+    "update_node": AuditAction.GRAPH_NODE_UPDATED,
+    "delete_node": AuditAction.GRAPH_NODE_CREATED,
+    "create_edge": AuditAction.GRAPH_EDGE_DELETED,
+    "delete_edge": AuditAction.GRAPH_EDGE_CREATED,
+}
 
 # ---------------------------------------------------------------------------
 # EngagementNotFound — local definition following the mcp.service pattern
@@ -217,6 +240,17 @@ async def _push_undo(
         entity_id=entity_id,
         target_updated_at=target_updated_at,
         summary=summary,
+    )
+    # §14 audit: record the graph edit with user attribution (Slice 10). Emitted here —
+    # the single chokepoint every ordinary node/edge write flows through — so there is
+    # exactly one entry per logical mutation, committed atomically with the undo row.
+    await audit_service.record(
+        db,
+        action=_OP_AUDIT_ACTION[op_type],
+        actor_user_id=user_id,
+        engagement_id=engagement_id,
+        target_type=entity_kind,
+        target_id=str(entity_id),
     )
     await db.commit()
 
@@ -664,10 +698,10 @@ async def pop_undo_stack(
     returns ``UndoResult(undone=None, ...)`` — NOT an error/422. A pop never
     pushes a new entry (no redo).
 
-    AUDIT SEAM (Slice 10): this is the single chokepoint for "a human graph write
-    was undone" (the counterpart to repository.push_undo_entry). Slice 10 attaches
-    audit emission here. Per Decision 4 NO audit module is imported or called in
-    this slice — the seam is left clean and documented only.
+    AUDIT (Slice 10): this is the chokepoint for "a human graph write was undone"
+    (the counterpart to repository.push_undo_entry). The undo-applied inverse is
+    recorded as a graph_* audit entry here, via _UNDO_AUDIT_ACTION, committed
+    atomically with the stack update (§14).
 
     Raises:
         EngagementNotFound: caller not a member or engagement missing (→404).
@@ -696,6 +730,18 @@ async def pop_undo_stack(
             continue
 
         await repo.mark_undo_entry_undone(db, row)
+        # §14 audit (Slice 10): the undo-applied inverse IS a graph mutation — record it
+        # with the mapped action so undo-applied writes are audited too (the counterpart
+        # to the _push_undo emission; _apply_inverse goes straight through the writer, so
+        # this is NOT double-counted by the ordinary-mutator chokepoint).
+        await audit_service.record(
+            db,
+            action=_UNDO_AUDIT_ACTION[cast(str, row.op_type)],
+            actor_user_id=user_id,
+            engagement_id=engagement_id,
+            target_type=cast(str, row.entity_kind),
+            target_id=str(cast(UUID, row.entity_id)),
+        )
         undone = _to_entry(row, stale=False)
         await db.commit()
         stack = await _build_stack(db, engagement_id, user_id)

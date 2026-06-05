@@ -17,9 +17,11 @@ at runtime, so repository tests can insert ToolRun rows with bare engagement UUI
 without needing real Engagement rows.
 """
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import Column, ColumnDefault, Text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -28,6 +30,20 @@ from app.core.db import Base
 from app.features.auth import models as auth_models  # noqa: F401 — registers users/sessions
 from app.features.engagements import models as eng_models  # noqa: F401 — registers engagements
 from app.features.mcp import models as mcp_models  # noqa: F401 — registers tool_runs
+
+
+@pytest.fixture(autouse=True)
+def mock_audit_record() -> Iterator[AsyncMock]:
+    """Stub the Slice-10 audit emission for mcp tests.
+
+    Most mcp service tests drive ``execute_tool_run`` with a *mocked* db session, so the
+    real ``audit_service.record`` (which runs SQL) cannot execute. Replace it with an
+    AsyncMock so those tests are unaffected; the tool-run wiring tests request this
+    fixture to assert ``record`` was called with the right action/payload. Router tests
+    (real SQLite session) are unaffected by the no-op.
+    """
+    with patch("app.features.mcp.service.audit_service.record", new_callable=AsyncMock) as mock:
+        yield mock
 
 
 @pytest_asyncio.fixture

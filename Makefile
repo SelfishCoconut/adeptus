@@ -1,4 +1,4 @@
-.PHONY: dev test test-backend test-frontend test-integration lint format migrate generate-api sandbox sandbox-down clean help
+.PHONY: dev test test-backend test-frontend test-integration lint format migrate verify-audit generate-api sandbox sandbox-down clean help
 
 help:
 	@echo "Adeptus — make targets"
@@ -10,6 +10,7 @@ help:
 	@echo "  lint              — ruff + mypy + eslint + tsc --noEmit"
 	@echo "  format            — ruff format + prettier"
 	@echo "  migrate           — alembic upgrade head"
+	@echo "  verify-audit      — verify the tamper-evident audit hash chain (exit non-zero on tamper)"
 	@echo "  generate-api      — regenerate the typed OpenAPI client from the backend"
 	@echo "  sandbox           — bring up Juice Shop on http://localhost:3000"
 	@echo "  sandbox-down      — tear down Juice Shop and its volumes"
@@ -56,6 +57,11 @@ format:
 
 migrate:
 	docker compose run --rm backend uv run alembic upgrade head
+
+# Verify the hash-chained audit log (§14). Exits 0 on an intact chain, non-zero on the
+# first tampered/deleted/reordered entry. Runs against the live DB (operator/forensic tool).
+verify-audit:
+	docker compose run --rm backend uv run python -m app.features.audit.verify
 
 generate-api:
 	cd backend && uv run python -c "import json; from app.main import app; print(json.dumps(app.openapi(), indent=2))" > ../frontend/openapi.json

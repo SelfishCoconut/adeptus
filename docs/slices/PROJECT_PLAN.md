@@ -112,7 +112,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §14 (audit + tamper-evident), §5.2 (self_approved)
 - **Depends on**: 01
 - **Risky**: yes (audit log integrity)
-- **Status**: todo
+- **Status**: in-review
 
 ### Slice 26: Heavy tools — nmap + gobuster MCPs
 - **Goal**: Run nmap against sandbox with stealth/normal/aggressive presets; gobuster wired in
