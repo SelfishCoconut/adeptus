@@ -674,6 +674,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Engagement Audit
+         * @description List an engagement's audit entries, newest-first. Requires membership (404 otherwise).
+         */
+        get: operations["list_engagement_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/audit/global": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Global Audit
+         * @description List instance-global (no-engagement) audit entries, newest-first. Admin only (403).
+         */
+        get: operations["list_global_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -682,6 +722,63 @@ export interface components {
         AddMemberRequest: {
             /** Username */
             username: string;
+        };
+        /**
+         * AuditAction
+         * @description The audit action vocabulary (§14). Mirrors ``models.AUDIT_ACTIONS`` exactly —
+         *     guarded by ``test_schemas.test_action_enum_matches_db_vocabulary``.
+         *
+         *     ``APPROVAL_GRANTED`` / ``APPROVAL_REJECTED`` (Slice 16, carry ``self_approved``) and
+         *     ``AI_CALL`` (Slice 11+) are reserved here with no caller in this slice.
+         * @enum {string}
+         */
+        AuditAction: "login" | "logout" | "login_failed" | "tool_run" | "tool_run_completed" | "graph_node_created" | "graph_node_updated" | "graph_node_deleted" | "graph_edge_created" | "graph_edge_deleted" | "approval_granted" | "approval_rejected" | "ai_call";
+        /**
+         * AuditEntryRead
+         * @description One audit entry as exposed by the read API (newest-first listings).
+         */
+        AuditEntryRead: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Seq */
+            seq: number;
+            action: components["schemas"]["AuditAction"];
+            /** Actor User Id */
+            actor_user_id: string | null;
+            /** Engagement Id */
+            engagement_id: string | null;
+            /** Target Type */
+            target_type: string | null;
+            /** Target Id */
+            target_id: string | null;
+            /** Self Approved */
+            self_approved: boolean | null;
+            /** Payload */
+            payload: {
+                [key: string]: unknown;
+            };
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Prev Hash */
+            prev_hash: string;
+            /** Entry Hash */
+            entry_hash: string;
+        };
+        /**
+         * AuditPage
+         * @description A page of audit entries with an opaque cursor for the next (older) page.
+         */
+        AuditPage: {
+            /** Items */
+            items: components["schemas"]["AuditEntryRead"][];
+            /** Next Cursor */
+            next_cursor: string | null;
         };
         /**
          * Edge
@@ -2342,6 +2439,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UndoResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_engagement_audit: {
+        parameters: {
+            query: {
+                engagement_id: string;
+                action?: components["schemas"]["AuditAction"] | null;
+                self_approved?: boolean | null;
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_global_audit: {
+        parameters: {
+            query?: {
+                action?: components["schemas"]["AuditAction"] | null;
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditPage"];
                 };
             };
             /** @description Validation Error */
