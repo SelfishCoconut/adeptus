@@ -2401,6 +2401,31 @@
             "type": "array",
             "title": "Claims",
             "description": "The certainty claims parsed from this turn's metadata block (\u00a75.3 / \u00a714)."
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Id",
+            "description": "The persona that shaped this turn (\u00a75.3 / \u00a717.6, Slice 15). Null for user/pending/pre-slice rows. The raw_prompt's leading system content is this persona's prompt, so the panel shows exactly which persona was used."
+          },
+          "persona_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Name",
+            "description": "The persona's display name at turn time (\u00a75.3). Null when no persona."
           }
         },
         "type": "object",

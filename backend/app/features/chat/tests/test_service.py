@@ -832,6 +832,28 @@ async def test_get_turn_debug_non_assistant_404(db_session: AsyncSession) -> Non
         )
 
 
+def test_to_turn_debug_surfaces_persona() -> None:
+    """§14 / §17.6: the debug record surfaces the persona that shaped the turn (Slice 15)."""
+    pid = uuid4()
+    message = ChatMessage(
+        id=uuid4(),
+        engagement_id=uuid4(),
+        user_id=uuid4(),
+        role="assistant",
+        content="recon answer",
+        status="complete",
+        model="qwen3.5:9b",
+        graph_context={
+            "raw_prompt": "[system]\nRECON...",
+            "persona_id": str(pid),
+            "persona_name": "Recon",
+        },
+    )
+    debug = service._to_turn_debug(message)
+    assert debug.persona_id == pid
+    assert debug.persona_name == "Recon"
+
+
 # ---------------------------------------------------------------------------
 # stream_assistant_reply — §5.3 visible plan + certainty signaling (Slice 13)
 # ---------------------------------------------------------------------------

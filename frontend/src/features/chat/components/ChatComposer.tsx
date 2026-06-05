@@ -11,6 +11,8 @@ import { EgressConfirmationRequiredError, useSendChatMessage } from '../api'
 import { scanEgress } from '../egressScan'
 import { EgressConfirmModal } from './EgressConfirmModal'
 
+// Must match the backend's default-persona slug (personas/seed.py: GENERAL_SLUG). Renaming
+// it there without updating this would silently break the general-default selection.
 const GENERAL_SLUG = 'general'
 
 interface ChatComposerProps {
@@ -148,7 +150,7 @@ export function ChatComposer({
             selectedId={selectedPersonaId}
             onChange={(id) => selectPersona(engagementId, id)}
             onManage={() => setManageOpen(true)}
-            disabled={archived}
+            disabled={disabled}
           />
         </div>
       ) : null}

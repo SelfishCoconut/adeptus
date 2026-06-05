@@ -1159,6 +1159,7 @@ def _to_turn_debug(message: ChatMessage) -> ChatTurnDebug:
         else []
     )
     plan, claims = _stored_plan_claims(message)
+    persona_id, persona_name = _stored_persona(message)
     stored_output = gc.get("model_output")
     model_output = stored_output if isinstance(stored_output, str) else message.content
     return ChatTurnDebug(
@@ -1172,4 +1173,6 @@ def _to_turn_debug(message: ChatMessage) -> ChatTurnDebug:
         model_output=model_output,
         plan=plan,
         claims=claims,
+        persona_id=persona_id,
+        persona_name=persona_name,
     )

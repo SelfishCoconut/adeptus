@@ -31,6 +31,9 @@ export function usePersonas(options?: { enabled?: boolean }) {
   return useQuery<PersonaList>({
     queryKey: personaKeys.list(),
     enabled: options?.enabled ?? true,
+    // Near-static reference data (four built-ins + a handful of customs); mutations
+    // invalidate it explicitly, so avoid refetching on every window focus.
+    staleTime: 5 * 60 * 1000,
     queryFn: async () => {
       const { data, error } = await api.GET('/api/v1/personas')
       if (error || !data) throw new Error('Failed to load personas')

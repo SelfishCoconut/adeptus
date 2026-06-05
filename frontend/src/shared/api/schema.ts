@@ -1058,6 +1058,16 @@ export interface components {
              * @description The certainty claims parsed from this turn's metadata block (§5.3 / §14).
              */
             claims?: components["schemas"]["Claim"][];
+            /**
+             * Persona Id
+             * @description The persona that shaped this turn (§5.3 / §17.6, Slice 15). Null for user/pending/pre-slice rows. The raw_prompt's leading system content is this persona's prompt, so the panel shows exactly which persona was used.
+             */
+            persona_id?: string | null;
+            /**
+             * Persona Name
+             * @description The persona's display name at turn time (§5.3). Null when no persona.
+             */
+            persona_name?: string | null;
         };
         /**
          * Claim

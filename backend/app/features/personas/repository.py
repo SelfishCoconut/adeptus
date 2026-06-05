@@ -111,7 +111,10 @@ async def update_custom(
 
 
 async def get_owned_by_name(db: AsyncSession, *, user_id: UUID, name: str) -> Persona | None:
-    """Return the caller's own custom persona with this name, or None (the 409 pre-check)."""
+    """Return the caller's own custom persona with this name, or None (the 409 pre-check).
+
+    Matching on ``user_id`` implicitly excludes built-ins (their ``user_id`` is NULL, which
+    never equals a real UUID) — so a custom persona may reuse a built-in's name."""
     result = await db.execute(
         select(Persona).where(Persona.user_id == user_id, Persona.name == name)
     )
