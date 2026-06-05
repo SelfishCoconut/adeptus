@@ -2,7 +2,7 @@
 
 **Branch**: `slice-10-audit-log-hash-chain`
 **GitHub Issue**: #29
-**Status**: planned
+**Status**: in-review
 **Risky**: yes (audit log integrity — step-gated)
 
 ---
@@ -434,3 +434,4 @@ self_approved plumbing). Only LOW/INFO findings.
   gap, independent of this slice — track with the auth checklist.
 - Async/background `tool_run_completed` (needs `user_id` threaded into `_stream_to_channel`
   + a ToolRun attribution seam).
+- 2026-06-05T00:23:06Z — 0115fbe docs(slice-10): record review outcomes + deferred follow-ups
