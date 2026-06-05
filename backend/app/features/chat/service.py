@@ -33,7 +33,7 @@ from app.features.audit import service as audit_service
 from app.features.audit.schemas import AuditAction
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
-from app.features.chat import ollama_client, subset_builder
+from app.features.chat import ollama_client, plan_parser, subset_builder
 from app.features.chat import repository as chat_repo
 from app.features.chat.models import ChatMessage
 from app.features.chat.ollama_client import LlmUnreachableError, OllamaUsage
@@ -42,9 +42,11 @@ from app.features.chat.schemas import (
     ChatMessageRead,
     ChatMessageStatus,
     ChatTurnDebug,
+    Claim,
     GraphSubsetEdge,
     GraphSubsetNode,
     OllamaChatMessage,
+    PlanStep,
     SendChatMessageResult,
     WebSocketChatChunk,
 )
@@ -66,6 +68,24 @@ SYSTEM_PROMPT = (
     "You are a penetration-testing assistant embedded in the Adeptus platform. "
     "Help the operator reason about their authorized engagement: explain techniques, "
     "interpret tool output, and suggest next steps. Be concise and technical."
+)
+
+# Slice 13 (§5.3): the structured-output instruction. Appended AFTER the base prompt and
+# the Slice-12 graph context block so the model emits a trailing, machine-readable metadata
+# block we parse server-side (plan_parser owns the sentinel constants). Purely additive —
+# if the model ignores it the parser degrades to clean prose + empty plan/claims (Risk 1).
+PLAN_CERTAINTY_INSTRUCTION = (
+    "\n\n---\n"
+    "After your prose answer, append EXACTLY ONE metadata block, on its own lines, wrapped "
+    f"in {plan_parser.START_MARKER} and {plan_parser.END_MARKER}, containing a single JSON "
+    "object with two keys:\n"
+    '  - "plan": an ordered list of the steps you are tracking this turn, each '
+    '{"step": "<short text>", "status": "todo" | "in_progress" | "done"}.\n'
+    '  - "claims": a list of statements you are NOT fully certain about, each '
+    '{"text": "<the claim>", "certainty": <integer 0-100>, "node_id": <the relevant graph '
+    "node's uuid from the graph context above, or null>}.\n"
+    "Use empty lists if you have no plan or no uncertain claims. Put NOTHING after the "
+    "closing marker, and do not mention or describe this block in your prose."
 )
 
 # Stable, non-leaky reason surfaced to the client (matches the demo copy).
@@ -268,10 +288,12 @@ def _build_prompt(
     triggering user message (always ``complete``) is included unchanged — no redaction.
 
     ``context_block`` (Slice 12) is the rendered §5.3 relevant subset; when non-empty it is
-    appended to the single system message verbatim (§5.5). When empty the prompt is exactly
-    the Slice-11 prompt (empty-graph / empty-subset turns are unchanged).
+    appended to the single system message verbatim (§5.5). When empty the graph block is
+    omitted (Slice-11 prompt). The Slice-13 structured-output instruction is appended last,
+    after the (optional) context block, so the model always sees it.
     """
-    system_content = f"{SYSTEM_PROMPT}\n\n{context_block}" if context_block else SYSTEM_PROMPT
+    base = f"{SYSTEM_PROMPT}\n\n{context_block}" if context_block else SYSTEM_PROMPT
+    system_content = f"{base}{PLAN_CERTAINTY_INSTRUCTION}"
     messages: list[OllamaChatMessage] = [OllamaChatMessage(role="system", content=system_content)]
     for m in window:
         if m.id == current_assistant_id:
@@ -323,9 +345,13 @@ async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would
             return
 
         if current.status == "complete":
+            # Reconnect replay: re-emit the stored (already block-stripped) prose, then a
+            # done frame carrying the stored plan/claims so the panel + badges re-render
+            # on a reconnect exactly as on the live turn (Slice 13).
             if current.content:
                 yield WebSocketChatChunk(type="token", data=current.content)
-            yield WebSocketChatChunk(type="done")
+            stored_plan, stored_claims = _stored_plan_claims(current)
+            yield WebSocketChatChunk(type="done", plan=stored_plan, claims=stored_claims)
             return
         if current.status == "failed":
             yield WebSocketChatChunk(type="error", message=UNREACHABLE_MESSAGE)
@@ -340,7 +366,7 @@ async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would
         # prepend it to the system prompt (Slice 12). On an empty graph / empty subset the
         # context block is empty and the prompt is exactly the Slice-11 prompt. The canonical
         # debug record (resolved subset + raw prompt) is persisted at finalize for §14.
-        subset = await _build_turn_subset(
+        subset, live_node_ids = await _build_turn_subset(
             session,
             engagement_id=engagement_id,
             message_text=_triggering_user_text(window),
@@ -352,7 +378,13 @@ async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would
         debug_record = _debug_record(subset, _render_raw_prompt(prompt))
 
         usage = OllamaUsage()
-        chunks: list[str] = []
+        # full accumulates the raw reply (incl. the metadata block); emitted tracks how much
+        # has been streamed as clean prose. Once the sentinel marker is seen we stop emitting
+        # so the raw <adeptus-meta> block never reaches the client (Risk 2). A partial-marker
+        # suffix is withheld each step so a marker split across token boundaries is caught.
+        full = ""
+        emitted = 0
+        block_started = False
         agen = ollama_client.stream_chat(messages=prompt, model=model_name, usage=usage).__aiter__()
 
         while True:
@@ -377,19 +409,33 @@ async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would
                 )
                 yield WebSocketChatChunk(type="error", message=UNREACHABLE_MESSAGE)
                 return
-            chunks.append(token)
-            yield WebSocketChatChunk(type="token", data=token)
+            full += token
+            if not block_started:
+                safe, block_started = _safe_prose_len(full)
+                if safe > emitted:
+                    yield WebSocketChatChunk(type="token", data=full[emitted:safe])
+                    emitted = safe
+        # The stream ended without the marker turning up: the tail we were withholding (a
+        # false-positive partial marker) is real prose, so flush it.
+        if not block_started and emitted < len(full):
+            yield WebSocketChatChunk(type="token", data=full[emitted:])
 
-        full_content = "".join(chunks)
+        # Parse the metadata block off the full reply, validate claim node_ids against the
+        # engagement's live graph (drop foreign/unknown ids, §17.1), and persist the
+        # block-stripped prose as content + the plan/claims into the per-turn JSONB blob.
+        prose, plan, claims = plan_parser.extract(full)
+        claims = _validate_claim_node_ids(claims, live_node_ids)
+        graph_context = _finalize_record(debug_record, plan=plan, claims=claims, model_output=full)
+
         finalized = await chat_repo.finalize_assistant(
             session,
             message_id=message_id,
-            content=full_content,
+            content=prose,
             status="complete",
             model=model_name,
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
-            graph_context=debug_record,
+            graph_context=graph_context,
         )
         # Emit the audit entry only when THIS call won the pending→terminal transition;
         # a racing socket that already finalized the row gets None and must not re-emit
@@ -405,9 +451,11 @@ async def stream_assistant_reply(  # noqa: C901 — linear flow; splitting would
                 status="complete",
                 nodes_injected=subset.nodes_injected,
                 edges_injected=subset.edges_injected,
+                plan_steps=len(plan),
+                claims_count=len(claims),
             )
         await session.commit()
-        yield WebSocketChatChunk(type="done")
+        yield WebSocketChatChunk(type="done", plan=plan, claims=claims)
 
 
 async def _finalize_failed(
@@ -463,11 +511,15 @@ async def _emit_ai_call(
     status: str,
     nodes_injected: int = 0,
     edges_injected: int = 0,
+    plan_steps: int = 0,
+    claims_count: int = 0,
 ) -> None:
     """Record one ``ai_call`` audit entry attributed to the acting user (§14).
 
-    The payload carries the §5.3 subset *counts* (Slice 12) so the forensic log records how
-    much graph context each turn used — no new audit action/table, just a widened payload."""
+    The payload carries the §5.3 subset *counts* (Slice 12) plus, from Slice 13, the count
+    of plan steps and certainty claims the turn produced — a forensic record of how much
+    structured output each turn emitted. No new audit action/table, just a widened payload
+    (the hash-chain integrity surface is untouched)."""
     await audit_service.record(
         session,
         action=AuditAction.AI_CALL,
@@ -482,6 +534,8 @@ async def _emit_ai_call(
             "status": status,
             "graph_nodes_injected": nodes_injected,
             "graph_edges_injected": edges_injected,
+            "plan_steps": plan_steps,
+            "claims_count": claims_count,
         },
     )
 
@@ -549,16 +603,19 @@ async def _build_turn_subset(
     engagement_id: UUID,
     message_text: str,
     stash: dict[str, Any] | None,
-) -> subset_builder.GraphSubset:
+) -> tuple[subset_builder.GraphSubset, set[UUID]]:
     """Resolve the stashed inputs + the engagement's live graph into the §5.3 subset.
 
     Reads the live graph via the existing ``graph.repository.load_live_graph`` read path
-    (engagement-scoped, non-deleted only); chat never writes the graph (ADR-0001)."""
+    (engagement-scoped, non-deleted only); chat never writes the graph (ADR-0001). Returns
+    the subset AND the set of every live node id (Slice 13): a claim may reference any live
+    node, not just one in the subset, so the finalize step validates claim ``node_id``s
+    against this full set (foreign/unknown ids dropped, §17.1)."""
     inputs = stash.get("inputs", {}) if isinstance(stash, dict) else {}
     inputs = inputs if isinstance(inputs, dict) else {}
     nodes, edges = await graph_repo.load_live_graph(session, engagement_id)
     settings = get_settings()
-    return subset_builder.build(
+    subset = subset_builder.build(
         nodes=nodes,
         edges=edges,
         message_text=message_text,
@@ -568,6 +625,8 @@ async def _build_turn_subset(
         n_recent=settings.ADEPTUS_GRAPH_CONTEXT_RECENT_LIMIT,
         k_mentioned=settings.ADEPTUS_GRAPH_CONTEXT_MENTIONED_LIMIT,
     )
+    live_node_ids = {n_id if isinstance(n_id := n.id, UUID) else UUID(str(n_id)) for n in nodes}
+    return subset, live_node_ids
 
 
 def _render_raw_prompt(prompt: Sequence[OllamaChatMessage]) -> str:
@@ -576,13 +635,92 @@ def _render_raw_prompt(prompt: Sequence[OllamaChatMessage]) -> str:
 
 
 def _debug_record(subset: subset_builder.GraphSubset, raw_prompt: str) -> dict[str, Any]:
-    """The canonical per-turn §14 debug record persisted into ``chat_messages.graph_context``."""
+    """The base per-turn §14 debug record persisted into ``chat_messages.graph_context``.
+
+    Holds the Slice-12 keys (subset nodes/edges + context_block + raw_prompt). The Slice-13
+    plan/claims/model_output keys are layered on by ``_finalize_record`` on the success
+    path; on a failed turn this base record is stored as-is (no plan/claims/output)."""
     return {
         "nodes": [n.model_dump(mode="json") for n in subset.nodes],
         "edges": [e.model_dump(mode="json") for e in subset.edges],
         "context_block": subset.context_block,
         "raw_prompt": raw_prompt,
     }
+
+
+def _finalize_record(
+    debug_record: dict[str, Any],
+    *,
+    plan: list[PlanStep],
+    claims: list[Claim],
+    model_output: str,
+) -> dict[str, Any]:
+    """Merge the Slice-13 plan/claims/raw-output keys onto the Slice-12 debug record.
+
+    Merging (not overwriting) keeps both Slice-12 (subset/raw_prompt) and Slice-13
+    (plan/claims) data on the one JSONB blob (Risk 6). ``model_output`` is the UNSTRIPPED
+    reply (with the metadata block) so the §14 debug panel can show exactly what was parsed,
+    while the row's ``content`` holds the block-stripped prose."""
+    return {
+        **debug_record,
+        "plan": [p.model_dump(mode="json") for p in plan],
+        "claims": [c.model_dump(mode="json") for c in claims],
+        "model_output": model_output,
+    }
+
+
+def _validate_claim_node_ids(claims: list[Claim], live_node_ids: set[UUID]) -> list[Claim]:
+    """Drop a claim's ``node_id`` when it is not a live node of this engagement (§17.1).
+
+    The claim text + certainty always survive; only an unknown/foreign id is nulled so the
+    Graph-pane badge can never point at a hallucinated id or a node from another engagement
+    (Risk 3). A second user's nodes are never in this engagement's live set, so cross-
+    engagement references are dropped here too."""
+    validated: list[Claim] = []
+    for claim in claims:
+        if claim.node_id is not None and claim.node_id not in live_node_ids:
+            validated.append(Claim(text=claim.text, certainty=claim.certainty, node_id=None))
+        else:
+            validated.append(claim)
+    return validated
+
+
+def _stored_plan_claims(message: ChatMessage) -> tuple[list[PlanStep], list[Claim]]:
+    """Read the parsed plan/claims back from an assistant row's ``graph_context`` JSONB.
+
+    Tolerates the keys being absent (pre-slice rows, user rows, failed turns) → empty
+    lists. The stored shapes were written by us via ``model_dump`` so re-validation is
+    lossless; a corrupt blob degrades to empty rather than breaking a read (graceful)."""
+    gc = message.graph_context if isinstance(message.graph_context, dict) else {}
+    raw_plan = gc.get("plan")
+    raw_claims = gc.get("claims")
+    try:
+        plan = [PlanStep.model_validate(p) for p in raw_plan] if isinstance(raw_plan, list) else []
+        claims = (
+            [Claim.model_validate(c) for c in raw_claims] if isinstance(raw_claims, list) else []
+        )
+    except (ValueError, TypeError):
+        return [], []
+    return plan, claims
+
+
+def _safe_prose_len(full: str) -> tuple[int, bool]:
+    """How many leading chars of ``full`` are safe to stream as prose, and whether the
+    sentinel block has started.
+
+    If the full START marker is present, prose ends at it (block_started=True). Otherwise
+    withhold the longest suffix of ``full`` that is a prefix of the marker, so a marker
+    split across token boundaries (e.g. ``<adeptus`` then ``-meta>``) is never half-emitted.
+    """
+    idx = full.find(plan_parser.START_MARKER)
+    if idx != -1:
+        return idx, True
+    marker = plan_parser.START_MARKER
+    max_overlap = min(len(full), len(marker) - 1)
+    for k in range(max_overlap, 0, -1):
+        if full.endswith(marker[:k]):
+            return len(full) - k, False
+    return len(full), False
 
 
 # ---------------------------------------------------------------------------
