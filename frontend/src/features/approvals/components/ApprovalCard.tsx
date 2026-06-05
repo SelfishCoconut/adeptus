@@ -14,7 +14,7 @@ const REASON_LABELS: Record<ApprovalReason, string> = {
   aggressive_scan: 'aggressive scan',
   credential_attack: 'credential attack',
   unclassified_manifest: 'tool not classified in its manifest',
-  out_of_scope: 'outside the scope list',
+  out_of_scope: 'target is outside the declared scope',
 }
 
 function CommandSummary({
@@ -113,6 +113,12 @@ function GatedCard({ engagementId, request }: { engagementId: string; request: A
         args={decided.args}
         preset={decided.preset_name}
       />
+      {decided.reasons.includes('out_of_scope') && decided.out_of_scope_host ? (
+        <p className="mt-1 text-xs text-amber-700 dark:text-amber-400" data-testid="scope-context">
+          <span className="font-mono">{decided.out_of_scope_host}</span> is not in scope:{' '}
+          <span className="font-mono">{decided.scope_checked_against}</span>
+        </p>
+      ) : null}
       {request.rationale ? (
         <p className="mt-1 text-xs text-muted-foreground">{request.rationale}</p>
       ) : null}
