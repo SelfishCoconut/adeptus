@@ -1,11 +1,17 @@
-import { useMemo, useState, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import type { PrivacyMode, SendChatMessageResult } from '@/shared/api'
 import { usePinStore } from '@/features/graph/store/pinStore'
+import { usePersonas } from '@/features/personas/api'
+import { usePersonaSelectionStore } from '@/features/personas/store'
+import { PersonaSwitcher } from '@/features/personas/components/PersonaSwitcher'
+import { ManagePersonasPanel } from '@/features/personas/components/ManagePersonasPanel'
 import { EgressConfirmationRequiredError, useSendChatMessage } from '../api'
 import { scanEgress } from '../egressScan'
 import { EgressConfirmModal } from './EgressConfirmModal'
+
+const GENERAL_SLUG = 'general'
 
 interface ChatComposerProps {
   engagementId: string
@@ -42,7 +48,33 @@ export function ChatComposer({
   const [content, setContent] = useState('')
   // Non-null while the friction modal is open: the matched category NAMES to display.
   const [pendingCategories, setPendingCategories] = useState<string[] | null>(null)
+  const [manageOpen, setManageOpen] = useState(false)
   const sendMutation = useSendChatMessage(engagementId)
+
+  // Personas (§5.3, Slice 15): the switcher's current selection rides on the POST body per
+  // send, so switching takes effect on the next turn with no conversation reset. The library
+  // is per-user (not engagement-scoped); the ephemeral selection is keyed by engagement and
+  // defaults to the `general` built-in.
+  const personasQuery = usePersonas()
+  const personas = useMemo(() => personasQuery.data?.items ?? [], [personasQuery.data])
+  const generalId = useMemo(
+    () => personas.find((p) => p.slug === GENERAL_SLUG)?.id ?? null,
+    [personas],
+  )
+  const storedPersonaId = usePersonaSelectionStore((s) => s.selectedByEngagement[engagementId])
+  const selectPersona = usePersonaSelectionStore((s) => s.select)
+  const reconcilePersonas = usePersonaSelectionStore((s) => s.reconcile)
+  const selectedPersonaId = storedPersonaId ?? generalId ?? undefined
+
+  // Drop a stale selection (its persona was deleted) so the switcher falls back to general.
+  useEffect(() => {
+    if (personas.length > 0) {
+      reconcilePersonas(
+        engagementId,
+        personas.map((p) => p.id),
+      )
+    }
+  }, [personas, engagementId, reconcilePersonas])
 
   // Read the current pinned set (Slice-08 pinStore) at send time so it forms the §5.3
   // "always-included" union arm (§5.4). Select the raw map and derive to keep a stable
@@ -62,7 +94,13 @@ export function ChatComposer({
   // set (server caps + dedupes). confirmedEgress carries the friction acknowledgement (§5.1).
   const doSend = (confirmedEgress: boolean) => {
     sendMutation.mutate(
-      { content: trimmed, pinnedNodeIds, recentNodeIds: pinnedNodeIds, confirmedEgress },
+      {
+        content: trimmed,
+        pinnedNodeIds,
+        recentNodeIds: pinnedNodeIds,
+        confirmedEgress,
+        personaId: selectedPersonaId,
+      },
       {
         onSuccess: (result) => {
           setContent('')
@@ -103,6 +141,17 @@ export function ChatComposer({
 
   return (
     <div className="border-t p-3">
+      {personas.length > 0 && selectedPersonaId ? (
+        <div className="mb-2">
+          <PersonaSwitcher
+            personas={personas}
+            selectedId={selectedPersonaId}
+            onChange={(id) => selectPersona(engagementId, id)}
+            onManage={() => setManageOpen(true)}
+            disabled={archived}
+          />
+        </div>
+      ) : null}
       <div className="flex items-end gap-2">
         <Textarea
           aria-label="Message the AI"
@@ -118,6 +167,7 @@ export function ChatComposer({
           Send
         </Button>
       </div>
+      <ManagePersonasPanel open={manageOpen} onOpenChange={setManageOpen} />
       {archived ? (
         <p className="mt-1 text-xs text-muted-foreground">
           This engagement is archived and read-only — existing chat stays browsable.
