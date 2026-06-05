@@ -116,7 +116,7 @@ function GatedCard({ engagementId, request }: { engagementId: string; request: A
       {decided.reasons.includes('out_of_scope') && decided.out_of_scope_host ? (
         <p className="mt-1 text-xs text-amber-700 dark:text-amber-400" data-testid="scope-context">
           <span className="font-mono">{decided.out_of_scope_host}</span> is not in scope:{' '}
-          <span className="font-mono">{decided.scope_checked_against}</span>
+          <span className="font-mono">{decided.scope_checked_against ?? '(scope not recorded)'}</span>
         </p>
       ) : null}
       {request.rationale ? (

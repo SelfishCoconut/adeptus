@@ -107,6 +107,22 @@ describe('ApprovalCard — gated', () => {
     expect(screen.queryByTestId('scope-context')).not.toBeInTheDocument()
   })
 
+  it('renders gracefully when the out-of-scope host is set but scope text is null', () => {
+    renderCard(
+      <ApprovalCard
+        engagementId={ENG}
+        request={request({
+          reasons: ['out_of_scope'],
+          out_of_scope_host: 'example.com',
+          scope_checked_against: null,
+        })}
+      />,
+    )
+    const ctx = screen.getByTestId('scope-context')
+    expect(ctx).toHaveTextContent('example.com is not in scope:')
+    expect(ctx).toHaveTextContent('(scope not recorded)')
+  })
+
   it('approve → shows "Approved by @user" and hides the buttons', async () => {
     mockPost.mockResolvedValue({
       data: request({ status: 'approved', acted_by_username: 'alice', self_approved: true }),

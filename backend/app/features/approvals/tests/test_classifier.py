@@ -183,10 +183,12 @@ def test_multiple_reasons_combine() -> None:
     assert len(result.reasons) == len(set(result.reasons))
 
 
-# --- Reserved out_of_scope (Slice 17) -------------------------------------------------
+# --- out_of_scope only when the scope args are supplied -------------------------------
 
 
-def test_out_of_scope_never_returned_in_this_slice() -> None:
+def test_out_of_scope_not_returned_without_scope_args() -> None:
+    # The scope arm is opt-in: with no scope/target_host args (the Slice-16 call shape)
+    # classify never produces out_of_scope, regardless of the command.
     cases = [
         (_action(), ToolConfig()),
         (_action(tool="hydra"), ToolConfig(weight="heavy", capability_flags=("shell-exec",))),

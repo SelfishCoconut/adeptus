@@ -4,7 +4,8 @@ The engagement's scope is free text captured by the Slice-01 create wizard
 (``engagements.scope``: IPs/domains, §4). This module parses that text into a
 normalised :class:`ScopeList` and answers :func:`is_in_scope` for a resolved target
 host. It is the only genuinely new logic in the slice and the safety-relevant boundary,
-so it is pure (no I/O, no DB) and densely unit-tested.
+so it is pure (no I/O, no DB, no engagement state — its only dependency is the pure
+``parse_host`` helper, reused not duplicated; see the import note) and densely unit-tested.
 
 Matching rules (case-insensitive throughout):
 
@@ -32,8 +33,14 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
+# Deliberate cross-feature reuse: ``parse_host`` is a pure (urlparse-only) helper, and
+# scope MUST extract the host with the EXACT same logic as the per-target lock and the
+# sandbox guard or the three could disagree about a target (Risk 3 — drift). Duplicating
+# it here is the wrong fix; the single canonical extractor is reused instead. This keeps
+# the module pure in the load-bearing sense (no I/O, no DB, no engagement state) — it does
+# not mean "no imports."
 from app.features.mcp.concurrency import parse_host
 
 logger = logging.getLogger(__name__)
@@ -75,8 +82,8 @@ class ScopeList:
     no names) means "no scope declared" — :func:`is_in_scope` is always ``True``.
     """
 
-    networks: tuple[_IPNetwork, ...] = field(default_factory=tuple)
-    names: tuple[_NamePattern, ...] = field(default_factory=tuple)
+    networks: tuple[_IPNetwork, ...] = ()
+    names: tuple[_NamePattern, ...] = ()
 
     def is_empty(self) -> bool:
         return not self.networks and not self.names

@@ -341,7 +341,11 @@ async def _propose_against(
     server: str = "httpx-server",
     tool: str = "httpx",
 ) -> service.ClassifiedTurnResult:
-    """Drive the real scope-aware classify→gate path for an httpx-style command."""
+    """Drive the real scope-aware classify→gate path for an httpx-style command.
+
+    Auto-commits inside the helper (mirrors ``_gate_credential_command`` above) and returns
+    the already-serialised ``ClassifiedTurnResult`` so the caller decides in a fresh session.
+    """
     async with factory() as s:
         with patch.object(
             service,

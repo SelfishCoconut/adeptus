@@ -410,12 +410,23 @@ Numbering continues from the backend tasks.
   - `test_audit_chain_intact_after_out_of_scope_decisions` — after approving/rejecting some
     out-of-scope commands, `verify.run()` returns OK (Slice-10/§14 guarantee preserved; reasons ride
     the existing payload, no schema change).
-- **E2E** (Playwright, opt-in stack; Ollama stubbed with a deterministic reply carrying a
-  `propose_command` tool-call for an out-of-scope target) — extend `approvals.spec.ts` (Slice 16)
-  with one out-of-scope path: log in, send a message that yields an out-of-scope proposal, see the
-  inline card with the **"target is outside the declared scope"** label and the host/scope context,
-  approve it, and see the run appear in the Console. (Ollama/MCP stubbed — no real model/subprocess
-  in CI; only the sandbox is ever a real target.)
+- **E2E** (Playwright) — **DEFERRED (accepted at finish-slice; plan corrected to match reality).**
+  This bullet was written assuming a Slice-16 `approvals.spec.ts` to extend, but **no approval E2E
+  exists** — Slice 16 shipped the entire approval flow (the `proposed_action` WS frame, the inline
+  `ApprovalCard`, the Approvals tab, approve/reject) with no Playwright journey. A faithful
+  out-of-scope E2E needs the model to emit a **specific** `propose_command` tool-call for an
+  out-of-scope target, but the E2E harness only points `ADEPTUS_OLLAMA_URL` at an external stub that
+  streams a fixed reply (`chat.spec.ts`); a spec cannot deterministically drive a particular
+  tool-call without **controllable Ollama-stub infrastructure that does not exist in the repo**.
+  Building that first-ever approval-E2E harness is disproportionate to this small scope-arm slice and
+  cannot be run/verified locally (the 15 stack-dependent journeys skip without `E2E_STACK=1`). The
+  scope arm is instead covered by: dense **unit** tests (`test_scope.py` parser/matcher;
+  `test_classifier.py` scope arm), **integration** tests against real Postgres
+  (`test_integration.py` — gate → approve → run → audit, chain-intact), and **RTL DOM** tests
+  asserting the rendered card/queue (`ApprovalCard.test.tsx`, `ApprovalQueue.test.tsx`). A
+  controllable-Ollama-stub approval E2E is **owed by the approvals feature broadly** (not introduced
+  by this slice) and is tracked as a follow-up. `make test` still runs Playwright (smoke passes, the
+  stack-gated journeys skip) so the gate stays green.
 
 ## Acceptance criteria
 
