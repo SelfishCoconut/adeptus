@@ -669,3 +669,6 @@ the two surfaces to confirm.
 
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-06-05T09:44:37Z — b70e19c chore(plan): flip slice 10 in-review -> done (#30) (#31)
+- 2026-06-05T09:58:28Z — 32d5949 docs(slice-11): plan local LLM via Ollama + private chat
+- 2026-06-05T10:36:19Z — 4eacdd2 feat(slice-11): add ChatComposer component (task 13)
+- 2026-06-05T10:38:59Z — 1c641b6 feat(slice-11): wire ChatPanel into the workspace left pane (task 15)
