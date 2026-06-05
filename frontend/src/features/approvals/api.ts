@@ -2,6 +2,21 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type ApprovalRequest, type ApprovalRequestPage, type ApprovalStatus } from '@/shared/api'
 import { chatKeys } from '@/features/chat/api'
 
+/**
+ * The "running automatically" card payload for the no-gate path (§5.2 autonomous). NOT a
+ * generated type — it rides the chat WebSocket `proposed_action` frame (hand-mirrored from
+ * the backend value object), so it is declared here and consumed by both the card and the
+ * chat stream hook. No DB row exists for an autonomous command.
+ */
+export interface AutonomousAction {
+  server_name: string
+  tool_name: string
+  args: Record<string, unknown>
+  preset_name: string | null
+  rationale: string | null
+  tool_run_id: string
+}
+
 // --- Query keys ---
 
 export const approvalKeys = {
