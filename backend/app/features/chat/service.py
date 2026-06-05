@@ -223,6 +223,7 @@ async def list_messages(
     return ChatMessagePage(
         items=[_to_message_read(r) for r in rows],
         next_cursor=next_cursor,
+        low_confidence_threshold=get_settings().ADEPTUS_CHAT_LOW_CONFIDENCE_THRESHOLD,
     )
 
 

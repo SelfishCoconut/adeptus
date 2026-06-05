@@ -9,6 +9,7 @@ import { AuditPanel } from '@/features/audit/components/AuditPanel'
 import { ChatPanel } from '@/features/chat/components/ChatPanel'
 import { NodeCertaintyBadge } from '@/features/chat/components/NodeCertaintyBadge'
 import { useCertaintyByNode } from '@/features/chat/hooks/useCertaintyByNode'
+import { useLowConfidenceThreshold } from '@/features/chat/hooks/useLowConfidenceThreshold'
 
 interface WorkspaceShellProps {
   username: string
@@ -32,6 +33,7 @@ export function WorkspaceShell({
   // chat turns. The workspace is the composition layer that glues the chat-derived overlay
   // onto the graph pane without either feature depending on the other (ADR-0001 / §8.2).
   const certaintyByNode = useCertaintyByNode(engagementId)
+  const threshold = useLowConfidenceThreshold(engagementId)
 
   return (
     <div className="flex h-svh flex-col bg-background text-foreground">
@@ -75,7 +77,7 @@ export function WorkspaceShell({
             <GraphPane
               engagementId={engagementId}
               nodeAccessory={(nodeId) => (
-                <NodeCertaintyBadge certainty={certaintyByNode.get(nodeId)} />
+                <NodeCertaintyBadge certainty={certaintyByNode.get(nodeId)} threshold={threshold} />
               )}
             />
           ) : (

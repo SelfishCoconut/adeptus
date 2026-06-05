@@ -878,6 +878,12 @@ export interface components {
             items: components["schemas"]["ChatMessageRead"][];
             /** Next Cursor */
             next_cursor: string | null;
+            /**
+             * Low Confidence Threshold
+             * @description Certainty %% below which a claim renders as low-confidence (§5.3). This is the single backend tunable (ADEPTUS_CHAT_LOW_CONFIDENCE_THRESHOLD) surfaced to the UI so the frontend reads one source of truth, not a hard-coded mirror.
+             * @default 70
+             */
+            low_confidence_threshold: number;
         };
         /**
          * ChatMessageRead

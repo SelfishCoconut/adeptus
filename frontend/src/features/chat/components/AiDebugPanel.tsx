@@ -2,6 +2,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { GraphSubsetNode, GraphSubsetReason } from '@/shared/api'
 import { useChatTurnDebug } from '../api'
+import { useLowConfidenceThreshold } from '../hooks/useLowConfidenceThreshold'
 import { CertaintyBadge } from './CertaintyBadge'
 import { PlanPanel } from './PlanPanel'
 
@@ -55,6 +56,7 @@ function NodeRow({ node }: { node: GraphSubsetNode }) {
  */
 export function AiDebugPanel({ engagementId, messageId }: AiDebugPanelProps) {
   const { data, isLoading, isError } = useChatTurnDebug(engagementId, messageId)
+  const threshold = useLowConfidenceThreshold(engagementId)
 
   if (isLoading) {
     return (
@@ -148,7 +150,7 @@ export function AiDebugPanel({ engagementId, messageId }: AiDebugPanelProps) {
         ) : (
           <div className="flex flex-wrap gap-1.5">
             {claims.map((claim, index) => (
-              <CertaintyBadge key={`${index}:${claim.text}`} claim={claim} />
+              <CertaintyBadge key={`${index}:${claim.text}`} claim={claim} threshold={threshold} />
             ))}
           </div>
         )}

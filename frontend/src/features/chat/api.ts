@@ -137,7 +137,11 @@ export function useSendChatMessage(engagementId: string) {
       queryClient.setQueryData<InfiniteChatData>(queryKey, (old) => {
         if (!old || old.pages.length === 0) {
           return {
-            pages: [{ items: [userMsg, pendingMsg], next_cursor: null }],
+            // Optimistic empty-cache page: the real threshold arrives on the settle refetch;
+            // 70 (the frontend default) is the safe placeholder until then.
+            pages: [
+              { items: [userMsg, pendingMsg], next_cursor: null, low_confidence_threshold: 70 },
+            ],
             pageParams: [null],
           }
         }

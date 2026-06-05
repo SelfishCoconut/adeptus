@@ -190,6 +190,8 @@ async def test_list_messages_only_own_conversation(db_session: AsyncSession) -> 
     contents = [m.content for m in owner_page.items]
     assert "owner-secret" in contents
     assert "other-secret" not in contents  # §5.4 per-user isolation
+    # The §5.3 low-confidence threshold (backend tunable) rides on the page (default 70).
+    assert owner_page.low_confidence_threshold == 70
 
 
 @pytest.mark.asyncio

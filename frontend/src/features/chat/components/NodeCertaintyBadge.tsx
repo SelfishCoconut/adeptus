@@ -3,6 +3,8 @@ import { LOW_CONFIDENCE_THRESHOLD } from './CertaintyBadge'
 interface NodeCertaintyBadgeProps {
   /** The latest certainty the AI asserted for this node, or undefined → no badge. */
   certainty?: number
+  /** Certainty % below which the badge is low-confidence; defaults to the fallback constant. */
+  threshold?: number
 }
 
 /**
@@ -12,9 +14,12 @@ interface NodeCertaintyBadgeProps {
  * node) it renders nothing. Purely presentational — it reads no store and writes nothing
  * (ADR-0001 / §8.2); the parent supplies the certainty from {@link useCertaintyByNode}.
  */
-export function NodeCertaintyBadge({ certainty }: NodeCertaintyBadgeProps) {
+export function NodeCertaintyBadge({
+  certainty,
+  threshold = LOW_CONFIDENCE_THRESHOLD,
+}: NodeCertaintyBadgeProps) {
   if (certainty === undefined) return null
-  const lowConfidence = certainty < LOW_CONFIDENCE_THRESHOLD
+  const lowConfidence = certainty < threshold
   return (
     <span
       data-testid="node-certainty-badge"

@@ -191,6 +191,16 @@ class ChatMessagePage(BaseModel):
 
     items: list[ChatMessageRead]
     next_cursor: str | None
+    low_confidence_threshold: int = Field(
+        default=70,
+        ge=0,
+        le=100,
+        description=(
+            "Certainty %% below which a claim renders as low-confidence (§5.3). This is the "
+            "single backend tunable (ADEPTUS_CHAT_LOW_CONFIDENCE_THRESHOLD) surfaced to the "
+            "UI so the frontend reads one source of truth, not a hard-coded mirror."
+        ),
+    )
 
 
 class WebSocketChatChunk(BaseModel):

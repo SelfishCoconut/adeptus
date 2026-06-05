@@ -18,6 +18,8 @@ interface ChatMessageListProps {
   streamError: string | null
   /** The running plan from the just-finished stream's done frame (§5.3), empty otherwise. */
   streamingPlan?: PlanStep[]
+  /** Low-confidence threshold for the in-chat certainty badges (backend tunable, §5.3). */
+  threshold?: number
 }
 
 const OFFLINE_TEXT = 'AI is unreachable — local model is offline'
@@ -32,12 +34,12 @@ function OfflineNotice({ reason }: { reason: string }) {
 }
 
 /** Inline certainty badges for an assistant turn's flagged claims (§5.3 "in chat"). */
-function ClaimBadges({ claims }: { claims: Claim[] }) {
+function ClaimBadges({ claims, threshold }: { claims: Claim[]; threshold?: number }) {
   if (claims.length === 0) return null
   return (
     <div data-testid="claim-badges" className="flex flex-wrap gap-1.5">
       {claims.map((claim, index) => (
-        <CertaintyBadge key={`${index}:${claim.text}`} claim={claim} />
+        <CertaintyBadge key={`${index}:${claim.text}`} claim={claim} threshold={threshold} />
       ))}
     </div>
   )
@@ -124,6 +126,7 @@ export function ChatMessageList({
   streamingText,
   streamError,
   streamingPlan = [],
+  threshold,
 }: ChatMessageListProps) {
   const endRef = useRef<HTMLDivElement | null>(null)
   // The AI's plan is shown for the LATEST assistant turn only (the "running" plan, §5.3);
@@ -220,7 +223,7 @@ export function ChatMessageList({
           >
             <div className="space-y-2 [&_code]:rounded [&_code]:bg-background [&_code]:px-1">
               <ReactMarkdown>{message.content}</ReactMarkdown>
-              <ClaimBadges claims={message.claims ?? []} />
+              <ClaimBadges claims={message.claims ?? []} threshold={threshold} />
             </div>
           </FinalizedAssistantTurn>
         )

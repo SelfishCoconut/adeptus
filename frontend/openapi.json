@@ -2014,6 +2014,14 @@
               }
             ],
             "title": "Next Cursor"
+          },
+          "low_confidence_threshold": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Low Confidence Threshold",
+            "description": "Certainty %% below which a claim renders as low-confidence (\u00a75.3). This is the single backend tunable (ADEPTUS_CHAT_LOW_CONFIDENCE_THRESHOLD) surfaced to the UI so the frontend reads one source of truth, not a hard-coded mirror.",
+            "default": 70
           }
         },
         "type": "object",

@@ -35,4 +35,10 @@ describe('CertaintyBadge', () => {
     render(<CertaintyBadge claim={claim(40, 'the db password may be hunter2')} />)
     expect(screen.getByText('the db password may be hunter2')).toBeInTheDocument()
   })
+
+  it('honors a custom (backend-supplied) threshold', () => {
+    // 60 is below the default 70 (low) but at/above a backend threshold of 50 (not low).
+    render(<CertaintyBadge claim={claim(60)} threshold={50} />)
+    expect(screen.getByTestId('certainty-badge')).toHaveAttribute('data-low-confidence', 'false')
+  })
 })

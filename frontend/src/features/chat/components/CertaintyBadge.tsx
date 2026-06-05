@@ -1,14 +1,17 @@
 import type { Claim } from '@/shared/api'
 
 /**
- * Certainty below this percentage renders as low-confidence (amber). Mirrors the backend
- * `ADEPTUS_CHAT_LOW_CONFIDENCE_THRESHOLD` (default 70, slice-13 Open Question 4); kept in
- * sync by convention since the value isn't pushed over the wire in this slice.
+ * Fallback low-confidence threshold used until the backend value loads. The authoritative
+ * value is the backend `ADEPTUS_CHAT_LOW_CONFIDENCE_THRESHOLD`, surfaced on
+ * `ChatMessagePage.low_confidence_threshold` and read via `useLowConfidenceThreshold`; this
+ * constant is only the default for the optional `threshold` prop.
  */
 export const LOW_CONFIDENCE_THRESHOLD = 70
 
 interface CertaintyBadgeProps {
   claim: Claim
+  /** Certainty % below which the claim is low-confidence; defaults to the fallback constant. */
+  threshold?: number
 }
 
 /**
@@ -17,8 +20,8 @@ interface CertaintyBadgeProps {
  * amber-flagged as low-confidence; at/above it renders with a subtle neutral affordance.
  * Claim text is verbatim (no redaction, §5.5).
  */
-export function CertaintyBadge({ claim }: CertaintyBadgeProps) {
-  const lowConfidence = claim.certainty < LOW_CONFIDENCE_THRESHOLD
+export function CertaintyBadge({ claim, threshold = LOW_CONFIDENCE_THRESHOLD }: CertaintyBadgeProps) {
+  const lowConfidence = claim.certainty < threshold
   return (
     <span
       data-testid="certainty-badge"
