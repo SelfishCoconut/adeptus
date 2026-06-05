@@ -766,3 +766,5 @@ deferred to Slice 18).
 
 (The stop-checkpoint hook and compact-handoff skill append here. Leave empty at planning time.)
 - 2026-06-05T16:28:03Z — 6e588cb Slice 13: Visible plan + certainty signaling (#39)
+- 2026-06-05T16:34:11Z — 20b7e35 docs(slice-14): add spec, mark in-progress, link issue #40
+- 2026-06-05T17:17:01Z — 8c1463a test(slice-14): add egress-friction E2E journey (opt-in stack)
