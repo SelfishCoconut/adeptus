@@ -5,6 +5,7 @@ import { PrivacyModeBanner } from './components/PrivacyModeBanner'
 import { HealthIndicator } from './HealthIndicator'
 import { ToolRunnerPanel } from '@/features/mcp/components/ToolRunnerPanel'
 import { GraphPane } from '@/features/graph/components'
+import { ApprovalQueue } from '@/features/approvals/components/ApprovalQueue'
 import { AuditPanel } from '@/features/audit/components/AuditPanel'
 import { ChatPanel } from '@/features/chat/components/ChatPanel'
 import { NodeCertaintyBadge } from '@/features/chat/components/NodeCertaintyBadge'
@@ -91,6 +92,9 @@ export function WorkspaceShell({
           {engagementId ? (
             <div className="flex flex-col gap-4">
               <ToolRunnerPanel engagementId={engagementId} />
+              {/* The engagement-shared approval queue (§5.2), visible to ALL members so a
+                  second member can act on a dangerous proposal (Resolved decision 4). */}
+              <ApprovalQueue engagementId={engagementId} />
               {/* Admin-only forensic surface (§14): the audit log for this engagement. */}
               {role === 'admin' ? <AuditPanel engagementId={engagementId} /> : null}
             </div>

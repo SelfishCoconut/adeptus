@@ -35,6 +35,12 @@ vi.mock('@/features/audit/components/AuditPanel', () => ({
   ),
 }))
 
+vi.mock('@/features/approvals/components/ApprovalQueue', () => ({
+  ApprovalQueue: ({ engagementId }: { engagementId: string }) => (
+    <div data-testid="approval-queue" data-engagement-id={engagementId} />
+  ),
+}))
+
 vi.mock('@/features/chat/components/ChatPanel', () => ({
   ChatPanel: ({ engagementId }: { engagementId: string }) => (
     <div data-testid="chat-panel" data-engagement-id={engagementId} />
@@ -266,6 +272,8 @@ describe('WorkspaceShell', () => {
         />,
       )
       expect(screen.queryByTestId('audit-panel')).not.toBeInTheDocument()
+      // The approval queue is visible to ALL members, not just admins (§5.2).
+      expect(screen.getByTestId('approval-queue')).toBeInTheDocument()
     })
 
     it('hides the audit panel when no engagement is open (even for an admin)', () => {
