@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import type { ChatMessage, Claim, PlanStep } from '@/shared/api'
+import type { ApprovalRequest, ChatMessage, Claim, PlanStep } from '@/shared/api'
 import { Badge } from '@/components/ui/badge'
+import { ApprovalCard } from '@/features/approvals/components/ApprovalCard'
+import type { AutonomousAction } from '@/features/approvals/api'
 import { AiDebugPanel } from './AiDebugPanel'
 import { CertaintyBadge } from './CertaintyBadge'
 import { PlanPanel } from './PlanPanel'
@@ -19,8 +21,35 @@ interface ChatMessageListProps {
   streamError: string | null
   /** The running plan from the just-finished stream's done frame (§5.3), empty otherwise. */
   streamingPlan?: PlanStep[]
+  /** Gated approval cards from the live stream's proposed_action frames (§5.2, Slice 16). */
+  streamingApprovalRequests?: ApprovalRequest[]
+  /** Autonomous "running automatically" cards from the live stream (§5.2, Slice 16). */
+  streamingAutonomousActions?: AutonomousAction[]
   /** Low-confidence threshold for the in-chat certainty badges (backend tunable, §5.3). */
   threshold?: number
+}
+
+/** Render a turn's approval/autonomous cards (live from the stream or from history). */
+function ApprovalCards({
+  engagementId,
+  requests,
+  autonomous = [],
+}: {
+  engagementId: string
+  requests: ApprovalRequest[]
+  autonomous?: AutonomousAction[]
+}) {
+  if (requests.length === 0 && autonomous.length === 0) return null
+  return (
+    <div data-testid="approval-cards" className="flex w-full max-w-[80%] flex-col gap-2">
+      {autonomous.map((action) => (
+        <ApprovalCard key={action.tool_run_id} engagementId={engagementId} autonomous={action} />
+      ))}
+      {requests.map((request) => (
+        <ApprovalCard key={request.id} engagementId={engagementId} request={request} />
+      ))}
+    </div>
+  )
 }
 
 const OFFLINE_TEXT = 'AI is unreachable — local model is offline'
@@ -145,6 +174,8 @@ export function ChatMessageList({
   streamingText,
   streamError,
   streamingPlan = [],
+  streamingApprovalRequests = [],
+  streamingAutonomousActions = [],
   threshold,
 }: ChatMessageListProps) {
   const endRef = useRef<HTMLDivElement | null>(null)
@@ -205,6 +236,11 @@ export function ChatMessageList({
                   {streamingText || <span className="text-muted-foreground">…</span>}
                 </div>
               </AssistantRow>
+              <ApprovalCards
+                engagementId={engagementId}
+                requests={streamingApprovalRequests}
+                autonomous={streamingAutonomousActions}
+              />
             </div>
           )
         }
@@ -245,6 +281,10 @@ export function ChatMessageList({
             <div className="space-y-2 [&_code]:rounded [&_code]:bg-background [&_code]:px-1">
               <ReactMarkdown>{message.content}</ReactMarkdown>
               <ClaimBadges claims={message.claims ?? []} threshold={threshold} />
+              <ApprovalCards
+                engagementId={engagementId}
+                requests={message.approval_requests ?? []}
+              />
             </div>
           </FinalizedAssistantTurn>
         )

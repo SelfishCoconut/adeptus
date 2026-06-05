@@ -60,6 +60,8 @@ export function ChatPanel({ engagementId, privacyMode, archived = false }: ChatP
           streamingText={stream.text}
           streamError={stream.error}
           streamingPlan={stream.plan}
+          streamingApprovalRequests={stream.approvalRequests}
+          streamingAutonomousActions={stream.autonomousActions}
           threshold={threshold}
         />
       </div>
