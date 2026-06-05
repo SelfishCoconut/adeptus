@@ -59,7 +59,7 @@ export function WorkspaceShell({
             own scrollable list + composer; the privacy banner above stays pinned (§5.5). */}
         <section aria-label="AI chat" className="flex flex-col overflow-hidden bg-background">
           {engagementId ? (
-            <ChatPanel engagementId={engagementId} />
+            <ChatPanel engagementId={engagementId} privacyMode={privacyMode} />
           ) : (
             <div className="p-4">
               <h2 className="text-sm font-medium text-muted-foreground">AI chat</h2>

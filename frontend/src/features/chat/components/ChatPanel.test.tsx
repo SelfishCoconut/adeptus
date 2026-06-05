@@ -56,7 +56,7 @@ function renderPanel() {
   const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   )
-  render(<ChatPanel engagementId={ENGAGEMENT_ID} />, { wrapper: Wrapper })
+  render(<ChatPanel engagementId={ENGAGEMENT_ID} privacyMode="local_only" />, { wrapper: Wrapper })
 }
 
 beforeEach(() => {
