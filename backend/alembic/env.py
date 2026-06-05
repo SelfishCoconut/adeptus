@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.core.db import Base
 
 # Import all models so their metadata is registered on Base.
+from app.features.approvals import models as _approvals_models  # noqa: F401
 from app.features.audit import models as _audit_models  # noqa: F401
 from app.features.auth import models as _auth_models  # noqa: F401
 from app.features.chat import models as _chat_models  # noqa: F401
