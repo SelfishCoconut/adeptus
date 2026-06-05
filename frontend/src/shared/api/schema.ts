@@ -744,6 +744,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/engagements/{engagement_id}/chat/messages/{message_id}/debug": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Chat Turn Debug
+         * @description Return the AI debug record (§14) for one of the caller's own assistant turns.
+         *
+         *     The exact §5.3 relevant subset of the graph injected, the raw prompt, and the model
+         *     output. Membership + ownership scoped: a non-member, non-owner, wrong-engagement, or
+         *     non-assistant message all return 404 (no existence disclosure, §17.1 / §5.4).
+         */
+        get: operations["get_chat_turn_debug"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -813,6 +837,14 @@ export interface components {
         /**
          * ChatMessageCreate
          * @description Request body for POST .../chat/messages.
+         *
+         *     The three id lists carry the client-supplied arms of the §5.3 "relevant subset"
+         *     union: ``pinned_node_ids`` (the always-included pinned set, §5.4), ``recent_node_ids``
+         *     (the "last N touched in the conversation" approximation, most-recent-first), and
+         *     ``mentioned_node_ids`` (the @-mention arm, empty until Slice 31). They are *inputs* only
+         *     — the server re-resolves each id against the engagement's live graph (foreign/unknown
+         *     ids are ignored, §17.1) and runs the keyword arm itself, so the client can never inject
+         *     node content, only ids.
          */
         ChatMessageCreate: {
             /**
@@ -820,6 +852,21 @@ export interface components {
              * @description The user's message text, sent verbatim to the model (no redaction, §5.5).
              */
             content: string;
+            /**
+             * Pinned Node Ids
+             * @description Node ids the user has pinned (client-side pinStore, §5.4). Always-included arm of the §5.3 union. Unknown/foreign ids are ignored server-side (§17.1).
+             */
+            pinned_node_ids?: string[];
+            /**
+             * Recent Node Ids
+             * @description Node ids recently interacted with this session, most-recent-first; the "last N nodes touched in the conversation" arm (§5.3). Server truncates to N.
+             */
+            recent_node_ids?: string[];
+            /**
+             * Mentioned Node Ids
+             * @description Node ids @-mentioned in recent messages (§5.3). Empty until the @-mention UI (Slice 31); accepted now for forward-compatibility. Server truncates to K.
+             */
+            mentioned_node_ids?: string[];
         };
         /**
          * ChatMessagePage
@@ -872,6 +919,46 @@ export interface components {
          * @enum {string}
          */
         ChatRole: "user" | "assistant";
+        /**
+         * ChatTurnDebug
+         * @description The AI debug record for one assistant turn (§14): the exact relevant subset of the
+         *     graph injected, the raw prompt, and the model output.
+         *
+         *     Read by ``GET .../chat/messages/{message_id}/debug``. ``model_output`` is the assistant
+         *     row's ``content`` (empty while pending/failed). ``nodes``/``edges``/``context_block``/
+         *     ``raw_prompt`` are read back from the persisted ``graph_context`` JSONB; an assistant row
+         *     that completed before this slice (or an empty-graph turn) has an empty subset and an
+         *     empty ``context_block``.
+         */
+        ChatTurnDebug: {
+            /**
+             * Message Id
+             * Format: uuid
+             */
+            message_id: string;
+            /** Model */
+            model: string | null;
+            status: components["schemas"]["ChatMessageStatus"];
+            /** Nodes */
+            nodes: components["schemas"]["GraphSubsetNode"][];
+            /** Edges */
+            edges: components["schemas"]["GraphSubsetEdge"][];
+            /**
+             * Context Block
+             * @description The exact graph-context text prepended to the system prompt this turn.
+             */
+            context_block: string;
+            /**
+             * Raw Prompt
+             * @description The full prompt sent to the model (§14 "raw prompts").
+             */
+            raw_prompt: string;
+            /**
+             * Model Output
+             * @description The model's raw output for this turn (empty while pending/failed).
+             */
+            model_output: string;
+        };
         /**
          * Edge
          * @description Response model for a graph edge.
@@ -1097,6 +1184,59 @@ export interface components {
             /** Edges */
             edges: components["schemas"]["Edge"][];
         };
+        /**
+         * GraphSubsetEdge
+         * @description One edge between two selected nodes (only edges with both endpoints in the subset).
+         */
+        GraphSubsetEdge: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            source_id: string;
+            /**
+             * Target Id
+             * Format: uuid
+             */
+            target_id: string;
+            /** Relation */
+            relation: string;
+        };
+        /**
+         * GraphSubsetNode
+         * @description One graph node included in the per-turn subset, tagged with its inclusion reason(s).
+         *
+         *     Labels/properties are NOT carried here — only the rendered ``context_block`` (on
+         *     ``ChatTurnDebug``) holds the verbatim text sent to the model (§5.5). This row is the
+         *     grouping/affordance data the debug panel renders (id + type + label + reasons).
+         */
+        GraphSubsetNode: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Type */
+            type: string;
+            /** Label */
+            label: string;
+            /**
+             * Reasons
+             * @description Why this node was included (one node may have several reasons).
+             */
+            reasons: components["schemas"]["GraphSubsetReason"][];
+        };
+        /**
+         * GraphSubsetReason
+         * @description Why a node entered the §5.3 relevant subset. A node may carry several reasons.
+         * @enum {string}
+         */
+        GraphSubsetReason: "pinned" | "recent" | "mentioned" | "keyword";
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -2677,6 +2817,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SendChatMessageResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_chat_turn_debug: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                message_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatTurnDebug"];
                 };
             };
             /** @description Validation Error */

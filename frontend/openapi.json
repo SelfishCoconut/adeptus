@@ -1717,6 +1717,60 @@
           }
         }
       }
+    },
+    "/api/v1/engagements/{engagement_id}/chat/messages/{message_id}/debug": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Get Chat Turn Debug",
+        "description": "Return the AI debug record (\u00a714) for one of the caller's own assistant turns.\n\nThe exact \u00a75.3 relevant subset of the graph injected, the raw prompt, and the model\noutput. Membership + ownership scoped: a non-member, non-owner, wrong-engagement, or\nnon-assistant message all return 404 (no existence disclosure, \u00a717.1 / \u00a75.4).",
+        "operationId": "get_chat_turn_debug",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatTurnDebug"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1899,6 +1953,33 @@
             "minLength": 1,
             "title": "Content",
             "description": "The user's message text, sent verbatim to the model (no redaction, \u00a75.5)."
+          },
+          "pinned_node_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Pinned Node Ids",
+            "description": "Node ids the user has pinned (client-side pinStore, \u00a75.4). Always-included arm of the \u00a75.3 union. Unknown/foreign ids are ignored server-side (\u00a717.1)."
+          },
+          "recent_node_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Recent Node Ids",
+            "description": "Node ids recently interacted with this session, most-recent-first; the \"last N nodes touched in the conversation\" arm (\u00a75.3). Server truncates to N."
+          },
+          "mentioned_node_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Mentioned Node Ids",
+            "description": "Node ids @-mentioned in recent messages (\u00a75.3). Empty until the @-mention UI (Slice 31); accepted now for forward-compatibility. Server truncates to K."
           }
         },
         "type": "object",
@@ -1906,7 +1987,7 @@
           "content"
         ],
         "title": "ChatMessageCreate",
-        "description": "Request body for POST .../chat/messages."
+        "description": "Request body for POST .../chat/messages.\n\nThe three id lists carry the client-supplied arms of the \u00a75.3 \"relevant subset\"\nunion: ``pinned_node_ids`` (the always-included pinned set, \u00a75.4), ``recent_node_ids``\n(the \"last N touched in the conversation\" approximation, most-recent-first), and\n``mentioned_node_ids`` (the @-mention arm, empty until Slice 31). They are *inputs* only\n\u2014 the server re-resolves each id against the engagement's live graph (foreign/unknown\nids are ignored, \u00a717.1) and runs the keyword arm itself, so the client can never inject\nnode content, only ids."
       },
       "ChatMessagePage": {
         "properties": {
@@ -1995,6 +2076,71 @@
         ],
         "title": "ChatRole",
         "description": "Chat message author role. Mirrors ``models.CHAT_ROLES``."
+      },
+      "ChatTurnDebug": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Message Id"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ChatMessageStatus"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/GraphSubsetNode"
+            },
+            "type": "array",
+            "title": "Nodes"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/GraphSubsetEdge"
+            },
+            "type": "array",
+            "title": "Edges"
+          },
+          "context_block": {
+            "type": "string",
+            "title": "Context Block",
+            "description": "The exact graph-context text prepended to the system prompt this turn."
+          },
+          "raw_prompt": {
+            "type": "string",
+            "title": "Raw Prompt",
+            "description": "The full prompt sent to the model (\u00a714 \"raw prompts\")."
+          },
+          "model_output": {
+            "type": "string",
+            "title": "Model Output",
+            "description": "The model's raw output for this turn (empty while pending/failed)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id",
+          "model",
+          "status",
+          "nodes",
+          "edges",
+          "context_block",
+          "raw_prompt",
+          "model_output"
+        ],
+        "title": "ChatTurnDebug",
+        "description": "The AI debug record for one assistant turn (\u00a714): the exact relevant subset of the\ngraph injected, the raw prompt, and the model output.\n\nRead by ``GET .../chat/messages/{message_id}/debug``. ``model_output`` is the assistant\nrow's ``content`` (empty while pending/failed). ``nodes``/``edges``/``context_block``/\n``raw_prompt`` are read back from the persisted ``graph_context`` JSONB; an assistant row\nthat completed before this slice (or an empty-graph turn) has an empty subset and an\nempty ``context_block``."
       },
       "Edge": {
         "properties": {
@@ -2410,6 +2556,83 @@
         ],
         "title": "GraphSnapshot",
         "description": "Full live graph (non-deleted nodes + edges) for one engagement."
+      },
+      "GraphSubsetEdge": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Source Id"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Target Id"
+          },
+          "relation": {
+            "type": "string",
+            "title": "Relation"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "source_id",
+          "target_id",
+          "relation"
+        ],
+        "title": "GraphSubsetEdge",
+        "description": "One edge between two selected nodes (only edges with both endpoints in the subset)."
+      },
+      "GraphSubsetNode": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "reasons": {
+            "items": {
+              "$ref": "#/components/schemas/GraphSubsetReason"
+            },
+            "type": "array",
+            "title": "Reasons",
+            "description": "Why this node was included (one node may have several reasons)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "label",
+          "reasons"
+        ],
+        "title": "GraphSubsetNode",
+        "description": "One graph node included in the per-turn subset, tagged with its inclusion reason(s).\n\nLabels/properties are NOT carried here \u2014 only the rendered ``context_block`` (on\n``ChatTurnDebug``) holds the verbatim text sent to the model (\u00a75.5). This row is the\ngrouping/affordance data the debug panel renders (id + type + label + reasons)."
+      },
+      "GraphSubsetReason": {
+        "type": "string",
+        "enum": [
+          "pinned",
+          "recent",
+          "mentioned",
+          "keyword"
+        ],
+        "title": "GraphSubsetReason",
+        "description": "Why a node entered the \u00a75.3 relevant subset. A node may carry several reasons."
       },
       "HTTPValidationError": {
         "properties": {
