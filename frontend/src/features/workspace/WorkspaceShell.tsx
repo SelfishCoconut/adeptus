@@ -6,6 +6,7 @@ import { HealthIndicator } from './HealthIndicator'
 import { ToolRunnerPanel } from '@/features/mcp/components/ToolRunnerPanel'
 import { GraphPane } from '@/features/graph/components'
 import { AuditPanel } from '@/features/audit/components/AuditPanel'
+import { ChatPanel } from '@/features/chat/components/ChatPanel'
 
 interface WorkspaceShellProps {
   username: string
@@ -45,8 +46,19 @@ export function WorkspaceShell({
       </header>
       <PrivacyModeBanner privacyMode={privacyMode} />
       <div className="grid flex-1 grid-cols-2 grid-rows-[1fr_12rem] gap-px overflow-hidden bg-border">
-        <section aria-label="AI chat" className="bg-background p-4">
-          <h2 className="text-sm font-medium text-muted-foreground">AI chat</h2>
+        {/* Left pane: the private per-user AI chat (§11.2 / Slice 11). ChatPanel owns its
+            own scrollable list + composer; the privacy banner above stays pinned (§5.5). */}
+        <section aria-label="AI chat" className="flex flex-col overflow-hidden bg-background">
+          {engagementId ? (
+            <ChatPanel engagementId={engagementId} />
+          ) : (
+            <div className="p-4">
+              <h2 className="text-sm font-medium text-muted-foreground">AI chat</h2>
+              <p className="mt-3 text-sm text-muted-foreground">
+                Select an engagement to chat with the AI.
+              </p>
+            </div>
+          )}
         </section>
         {/* Right pane: the live force-directed graph (§11.2). GraphPane renders
             the interactive Cytoscape canvas (slice 08), with a List/Graph toggle. */}

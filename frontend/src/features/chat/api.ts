@@ -1,0 +1,134 @@
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQueryClient,
+  type InfiniteData,
+} from '@tanstack/react-query'
+import {
+  api,
+  type ChatMessage,
+  type ChatMessagePage,
+  type SendChatMessageResult,
+} from '@/shared/api'
+
+// --- Query keys ---
+
+export const chatKeys = {
+  all: ['chat'] as const,
+  conversation: (engagementId: string) => ['chat', engagementId] as const,
+}
+
+const PAGE_LIMIT = 50
+
+/** What TanStack Query stores in the cache for this infinite query. */
+type InfiniteChatData = InfiniteData<ChatMessagePage>
+
+// --- Queries ---
+
+/**
+ * Load the caller's private conversation for an engagement (keyset pagination).
+ * Page 0 is the most recent batch (oldest-first within the page); each subsequent
+ * page (fetched via `next_cursor`) is an older batch — infinite scroll-up.
+ */
+export function useChatMessages(engagementId: string, options?: { enabled?: boolean }) {
+  return useInfiniteQuery<ChatMessagePage>({
+    queryKey: chatKeys.conversation(engagementId),
+    enabled: (options?.enabled ?? true) && Boolean(engagementId),
+    initialPageParam: null as string | null,
+    queryFn: async ({ pageParam }) => {
+      const { data, error } = await api.GET(
+        '/api/v1/engagements/{engagement_id}/chat/messages',
+        {
+          params: {
+            path: { engagement_id: engagementId },
+            query: { limit: PAGE_LIMIT, ...(pageParam ? { cursor: pageParam as string } : {}) },
+          },
+        },
+      )
+      if (error || !data) throw new Error('Failed to load chat messages')
+      return data
+    },
+    getNextPageParam: (lastPage) => lastPage.next_cursor,
+  })
+}
+
+/** Flatten the infinite pages into a single oldest-first message list for rendering. */
+export function flattenChatPages(data: InfiniteChatData | undefined): ChatMessage[] {
+  if (!data) return []
+  // pages[0] is the newest batch; later pages (from fetchNextPage) are older batches.
+  // Reverse so the oldest batch renders at the top, then flatten (each page is already
+  // oldest-first internally).
+  return [...data.pages].reverse().flatMap((page) => page.items)
+}
+
+// --- Mutations ---
+
+function optimisticMessage(
+  engagementId: string,
+  role: 'user' | 'assistant',
+  content: string,
+  status: 'complete' | 'pending',
+): ChatMessage {
+  return {
+    id: `optimistic-${role}-${crypto.randomUUID()}`,
+    engagement_id: engagementId,
+    role,
+    content,
+    status,
+    created_at: new Date().toISOString(),
+  }
+}
+
+/**
+ * Send a user message. Optimistically appends the user message and an empty pending
+ * assistant placeholder to the most recent page so the input feels instant; the
+ * authoritative rows (with real ids) replace them when the conversation is refetched
+ * on settle. The returned ids let the caller open the streaming WebSocket.
+ */
+export function useSendChatMessage(engagementId: string) {
+  const queryClient = useQueryClient()
+  const queryKey = chatKeys.conversation(engagementId)
+
+  return useMutation<SendChatMessageResult, Error, string, { previous?: InfiniteChatData }>({
+    mutationFn: async (content) => {
+      const { data, error } = await api.POST(
+        '/api/v1/engagements/{engagement_id}/chat/messages',
+        {
+          params: { path: { engagement_id: engagementId } },
+          body: { content },
+        },
+      )
+      if (error || !data) throw new Error('Failed to send message')
+      return data
+    },
+    onMutate: async (content) => {
+      await queryClient.cancelQueries({ queryKey })
+      const previous = queryClient.getQueryData<InfiniteChatData>(queryKey)
+
+      const userMsg = optimisticMessage(engagementId, 'user', content, 'complete')
+      const pendingMsg = optimisticMessage(engagementId, 'assistant', '', 'pending')
+
+      queryClient.setQueryData<InfiniteChatData>(queryKey, (old) => {
+        if (!old || old.pages.length === 0) {
+          return {
+            pages: [{ items: [userMsg, pendingMsg], next_cursor: null }],
+            pageParams: [null],
+          }
+        }
+        const pages = old.pages.slice()
+        pages[0] = { ...pages[0], items: [...pages[0].items, userMsg, pendingMsg] }
+        return { ...old, pages }
+      })
+
+      return { previous }
+    },
+    onError: (_err, _content, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(queryKey, context.previous)
+      }
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey })
+    },
+  })
+}

@@ -35,6 +35,12 @@ vi.mock('@/features/audit/components/AuditPanel', () => ({
   ),
 }))
 
+vi.mock('@/features/chat/components/ChatPanel', () => ({
+  ChatPanel: ({ engagementId }: { engagementId: string }) => (
+    <div data-testid="chat-panel" data-engagement-id={engagementId} />
+  ),
+}))
+
 const ENGAGEMENT_ID = '00000000-0000-0000-0000-000000000001'
 
 describe('WorkspaceShell', () => {
@@ -102,6 +108,35 @@ describe('WorkspaceShell', () => {
     const banner = screen.getByTestId('privacy-mode-banner')
     expect(banner).toBeInTheDocument()
     expect(banner).toHaveAttribute('data-privacy-mode', 'cloud_enabled')
+  })
+
+  describe('AI chat pane — ChatPanel visibility', () => {
+    it('renders the ChatPanel for the engagement, with the privacy banner still pinned', () => {
+      render(
+        <WorkspaceShell
+          username="alice"
+          role="admin"
+          onLogout={vi.fn()}
+          privacyMode="local_only"
+          engagementId={ENGAGEMENT_ID}
+        />,
+      )
+
+      const panel = screen.getByTestId('chat-panel')
+      expect(panel).toBeInTheDocument()
+      expect(panel).toHaveAttribute('data-engagement-id', ENGAGEMENT_ID)
+      // §5.5: the Slice-02 privacy banner stays visible above the panes.
+      expect(screen.getByTestId('privacy-mode-banner')).toBeInTheDocument()
+    })
+
+    it('shows the "select an engagement" placeholder when no engagementId is provided', () => {
+      render(
+        <WorkspaceShell username="alice" role="admin" onLogout={vi.fn()} privacyMode="local_only" />,
+      )
+
+      expect(screen.queryByTestId('chat-panel')).not.toBeInTheDocument()
+      expect(screen.getByText(/select an engagement to chat with the ai/i)).toBeInTheDocument()
+    })
   })
 
   describe('Graph pane — GraphPane visibility', () => {

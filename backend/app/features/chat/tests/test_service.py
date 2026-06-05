@@ -1,0 +1,427 @@
+"""Service tests — Ollama client and audit.record are mocked (CLAUDE.md).
+
+Membership / persist / list / WS-auth paths run against a real SQLite session; the
+streaming paths run against the ``db_factory`` (the service opens its own session) with
+``ollama_client.stream_chat`` replaced by a deterministic fake.
+"""
+
+from __future__ import annotations
+
+import datetime
+from collections.abc import AsyncIterator, Callable, Sequence
+from typing import cast
+from unittest.mock import AsyncMock
+from uuid import UUID, uuid4
+
+import pytest
+from argon2 import PasswordHasher
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.core.errors import ConflictError, NotFoundError
+from app.features.auth import repository as auth_repo
+from app.features.auth.models import User
+from app.features.chat import repository as chat_repo
+from app.features.chat import service
+from app.features.chat.models import ChatMessage
+from app.features.chat.ollama_client import OllamaUsage
+from app.features.chat.schemas import OllamaChatMessage
+from app.features.engagements import repository as eng_repo
+
+# A fake stream_chat: takes the prompt messages + optional usage holder, yields str tokens.
+FakeStream = Callable[..., AsyncIterator[str]]
+
+_hasher = PasswordHasher()
+
+
+# ---------------------------------------------------------------------------
+# Seed helpers
+# ---------------------------------------------------------------------------
+
+
+async def _seed_user(db: AsyncSession, username: str) -> User:
+    user = await auth_repo.create_user(
+        db, username=username, password_hash=_hasher.hash("pw"), role="user"
+    )
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def _seed_engagement(db: AsyncSession, owner_id: UUID, *, archived: bool = False) -> UUID:
+    engagement = await eng_repo.create_engagement(
+        db, name="Eng", scope="https://example.com", client_info=None, owner_id=owner_id
+    )
+    if archived:
+        engagement.status = "archived"
+    await db.commit()
+    await db.refresh(engagement)
+    return cast(UUID, engagement.id)
+
+
+# ---------------------------------------------------------------------------
+# Fake Ollama streams
+# ---------------------------------------------------------------------------
+
+
+def _fake_stream(
+    tokens: list[str], *, prompt_tokens: int = 5, completion_tokens: int = 3
+) -> FakeStream:
+    async def _gen(
+        *,
+        messages: Sequence[OllamaChatMessage],
+        model: str | None = None,
+        usage: OllamaUsage | None = None,
+    ) -> AsyncIterator[str]:
+        for tok in tokens:
+            yield tok
+        if usage is not None:
+            usage.prompt_tokens = prompt_tokens
+            usage.completion_tokens = completion_tokens
+
+    return _gen
+
+
+def _fake_unreachable() -> FakeStream:
+    async def _gen(
+        *,
+        messages: Sequence[OllamaChatMessage],
+        model: str | None = None,
+        usage: OllamaUsage | None = None,
+    ) -> AsyncIterator[str]:
+        if False:  # pragma: no cover — make this a generator that raises on first step
+            yield ""
+        raise service.LlmUnreachableError("boom")
+
+    return _gen
+
+
+def _capture_prompt(captured: list[Sequence[OllamaChatMessage]], tokens: list[str]) -> FakeStream:
+    async def _gen(
+        *,
+        messages: Sequence[OllamaChatMessage],
+        model: str | None = None,
+        usage: OllamaUsage | None = None,
+    ) -> AsyncIterator[str]:
+        captured.append(messages)
+        for tok in tokens:
+            yield tok
+
+    return _gen
+
+
+# ---------------------------------------------------------------------------
+# send_message
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_message_persists_pending_pair(db_session: AsyncSession) -> None:
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id))
+
+    result = await service.send_message(
+        db_session, engagement_id=eng_id, requester=user, content="hello"
+    )
+    await db_session.commit()
+
+    assert result.user_message.role == "user"
+    assert result.user_message.content == "hello"
+    assert result.user_message.status == "complete"
+    assert result.assistant_message.role == "assistant"
+    assert result.assistant_message.status == "pending"
+    assert result.assistant_message.content == ""
+
+
+@pytest.mark.asyncio
+async def test_send_message_non_member_404(db_session: AsyncSession) -> None:
+    owner = await _seed_user(db_session, "owner")
+    outsider = await _seed_user(db_session, "outsider")
+    eng_id = await _seed_engagement(db_session, cast(UUID, owner.id))
+
+    with pytest.raises(NotFoundError):
+        await service.send_message(
+            db_session, engagement_id=eng_id, requester=outsider, content="hi"
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_message_missing_engagement_404(db_session: AsyncSession) -> None:
+    user = await _seed_user(db_session, "owner")
+    with pytest.raises(NotFoundError):
+        await service.send_message(db_session, engagement_id=uuid4(), requester=user, content="hi")
+
+
+@pytest.mark.asyncio
+async def test_send_message_archived_409(db_session: AsyncSession) -> None:
+    user = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, user.id), archived=True)
+
+    with pytest.raises(ConflictError):
+        await service.send_message(db_session, engagement_id=eng_id, requester=user, content="hi")
+
+
+# ---------------------------------------------------------------------------
+# list_messages
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_messages_only_own_conversation(db_session: AsyncSession) -> None:
+    owner = await _seed_user(db_session, "owner")
+    other = await _seed_user(db_session, "other")
+    eng_id = await _seed_engagement(db_session, cast(UUID, owner.id))
+    # Make `other` a member too so both can chat in the same engagement.
+    await eng_repo.add_member(db_session, engagement_id=eng_id, user_id=cast(UUID, other.id))
+    await db_session.commit()
+
+    await service.send_message(
+        db_session, engagement_id=eng_id, requester=owner, content="owner-secret"
+    )
+    await service.send_message(
+        db_session, engagement_id=eng_id, requester=other, content="other-secret"
+    )
+    await db_session.commit()
+
+    owner_page = await service.list_messages(
+        db_session, engagement_id=eng_id, requester=owner, cursor=None, limit=50
+    )
+    contents = [m.content for m in owner_page.items]
+    assert "owner-secret" in contents
+    assert "other-secret" not in contents  # §5.4 per-user isolation
+
+
+@pytest.mark.asyncio
+async def test_list_messages_non_member_404(db_session: AsyncSession) -> None:
+    owner = await _seed_user(db_session, "owner")
+    outsider = await _seed_user(db_session, "outsider")
+    eng_id = await _seed_engagement(db_session, cast(UUID, owner.id))
+
+    with pytest.raises(NotFoundError):
+        await service.list_messages(
+            db_session, engagement_id=eng_id, requester=outsider, cursor=None, limit=50
+        )
+
+
+# ---------------------------------------------------------------------------
+# WS auth
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ws_auth_rejects_non_owner(db_session: AsyncSession) -> None:
+    owner = await _seed_user(db_session, "owner")
+    other = await _seed_user(db_session, "other")
+    eng_id = await _seed_engagement(db_session, cast(UUID, owner.id))
+    await eng_repo.add_member(db_session, engagement_id=eng_id, user_id=cast(UUID, other.id))
+    await db_session.commit()
+
+    _, assistant = await chat_repo.insert_user_and_pending_assistant(
+        db_session, engagement_id=eng_id, user_id=cast(UUID, owner.id), content="hi"
+    )
+    await db_session.commit()
+
+    # `other`'s session must not authenticate against `owner`'s message.
+    other_session = await auth_repo.create_session(
+        db_session,
+        session_id=str(uuid4()),
+        user_id=cast(UUID, other.id),
+        expires_at=_future(),
+    )
+    await db_session.commit()
+
+    result = await service.authenticate_ws_chat_message(
+        db_session, session_id=cast(str, other_session.id), message_id=cast(UUID, assistant.id)
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_ws_auth_resolves_owner(db_session: AsyncSession) -> None:
+    owner = await _seed_user(db_session, "owner")
+    eng_id = await _seed_engagement(db_session, cast(UUID, owner.id))
+    _, assistant = await chat_repo.insert_user_and_pending_assistant(
+        db_session, engagement_id=eng_id, user_id=cast(UUID, owner.id), content="hi"
+    )
+    sess = await auth_repo.create_session(
+        db_session, session_id=str(uuid4()), user_id=cast(UUID, owner.id), expires_at=_future()
+    )
+    await db_session.commit()
+
+    result = await service.authenticate_ws_chat_message(
+        db_session, session_id=cast(str, sess.id), message_id=cast(UUID, assistant.id)
+    )
+    assert result is not None
+    assert result.id == assistant.id
+
+
+@pytest.mark.asyncio
+async def test_ws_auth_rejects_missing_session(db_session: AsyncSession) -> None:
+    assert (
+        await service.authenticate_ws_chat_message(db_session, session_id=None, message_id=uuid4())
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# stream_assistant_reply
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_relays_tokens_then_done(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["Hel", "lo"]))
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    types = [c.type for c in chunks]
+    assert types == ["token", "token", "done"]
+    assert [c.data for c in chunks if c.type == "token"] == ["Hel", "lo"]
+
+
+@pytest.mark.asyncio
+async def test_stream_persists_complete_and_emits_ai_call(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["Hel", "lo"]))
+    message = await _seed_pending(db_factory)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.status == "complete"
+    assert row.content == "Hello"
+    assert row.prompt_tokens == 5
+    assert row.completion_tokens == 3
+
+    # Exactly one ai_call, attributed to the user, status=complete.
+    mock_audit_record.assert_awaited_once()
+    call = mock_audit_record.await_args
+    assert call is not None
+    kwargs = call.kwargs
+    assert kwargs["action"].value == "ai_call"
+    assert kwargs["actor_user_id"] == cast(UUID, message.user_id)
+    assert kwargs["payload"]["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_stream_unreachable_persists_failed_and_emits_error(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_unreachable())
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert chunks[-1].type == "error"
+    assert chunks[-1].message == service.UNREACHABLE_MESSAGE
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.status == "failed"
+
+    mock_audit_record.assert_awaited_once()
+    call = mock_audit_record.await_args
+    assert call is not None
+    assert call.kwargs["payload"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_stream_replays_completed_message(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Should never call Ollama for an already-terminal message.
+    def _boom(
+        *,
+        messages: Sequence[OllamaChatMessage],
+        model: str | None = None,
+        usage: OllamaUsage | None = None,
+    ) -> AsyncIterator[str]:
+        raise AssertionError("Ollama must not be called on replay")
+
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom)
+
+    message = await _seed_pending(db_factory)
+    async with db_factory() as s:
+        await chat_repo.finalize_assistant(
+            s,
+            message_id=cast(UUID, message.id),
+            content="stored answer",
+            status="complete",
+            model="qwen3.5:9b",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+        await s.commit()
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert [c.type for c in chunks] == ["token", "done"]
+    assert chunks[0].data == "stored answer"
+    # No second ai_call on replay (Risk 6).
+    mock_audit_record.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prompt_uses_recent_window_verbatim(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+
+    sensitive = "the password for box-7 is <kept-verbatim>"
+    message = await _seed_pending(db_factory, content=sensitive)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert len(captured) == 1
+    prompt = captured[0]
+    # System prompt first, then the user message verbatim (§5.5 — no redaction).
+    assert prompt[0].role == "system"
+    user_contents = [m.content for m in prompt if m.role == "user"]
+    assert sensitive in user_contents
+    # The empty pending assistant placeholder is never sent.
+    assert all(m.content for m in prompt)
+
+
+# ---------------------------------------------------------------------------
+# local helpers needing fixtures
+# ---------------------------------------------------------------------------
+
+
+def _future() -> datetime.datetime:
+    return datetime.datetime(2099, 1, 1, tzinfo=datetime.UTC)
+
+
+async def _seed_pending(
+    factory: async_sessionmaker[AsyncSession], *, content: str = "what is sqli?"
+) -> ChatMessage:
+    """Seed a user + pending-assistant turn and return the (detached) assistant row."""
+    async with factory() as s:
+        owner = await _seed_user(s, f"owner-{uuid4().hex[:8]}")
+        eng_id = await _seed_engagement(s, cast(UUID, owner.id))
+        _, assistant = await chat_repo.insert_user_and_pending_assistant(
+            s, engagement_id=eng_id, user_id=cast(UUID, owner.id), content=content
+        )
+        await s.commit()
+        await s.refresh(assistant)
+        return assistant

@@ -144,7 +144,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §5.1 (local path), §5.4 (private chat)
 - **Depends on**: 02
 - **Risky**: no
-- **Status**: todo
+- **Status**: in-review
 
 ### Slice 12: "Relevant subset" graph injection
 - **Goal**: Debug panel shows exact subset of graph sent to LLM per turn
