@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import type { ChatMessage, Claim, PlanStep } from '@/shared/api'
+import { Badge } from '@/components/ui/badge'
 import { AiDebugPanel } from './AiDebugPanel'
 import { CertaintyBadge } from './CertaintyBadge'
 import { PlanPanel } from './PlanPanel'
@@ -56,6 +57,20 @@ function UserRow({ message }: { message: ChatMessage }) {
   )
 }
 
+/**
+ * The persona that produced an assistant turn (§5.3, Slice 15): a small chip shown above
+ * the reply so a reloaded conversation shows which persona shaped each turn. Omitted when
+ * the turn has no persona (user/pre-slice rows, or a turn from before this slice).
+ */
+function PersonaChip({ name }: { name: string | null | undefined }) {
+  if (!name) return null
+  return (
+    <Badge variant="secondary" className="text-[10px]" data-testid="persona-chip">
+      {name}
+    </Badge>
+  )
+}
+
 /** An assistant turn: left-aligned bubble; Markdown when complete. */
 function AssistantRow({ children }: { children: React.ReactNode }) {
   return (
@@ -78,6 +93,7 @@ function FinalizedAssistantTurn({
   isDebugOpen,
   onToggleDebug,
   plan,
+  personaName,
   children,
 }: {
   engagementId: string
@@ -86,6 +102,8 @@ function FinalizedAssistantTurn({
   onToggleDebug: () => void
   /** When provided (latest turn only), the Plan panel renders above the reply (§5.3). */
   plan?: PlanStep[]
+  /** The persona that produced this turn (§5.3, Slice 15); a chip above the reply. */
+  personaName?: string | null
   children: React.ReactNode
 }) {
   return (
@@ -95,6 +113,7 @@ function FinalizedAssistantTurn({
           <PlanPanel plan={plan} />
         </div>
       ) : null}
+      <PersonaChip name={personaName} />
       <AssistantRow>{children}</AssistantRow>
       <button
         type="button"
@@ -198,6 +217,7 @@ export function ChatMessageList({
               messageId={message.id}
               isDebugOpen={openDebugId === message.id}
               onToggleDebug={() => toggleDebug(message.id)}
+              personaName={message.persona_name}
             >
               <OfflineNotice reason={OFFLINE_TEXT} />
             </FinalizedAssistantTurn>
@@ -220,6 +240,7 @@ export function ChatMessageList({
             isDebugOpen={openDebugId === message.id}
             onToggleDebug={() => toggleDebug(message.id)}
             plan={message.id === latestAssistantId ? (message.plan ?? []) : undefined}
+            personaName={message.persona_name}
           >
             <div className="space-y-2 [&_code]:rounded [&_code]:bg-background [&_code]:px-1">
               <ReactMarkdown>{message.content}</ReactMarkdown>

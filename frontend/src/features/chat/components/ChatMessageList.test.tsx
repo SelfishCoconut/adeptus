@@ -67,6 +67,23 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('It is an injection.')).toBeInTheDocument()
   })
 
+  it('shows the persona chip on an assistant turn that recorded a persona (§5.3)', () => {
+    renderList({
+      messages: [{ ...msg('a1', 'assistant', 'recon answer'), persona_name: 'Recon' }],
+    })
+    expect(screen.getByTestId('persona-chip')).toHaveTextContent('Recon')
+  })
+
+  it('omits the persona chip on user rows and on assistant turns with no persona', () => {
+    renderList({
+      messages: [
+        { ...msg('u1', 'user', 'hi'), persona_name: null },
+        msg('a1', 'assistant', 'an answer with no recorded persona'),
+      ],
+    })
+    expect(screen.queryByTestId('persona-chip')).toBeNull()
+  })
+
   it('renders completed assistant content as Markdown', () => {
     const { container } = renderList({
       messages: [msg('a1', 'assistant', 'Use **sqlmap** to test.')],
