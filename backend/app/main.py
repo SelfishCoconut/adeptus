@@ -12,6 +12,7 @@ from app.core.errors import register_error_handlers
 from app.features.audit.router import router as audit_router
 from app.features.auth import service as auth_service
 from app.features.auth.router import router as auth_router
+from app.features.chat.router import router as chat_router
 from app.features.engagements import events as engagement_events
 from app.features.engagements.router import router as engagements_router
 from app.features.graph import writer as graph_writer
@@ -124,6 +125,7 @@ def create_app() -> FastAPI:
     app.include_router(mcp_router)
     app.include_router(graph_router)
     app.include_router(audit_router)
+    app.include_router(chat_router)
     return app
 
 
