@@ -41,6 +41,10 @@ from app.features.engagements import repository as eng_repo
 from app.features.engagements.models import Engagement, EngagementMember
 from app.features.graph import repository as graph_repo
 from app.features.graph.models import GraphEdge, GraphNode
+from app.features.personas import repository as personas_repo
+from app.features.personas import service as personas_service
+from app.features.personas.models import Persona
+from app.features.personas.seed import GENERAL_SYSTEM_PROMPT
 
 pytestmark = pytest.mark.integration
 
@@ -60,6 +64,7 @@ _TABLES: list[Table] = [
         AuditChainHead,
         GraphNode,
         GraphEdge,
+        Persona,
     )
 ]
 
@@ -998,3 +1003,194 @@ async def test_cloud_flip_after_local_post_rescans_and_refuses_secret(
     assert rows[0].payload["egress_secret_flagged"] is True
     assert rows[0].payload["egress_confirmed"] is False
     assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(rows[0].payload)  # gitleaks:allow
+
+
+# ---------------------------------------------------------------------------
+# Personas (Slice 15) — real DB round-trip of the §5.3 selection + §14 audit
+# ---------------------------------------------------------------------------
+
+
+def _capture_prompt(captured: list[Sequence[OllamaChatMessage]], tokens: list[str]) -> FakeStream:
+    async def _gen(
+        *,
+        messages: Sequence[OllamaChatMessage],
+        model: str | None = None,
+        usage: OllamaUsage | None = None,
+    ) -> AsyncIterator[str]:
+        captured.append(messages)
+        for tok in tokens:
+            yield tok
+
+    return _gen
+
+
+async def _seed_builtins(factory: async_sessionmaker[AsyncSession]) -> None:
+    async with factory() as db:
+        await personas_service.bootstrap_system_personas(db)
+        await db.commit()
+
+
+async def _builtin_id(factory: async_sessionmaker[AsyncSession], slug: str) -> uuid.UUID:
+    async with factory() as db:
+        row = await personas_repo.get_builtin_by_slug(db, slug=slug)
+        assert row is not None
+        return cast(uuid.UUID, row.id)
+
+
+async def _stream_turn(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    user: User,
+    eng_id: uuid.UUID,
+    content: str,
+    persona_id: uuid.UUID | None,
+) -> uuid.UUID:
+    """POST a message with a persona and drain the stream; return the assistant id."""
+    async with factory() as db:
+        result = await service.send_message(
+            db, engagement_id=eng_id, requester=user, content=content, persona_id=persona_id
+        )
+        await db.commit()
+    assistant_id = result.assistant_message.id
+    async with factory() as db:
+        message = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=cast(uuid.UUID, user.id)
+        )
+    assert message is not None
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+    return cast(uuid.UUID, assistant_id)
+
+
+async def test_persona_shapes_turn_prompt_and_audit(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Headline §5.3 + §14: a recon-persona turn uses the recon system prompt and records it."""
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+
+    await _seed_builtins(pg_factory)
+    user = await _seed_user(pg_factory, "owner")
+    eng_id = await _seed_engagement(pg_factory, cast(uuid.UUID, user.id))
+    recon_id = await _builtin_id(pg_factory, "recon")
+    recon = await _builtin(pg_factory, "recon")
+
+    assistant_id = await _stream_turn(
+        pg_factory, user=user, eng_id=eng_id, content="where do I start?", persona_id=recon_id
+    )
+
+    # The leading system content is the recon prompt, not the neutral default.
+    system_content = captured[0][0].content
+    assert system_content.startswith(recon)
+    assert not system_content.startswith(GENERAL_SYSTEM_PROMPT)
+
+    async with pg_factory() as db:
+        row = await chat_repo.get_message_for_owner(
+            db, message_id=assistant_id, user_id=cast(uuid.UUID, user.id)
+        )
+        assert row is not None
+        assert row.graph_context is not None
+        assert row.graph_context["persona_name"] == "Recon"
+        audit = (
+            (await db.execute(select(AuditEntry).where(AuditEntry.action == "ai_call")))
+            .scalars()
+            .all()
+        )
+    assert len(audit) == 1
+    assert audit[0].payload["persona_id"] == str(recon_id)
+    assert audit[0].payload["persona_name"] == "Recon"
+
+
+async def _builtin(factory: async_sessionmaker[AsyncSession], slug: str) -> str:
+    async with factory() as db:
+        row = await personas_repo.get_builtin_by_slug(db, slug=slug)
+        assert row is not None
+        return row.system_prompt
+
+
+async def test_switch_persona_mid_conversation(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same conversation: recon turn then report-writer turn, no reset (§5.3 / §5.4)."""
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+
+    await _seed_builtins(pg_factory)
+    user = await _seed_user(pg_factory, "owner")
+    eng_id = await _seed_engagement(pg_factory, cast(uuid.UUID, user.id))
+    recon_prompt = await _builtin(pg_factory, "recon")
+    report_prompt = await _builtin(pg_factory, "report-writer")
+
+    await _stream_turn(
+        pg_factory,
+        user=user,
+        eng_id=eng_id,
+        content="first turn",
+        persona_id=await _builtin_id(pg_factory, "recon"),
+    )
+    await _stream_turn(
+        pg_factory,
+        user=user,
+        eng_id=eng_id,
+        content="summarise so far",
+        persona_id=await _builtin_id(pg_factory, "report-writer"),
+    )
+
+    assert captured[0][0].content.startswith(recon_prompt)
+    assert captured[1][0].content.startswith(report_prompt)
+    # The prior recon user turn stays in the second turn's verbatim window (no reset).
+    second_turn_texts = [m.content for m in captured[1]]
+    assert any("first turn" in t for t in second_turn_texts)
+
+
+async def test_custom_persona_private_per_user(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§5.4 / §17.1: B can't see A's custom persona, and using A's id falls back to general."""
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+
+    await _seed_builtins(pg_factory)
+    alice = await _seed_user(pg_factory, "alice")
+    bob = await _seed_user(pg_factory, "bob")
+    eng_id = await _seed_engagement(pg_factory, cast(uuid.UUID, alice.id))
+    async with pg_factory() as db:
+        await eng_repo.add_member(db, engagement_id=eng_id, user_id=cast(uuid.UUID, bob.id))
+        await db.commit()
+
+    async with pg_factory() as db:
+        alices = await personas_service.create_persona(
+            db, requester=alice, name="Alice Recon", system_prompt="ALICE-SECRET-PROMPT"
+        )
+        await db.commit()
+    alices_id = alices.id
+
+    # B cannot see A's custom persona.
+    async with pg_factory() as db:
+        bob_list = await personas_service.list_personas(db, requester=bob)
+    assert "Alice Recon" not in [p.name for p in bob_list.items]
+
+    # B sends with A's persona id → falls back to general (A's prompt never used).
+    await _stream_turn(pg_factory, user=bob, eng_id=eng_id, content="hi", persona_id=alices_id)
+    system_content = captured[0][0].content
+    assert system_content.startswith(GENERAL_SYSTEM_PROMPT)
+    assert "ALICE-SECRET-PROMPT" not in system_content
+
+
+async def test_default_persona_behavior_unchanged(
+    pg_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-persona POST produces the exact legacy leading system prompt (byte-equal)."""
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+
+    await _seed_builtins(pg_factory)
+    user = await _seed_user(pg_factory, "owner")
+    eng_id = await _seed_engagement(pg_factory, cast(uuid.UUID, user.id))
+
+    await _stream_turn(pg_factory, user=user, eng_id=eng_id, content="hi", persona_id=None)
+
+    assert captured[0][0].content == GENERAL_SYSTEM_PROMPT + service.PLAN_CERTAINTY_INSTRUCTION
