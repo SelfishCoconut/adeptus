@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +26,12 @@ class Settings(BaseSettings):
     # the assembled subset is sent to the model in full and verbatim.
     ADEPTUS_GRAPH_CONTEXT_RECENT_LIMIT: int = 15
     ADEPTUS_GRAPH_CONTEXT_MENTIONED_LIMIT: int = 10
+
+    # Slice 13 — §5.3 uncertainty signaling. A parsed claim whose certainty is BELOW this
+    # percentage is rendered as low-confidence (amber) in chat + on graph items. Canonical
+    # single place to tune; the frontend mirrors this default (no schema/endpoint change in
+    # this slice — see slice-13 Open Question 4).
+    ADEPTUS_CHAT_LOW_CONFIDENCE_THRESHOLD: int = Field(default=70, ge=0, le=100)
 
     # DEV/TEST ONLY — ignored when ENVIRONMENT=production (see auth/service.py bootstrap_test_user)
     ADEPTUS_TEST_USER_USERNAME: str | None = None
