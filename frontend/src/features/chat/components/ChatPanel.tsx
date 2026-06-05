@@ -50,6 +50,7 @@ export function ChatPanel({ engagementId, archived = false }: ChatPanelProps) {
     <div className="flex h-full flex-col">
       <div className="min-h-0 flex-1">
         <ChatMessageList
+          engagementId={engagementId}
           messages={messages}
           streamingId={streamingId}
           streamingText={stream.text}
