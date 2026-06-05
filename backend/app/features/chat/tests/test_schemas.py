@@ -1,5 +1,6 @@
 """Schema validation tests: content bounds, enum/DB-vocabulary parity."""
 
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -9,12 +10,16 @@ from app.features.chat import models
 from app.features.chat.schemas import (
     MAX_MESSAGE_CHARS,
     ChatMessageCreate,
+    ChatMessageRead,
     ChatMessageStatus,
     ChatRole,
     ChatTurnDebug,
+    Claim,
     GraphSubsetEdge,
     GraphSubsetNode,
     GraphSubsetReason,
+    PlanStep,
+    PlanStepStatus,
 )
 
 
@@ -111,3 +116,101 @@ def test_chat_turn_debug_round_trips() -> None:
     again = ChatTurnDebug.model_validate(debug.model_dump())
     assert again == debug
     assert again.nodes[0].reasons == [GraphSubsetReason.PINNED, GraphSubsetReason.KEYWORD]
+
+
+# ---------------------------------------------------------------------------
+# Slice 13 — visible plan + certainty signaling (§5.3)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_step_status_enum_values() -> None:
+    """The plan-step status vocabulary is exactly the three §5.3 lifecycle states."""
+    assert {s.value for s in PlanStepStatus} == {"todo", "in_progress", "done"}
+
+
+def test_plan_step_requires_step_and_status() -> None:
+    """A PlanStep round-trips its verbatim text + status (no redaction, §5.5)."""
+    step = PlanStep(step="Test SQLi on /login", status=PlanStepStatus.IN_PROGRESS)
+    assert step.step == "Test SQLi on /login"
+    assert step.status == PlanStepStatus.IN_PROGRESS
+    assert PlanStep.model_validate(step.model_dump()) == step
+
+
+def test_claim_certainty_below_zero_rejected() -> None:
+    """A negative certainty is out of the 0–100 contract (parser clamps before construct)."""
+    with pytest.raises(ValidationError):
+        Claim(text="maybe", certainty=-1)
+
+
+def test_claim_certainty_above_hundred_rejected() -> None:
+    """A certainty over 100 is out of the 0–100 contract."""
+    with pytest.raises(ValidationError):
+        Claim(text="surely", certainty=101)
+
+
+def test_claim_certainty_bounds_accepted() -> None:
+    """The inclusive bounds 0 and 100 are valid certainties."""
+    assert Claim(text="no idea", certainty=0).certainty == 0
+    assert Claim(text="certain", certainty=100).certainty == 100
+
+
+def test_claim_node_id_defaults_none() -> None:
+    """A claim with no graph reference carries a null node_id (no Graph-pane badge)."""
+    claim = Claim(text="HTTPS uses port 443", certainty=99)
+    assert claim.node_id is None
+
+
+def test_claim_node_id_accepts_uuid() -> None:
+    """A claim about a known node coerces the wire UUID string into a UUID."""
+    nid = uuid4()
+    claim = Claim.model_validate({"text": "likely Apache", "certainty": 60, "node_id": str(nid)})
+    assert claim.node_id == nid
+
+
+def test_chat_message_read_defaults_plan_and_claims_empty() -> None:
+    """A read row with no plan/claims (user/pending/pre-slice) defaults both to empty."""
+    msg = ChatMessageRead(
+        id=uuid4(),
+        engagement_id=uuid4(),
+        role=ChatRole.USER,
+        content="hi",
+        status=ChatMessageStatus.COMPLETE,
+        created_at=datetime(2026, 1, 1),
+    )
+    assert msg.plan == []
+    assert msg.claims == []
+
+
+def test_chat_message_read_round_trips_with_plan_and_claims() -> None:
+    """An assistant read row carries its parsed plan + claims through serialization."""
+    nid = uuid4()
+    msg = ChatMessageRead(
+        id=uuid4(),
+        engagement_id=uuid4(),
+        role=ChatRole.ASSISTANT,
+        content="Try default creds.",
+        status=ChatMessageStatus.COMPLETE,
+        created_at=datetime(2026, 1, 1),
+        plan=[PlanStep(step="Enumerate login", status=PlanStepStatus.DONE)],
+        claims=[Claim(text="likely Apache 2.4", certainty=60, node_id=nid)],
+    )
+    again = ChatMessageRead.model_validate(msg.model_dump())
+    assert again == msg
+    assert again.plan[0].status == PlanStepStatus.DONE
+    assert again.claims[0].node_id == nid
+
+
+def test_chat_turn_debug_defaults_plan_and_claims_empty() -> None:
+    """ChatTurnDebug plan/claims default empty so a pre-slice turn validates."""
+    debug = ChatTurnDebug(
+        message_id=uuid4(),
+        model="qwen3.5:9b",
+        status=ChatMessageStatus.COMPLETE,
+        nodes=[],
+        edges=[],
+        context_block="",
+        raw_prompt="",
+        model_output="",
+    )
+    assert debug.plan == []
+    assert debug.claims == []
