@@ -20,6 +20,16 @@ class Settings(BaseSettings):
     ADEPTUS_OLLAMA_URL: str = "http://ollama:11434"
     ADEPTUS_LLM_MODEL: str = "qwen3.5:9b"
 
+    # Cloud LLM (Anthropic Claude) — Slice 14 / §5.1. Used ONLY on a cloud_enabled
+    # engagement (Slice 02 toggle). The instance-level API key is an admin secret (§3):
+    # never serialized to the client, never logged, sent only in the Anthropic auth header.
+    # A None key means cloud is not configured — a cloud_enabled turn then fails rather than
+    # silently falling back to local (§5.1 no auto-fallback). The model + base URL are pinned
+    # but env-overridable per instance (Resolved decision 1).
+    ADEPTUS_ANTHROPIC_API_KEY: str | None = None
+    ADEPTUS_ANTHROPIC_MODEL: str = "claude-sonnet-4-6"
+    ADEPTUS_ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"
+
     # Slice 12 — §5.3 "relevant subset" caps. The recent ("last N nodes touched in the
     # conversation") and mentioned ("nodes @-mentioned in the last K messages") union arms
     # are truncated to these. There is deliberately NO token budget (planning Decision 3):
