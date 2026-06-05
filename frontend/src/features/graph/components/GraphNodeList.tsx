@@ -39,13 +39,23 @@ export interface GraphNodeListProps {
   onEditNode: (node: Node) => void
   /** Called when the user clicks "Add node" (toolbar affordance). */
   onAddNode: () => void
+  /**
+   * Optional per-node decorator slot (additive, read-only). The workspace passes the
+   * Slice-13 certainty overlay here; undefined keeps the row exactly as before.
+   */
+  nodeAccessory?: (nodeId: string) => React.ReactNode
 }
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function GraphNodeList({ engagementId, onEditNode, onAddNode }: GraphNodeListProps) {
+export function GraphNodeList({
+  engagementId,
+  onEditNode,
+  onAddNode,
+  nodeAccessory,
+}: GraphNodeListProps) {
   const { data, isLoading, isError, error } = useGraph(engagementId)
   const deleteNode = useDeleteNode(engagementId)
 
@@ -112,7 +122,12 @@ export function GraphNodeList({ engagementId, onEditNode, onAddNode }: GraphNode
                   <td className="px-4 py-3">
                     <Badge variant={nodeTypeVariant(node.type)}>{node.type}</Badge>
                   </td>
-                  <td className="px-4 py-3 font-medium">{node.label}</td>
+                  <td className="px-4 py-3 font-medium">
+                    <span className="inline-flex items-center gap-2">
+                      {node.label}
+                      {nodeAccessory?.(node.id)}
+                    </span>
+                  </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-2">
                       <Button

@@ -23,13 +23,19 @@ import { useGraphPaneState } from '../hooks/useGraphPaneState'
 
 export interface GraphPaneProps {
   engagementId: string
+  /**
+   * Optional per-node decorator slot (additive, read-only). The workspace supplies the
+   * Slice-13 certainty overlay; it is rendered on both the list rows and the selected-node
+   * inspector. Undefined leaves the Slice-08 pane unchanged.
+   */
+  nodeAccessory?: (nodeId: string) => React.ReactNode
 }
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function GraphPane({ engagementId }: GraphPaneProps) {
+export function GraphPane({ engagementId, nodeAccessory }: GraphPaneProps) {
   const {
     view,
     setView,
@@ -90,6 +96,7 @@ export function GraphPane({ engagementId }: GraphPaneProps) {
               node={selectedNode}
               onEdit={handleEditNode}
               onDeleted={clearSelection}
+              accessory={nodeAccessory?.(selectedNode.id)}
             />
           )}
         </>
@@ -98,6 +105,7 @@ export function GraphPane({ engagementId }: GraphPaneProps) {
           engagementId={engagementId}
           onAddNode={handleAddNode}
           onEditNode={handleEditNode}
+          nodeAccessory={nodeAccessory}
         />
       )}
 

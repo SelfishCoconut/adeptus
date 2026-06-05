@@ -41,6 +41,11 @@ vi.mock('@/features/chat/components/ChatPanel', () => ({
   ),
 }))
 
+// The certainty overlay hook runs a chat query; stub it so the shell needs no QueryClient.
+vi.mock('@/features/chat/hooks/useCertaintyByNode', () => ({
+  useCertaintyByNode: () => new Map<string, number>(),
+}))
+
 const ENGAGEMENT_ID = '00000000-0000-0000-0000-000000000001'
 
 describe('WorkspaceShell', () => {
