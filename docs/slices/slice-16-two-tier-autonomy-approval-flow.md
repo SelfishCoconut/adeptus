@@ -1238,3 +1238,4 @@ finish-slice time. The reviewer must confirm:
 </content>
 </invoke>
 - 2026-06-05T20:45:35Z — 5d185d5 Slice 15: Personas (CRUD + seeded) (#43)
+- 2026-06-05T20:46:29Z — 737f85e docs(slice-16): add approval-flow spec, mark in-progress (#44)
