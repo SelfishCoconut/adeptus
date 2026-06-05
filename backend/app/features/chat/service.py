@@ -33,7 +33,13 @@ from app.features.audit import service as audit_service
 from app.features.audit.schemas import AuditAction
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
-from app.features.chat import egress_scan, ollama_client, plan_parser, subset_builder
+from app.features.chat import (
+    anthropic_client,
+    egress_scan,
+    ollama_client,
+    plan_parser,
+    subset_builder,
+)
 from app.features.chat import repository as chat_repo
 from app.features.chat.models import ChatMessage
 from app.features.chat.ollama_client import LlmUnreachableError, OllamaUsage
@@ -388,18 +394,19 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
 
       - ``complete``: replay the stored content as one ``token`` frame, then ``done``.
       - ``failed``:   emit the stored failure reason as an ``error`` frame.
-      - ``pending``:  build the prompt, stream Ollama token-by-token, persist the final
-        content/status + emit the ``ai_call`` audit entry (atomic), then ``done``; on
-        ``LlmUnreachableError`` (or a wedged socket) persist ``failed``, emit ``ai_call``
-        with ``status=failed``, and ``error``.
+      - ``pending``:  pick the backend by the engagement's privacy mode (Slice 14, Decision 2
+        — cloud Claude when ``cloud_enabled`` + a key is configured, else local Ollama; a
+        ``cloud_enabled`` engagement with NO key fails the turn rather than silently using
+        local, §5.1), build the prompt, stream token-by-token, persist the final
+        content/status + emit the ``ai_call`` audit entry (atomic, widened with the backend +
+        egress decision), then ``done``; on ``LlmUnreachableError`` (or a wedged socket)
+        persist ``failed``, emit ``ai_call`` with ``status=failed``, and ``error``.
 
     The ``noqa: C901`` is retained because the irreducible core is a yielding token loop
     whose failure branch must ``return`` from *this* generator (it cannot be hoisted into a
     helper without losing the early-return semantics). The finalize/parse/persist/audit work
     is already extracted to ``_finalize_complete_turn``.
     """
-    settings = get_settings()
-    model_name = settings.ADEPTUS_LLM_MODEL
     message_id = cast(UUID, message.id)
     engagement_id = cast(UUID, message.engagement_id)
     user_id = cast(UUID, message.user_id)
@@ -426,6 +433,36 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
             return
 
         # status == "pending": real streaming.
+        # Slice 14 (Decision 2): choose the backend by the engagement's privacy mode. A
+        # cloud_enabled engagement with a configured key streams from Claude; otherwise local
+        # Ollama. cloud_enabled with NO key fails the turn — never silently local (§5.1, no
+        # auto-fallback). The POST-time egress decision rides on the stash for the audit
+        # payload. Both clients share stream_chat's signature, so only the bound fn differs.
+        settings = get_settings()
+        egress = _stash_egress(current.graph_context)
+        privacy_mode = await _engagement_privacy_mode(session, engagement_id, user_id)
+        if privacy_mode == "cloud_enabled" and not settings.ADEPTUS_ANTHROPIC_API_KEY:
+            await _finalize_failed(
+                session,
+                message_id=message_id,
+                actor_user_id=user_id,
+                engagement_id=engagement_id,
+                model_name=settings.ADEPTUS_ANTHROPIC_MODEL,
+                prompt_count=0,
+                backend="cloud",
+                egress=egress,
+            )
+            yield WebSocketChatChunk(type="error", message=CLOUD_NOT_CONFIGURED_MESSAGE)
+            return
+        if privacy_mode == "cloud_enabled":
+            backend = "cloud"
+            model_name = settings.ADEPTUS_ANTHROPIC_MODEL
+            stream_fn = anthropic_client.stream_chat
+        else:
+            backend = "local"
+            model_name = settings.ADEPTUS_LLM_MODEL
+            stream_fn = ollama_client.stream_chat
+
         window = await chat_repo.recent_messages(
             session, engagement_id=engagement_id, user_id=user_id, limit=RECENT_WINDOW
         )
@@ -453,7 +490,7 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
         full = ""
         emitted = 0
         block_started = False
-        agen = ollama_client.stream_chat(messages=prompt, model=model_name, usage=usage).__aiter__()
+        agen = stream_fn(messages=prompt, model=model_name, usage=usage).__aiter__()
 
         while True:
             try:
@@ -474,6 +511,8 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
                     prompt_count=len(prompt),
                     graph_context=debug_record,
                     subset=subset,
+                    backend=backend,
+                    egress=egress,
                 )
                 yield WebSocketChatChunk(type="error", message=UNREACHABLE_MESSAGE)
                 return
@@ -502,6 +541,8 @@ async def stream_assistant_reply(  # noqa: C901 — irreducible yielding stream 
             live_node_ids=live_node_ids,
             subset=subset,
             usage=usage,
+            backend=backend,
+            egress=egress,
         )
         yield WebSocketChatChunk(type="done", plan=plan, claims=claims)
 
@@ -519,6 +560,8 @@ async def _finalize_complete_turn(
     live_node_ids: set[UUID],
     subset: subset_builder.GraphSubset,
     usage: OllamaUsage,
+    backend: str = "local",
+    egress: dict[str, Any] | None = None,
 ) -> tuple[list[PlanStep], list[Claim]]:
     """Parse, validate, persist, and audit a completed turn; return its plan + claims.
 
@@ -558,6 +601,8 @@ async def _finalize_complete_turn(
             edges_injected=subset.edges_injected,
             plan_steps=len(plan),
             claims_count=len(claims),
+            backend=backend,
+            egress=egress,
         )
     await session.commit()
     return plan, claims
@@ -573,6 +618,8 @@ async def _finalize_failed(
     prompt_count: int,
     graph_context: dict[str, Any] | None = None,
     subset: subset_builder.GraphSubset | None = None,
+    backend: str = "local",
+    egress: dict[str, Any] | None = None,
 ) -> None:
     """Persist the assistant row ``failed`` + emit the ``ai_call`` audit entry, atomic.
 
@@ -601,6 +648,8 @@ async def _finalize_failed(
             status="failed",
             nodes_injected=subset.nodes_injected if subset is not None else 0,
             edges_injected=subset.edges_injected if subset is not None else 0,
+            backend=backend,
+            egress=egress,
         )
     await session.commit()
 
@@ -618,13 +667,18 @@ async def _emit_ai_call(
     edges_injected: int = 0,
     plan_steps: int = 0,
     claims_count: int = 0,
+    backend: str = "local",
+    egress: dict[str, Any] | None = None,
 ) -> None:
     """Record one ``ai_call`` audit entry attributed to the acting user (§14).
 
-    The payload carries the §5.3 subset *counts* (Slice 12) plus, from Slice 13, the count
-    of plan steps and certainty claims the turn produced — a forensic record of how much
-    structured output each turn emitted. No new audit action/table, just a widened payload
-    (the hash-chain integrity surface is untouched)."""
+    The payload carries the §5.3 subset *counts* (Slice 12), the Slice-13 plan/claim counts,
+    and — from Slice 14 — the egress decision: ``backend`` (``local``|``cloud``),
+    ``egress_secret_flagged``, ``egress_confirmed``, and ``egress_match_categories`` (pattern
+    category NAMES only — NEVER the matched secret value, §5.5 / Risk 7). No new audit
+    action/table, just a widened payload (the ADR-0010 hash-chain covers it as written,
+    Resolved decision 3)."""
+    decision = egress if egress is not None else {}
     await audit_service.record(
         session,
         action=AuditAction.AI_CALL,
@@ -641,6 +695,10 @@ async def _emit_ai_call(
             "graph_edges_injected": edges_injected,
             "plan_steps": plan_steps,
             "claims_count": claims_count,
+            "backend": backend,
+            "egress_secret_flagged": bool(decision.get("secret_flagged", False)),
+            "egress_confirmed": bool(decision.get("confirmed", False)),
+            "egress_match_categories": list(decision.get("match_categories", [])),
         },
     )
 
@@ -686,6 +744,35 @@ def _input_stash(
     if egress is not None:
         stash["egress"] = egress
     return stash
+
+
+async def _engagement_privacy_mode(
+    session: AsyncSession, engagement_id: UUID, user_id: UUID
+) -> str:
+    """Read the engagement's privacy mode at stream time (Slice 14, Decision 2).
+
+    Re-runs the membership chokepoint (a defensive bonus — membership may have been revoked
+    between the POST and the WS stream, §17.1). If membership is gone, default to
+    ``local_only`` — the data-safe choice (a revoked member never reaches the cloud branch)."""
+    member = await eng_repo.get_engagement_for_member(session, engagement_id, user_id)
+    if member is None:
+        return "local_only"
+    return str(member[0].privacy_mode)
+
+
+def _stash_egress(stash: dict[str, Any] | None) -> dict[str, Any]:
+    """Read the Slice-14 egress decision back from the pending row's stash for the audit.
+
+    Tolerates absence (local rows, pre-slice rows) → a clean, unflagged decision. Carries
+    only category NAMES (§5.5), exactly as written by ``send_message``."""
+    raw = stash.get("egress") if isinstance(stash, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+    categories = raw.get("match_categories")
+    return {
+        "secret_flagged": bool(raw.get("secret_flagged", False)),
+        "confirmed": bool(raw.get("confirmed", False)),
+        "match_categories": [str(c) for c in categories] if isinstance(categories, list) else [],
+    }
 
 
 def _triggering_user_text(window: Sequence[ChatMessage]) -> str:

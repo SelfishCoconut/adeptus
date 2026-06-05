@@ -18,6 +18,7 @@ import pytest
 from argon2 import PasswordHasher
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.config import get_settings
 from app.core.errors import ConflictError, NotFoundError
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
@@ -1250,3 +1251,202 @@ async def test_pre_slice_row_reads_empty_plan(db_session: AsyncSession) -> None:
     assert debug.plan == []
     assert debug.claims == []
     assert debug.model_output == "old answer"  # fallback to content for pre-slice row
+
+
+# ---------------------------------------------------------------------------
+# stream_assistant_reply — Slice 14 backend selection (cloud vs local, §5.1)
+# ---------------------------------------------------------------------------
+
+_CLOUD_KEY = "sk-ant-test-streamkey"  # gitleaks:allow — synthetic test key, not real
+# Synthetic secret vector; carries gitleaks:allow.
+_CLOUD_SECRET = "deploy creds AKIAIOSFODNN7EXAMPLE password=hunter2"  # gitleaks:allow
+
+
+def _boom_stream() -> FakeStream:
+    """A stream_chat that fails the test if it is ever iterated (asserts the OTHER backend)."""
+
+    async def _gen(
+        *,
+        messages: Sequence[OllamaChatMessage],
+        model: str | None = None,
+        usage: OllamaUsage | None = None,
+    ) -> AsyncIterator[str]:
+        raise AssertionError("this backend must not be called")
+        yield ""  # pragma: no cover — makes _gen a generator
+
+    return _gen
+
+
+async def _seed_cloud_pending(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    content: str = "what is sqli?",
+    confirmed_egress: bool = False,
+) -> ChatMessage:
+    """Seed a pending turn on a cloud_enabled engagement via the real send_message path.
+
+    Goes through the POST gate so the egress stash is populated exactly as in production."""
+    async with factory() as s:
+        owner = await _seed_user(s, f"owner-{uuid4().hex[:8]}")
+        eng_id = await _seed_engagement(s, cast(UUID, owner.id), cloud=True)
+        result = await service.send_message(
+            s,
+            engagement_id=eng_id,
+            requester=owner,
+            content=content,
+            confirmed_egress=confirmed_egress,
+        )
+        await s.commit()
+        assistant = await chat_repo.get_message_for_owner(
+            s, message_id=result.assistant_message.id, user_id=cast(UUID, owner.id)
+        )
+        assert assistant is not None
+        return assistant
+
+
+def _set_cloud_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADEPTUS_ANTHROPIC_API_KEY", _CLOUD_KEY)
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_stream_cloud_engagement_uses_anthropic_client(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _fake_stream(["Hel", "lo"]))
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom_stream())
+    message = await _seed_cloud_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert [c.data for c in chunks if c.type == "token"] == ["Hel", "lo"]
+    assert chunks[-1].type == "done"
+    # The row + audit reflect the real backend (Claude model, not qwen).
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.model == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_stream_local_engagement_uses_ollama_client(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_cloud_key(monkeypatch)  # key present, but the engagement is local_only → still local
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _fake_stream(["lo", "cal"]))
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _boom_stream())
+    message = await _seed_pending(db_factory)  # local_only (default)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert [c.data for c in chunks if c.type == "token"] == ["lo", "cal"]
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.model == "qwen3.5:9b"
+
+
+@pytest.mark.asyncio
+async def test_stream_cloud_without_key_finalizes_failed_no_fallback(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cloud_enabled + no key → the turn fails; it never silently uses local (§5.1, Risk 6)."""
+    monkeypatch.delenv("ADEPTUS_ANTHROPIC_API_KEY", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(service.ollama_client, "stream_chat", _boom_stream())
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _boom_stream())
+    message = await _seed_cloud_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    assert len(chunks) == 1
+    assert chunks[0].type == "error"
+    assert chunks[0].message == service.CLOUD_NOT_CONFIGURED_MESSAGE
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.status == "failed"
+    # Exactly one ai_call, status=failed, backend=cloud — and neither client was iterated.
+    mock_audit_record.assert_awaited_once()
+    payload = mock_audit_record.await_args.kwargs["payload"]  # type: ignore[union-attr]
+    assert payload["status"] == "failed"
+    assert payload["backend"] == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_ai_call_payload_records_backend_and_egress_decision(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _fake_stream(["ok"]))
+    message = await _seed_cloud_pending(db_factory, content=_CLOUD_SECRET, confirmed_egress=True)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    mock_audit_record.assert_awaited_once()
+    payload = mock_audit_record.await_args.kwargs["payload"]  # type: ignore[union-attr]
+    assert payload["backend"] == "cloud"
+    assert payload["egress_secret_flagged"] is True
+    assert payload["egress_confirmed"] is True
+    assert "aws_access_key" in payload["egress_match_categories"]
+    # The category NAMES are recorded — never the matched secret value (§5.5 / Risk 7).
+    assert "AKIAIOSFODNN7EXAMPLE" not in str(payload)  # gitleaks:allow
+
+
+@pytest.mark.asyncio
+async def test_cloud_turn_records_token_counts(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_cloud_key(monkeypatch)
+    monkeypatch.setattr(
+        service.anthropic_client,
+        "stream_chat",
+        _fake_stream(["hi"], prompt_tokens=42, completion_tokens=7),
+    )
+    message = await _seed_cloud_pending(db_factory)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    async with db_factory() as s:
+        row = await chat_repo.get_message_for_owner(
+            s, message_id=cast(UUID, message.id), user_id=cast(UUID, message.user_id)
+        )
+    assert row is not None
+    assert row.prompt_tokens == 42
+    assert row.completion_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_cloud_path_does_not_redact_content(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window passed to the cloud client is the verbatim user content (§5.5 / Risk 2)."""
+    _set_cloud_key(monkeypatch)
+    captured: list[Sequence[OllamaChatMessage]] = []
+    monkeypatch.setattr(service.anthropic_client, "stream_chat", _capture_prompt(captured, ["ok"]))
+    message = await _seed_cloud_pending(db_factory, content=_CLOUD_SECRET, confirmed_egress=True)
+
+    _ = [c async for c in service.stream_assistant_reply(message=message)]
+
+    # The secret-bearing user turn reaches the cloud client byte-for-byte (never redacted).
+    user_turns = [m.content for m in captured[0] if m.role == "user"]
+    assert any(_CLOUD_SECRET in c for c in user_turns)
