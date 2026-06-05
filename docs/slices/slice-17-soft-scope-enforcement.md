@@ -410,23 +410,23 @@ Numbering continues from the backend tasks.
   - `test_audit_chain_intact_after_out_of_scope_decisions` — after approving/rejecting some
     out-of-scope commands, `verify.run()` returns OK (Slice-10/§14 guarantee preserved; reasons ride
     the existing payload, no schema change).
-- **E2E** (Playwright) — **DEFERRED (accepted at finish-slice; plan corrected to match reality).**
-  This bullet was written assuming a Slice-16 `approvals.spec.ts` to extend, but **no approval E2E
-  exists** — Slice 16 shipped the entire approval flow (the `proposed_action` WS frame, the inline
-  `ApprovalCard`, the Approvals tab, approve/reject) with no Playwright journey. A faithful
-  out-of-scope E2E needs the model to emit a **specific** `propose_command` tool-call for an
-  out-of-scope target, but the E2E harness only points `ADEPTUS_OLLAMA_URL` at an external stub that
-  streams a fixed reply (`chat.spec.ts`); a spec cannot deterministically drive a particular
-  tool-call without **controllable Ollama-stub infrastructure that does not exist in the repo**.
-  Building that first-ever approval-E2E harness is disproportionate to this small scope-arm slice and
-  cannot be run/verified locally (the 15 stack-dependent journeys skip without `E2E_STACK=1`). The
-  scope arm is instead covered by: dense **unit** tests (`test_scope.py` parser/matcher;
-  `test_classifier.py` scope arm), **integration** tests against real Postgres
-  (`test_integration.py` — gate → approve → run → audit, chain-intact), and **RTL DOM** tests
-  asserting the rendered card/queue (`ApprovalCard.test.tsx`, `ApprovalQueue.test.tsx`). A
-  controllable-Ollama-stub approval E2E is **owed by the approvals feature broadly** (not introduced
-  by this slice) and is tracked as a follow-up. `make test` still runs Playwright (smoke passes, the
-  stack-gated journeys skip) so the gate stays green.
+- **E2E** (Playwright) — **`frontend/playwright/approvals.spec.ts` (new — this is the first approval
+  E2E; Slice 16 shipped the whole approval flow with none).** Because a live model cannot be relied
+  on to emit a *specific* `propose_command` tool-call for a *specific* target (the chat E2E
+  convention + CLAUDE.md "no real model in tests"), the slice ships a **deterministic Ollama stub**,
+  `frontend/playwright/support/ollama-stub.py`, that mimics the `/api/chat` NDJSON contract and always
+  proposes a light `httpx/run_httpx` against `http://juice-shop:3000`. The spec declares an engagement
+  scope of `10.0.0.0/24` (which **excludes** juice-shop) so the proposal classifies `out_of_scope`
+  (the only reason) **and** the approved run targets juice-shop (sandbox-legal). Journey: log in →
+  create that engagement → send a message → see the inline card with the **"target is outside the
+  declared scope"** label + the host/scope context line → approve → see "Approved by @…". The
+  stub↔backend wire contract is verified directly against the real `ollama_client` + `tool_calling`
+  parser. **Caveat — not a CI gate yet:** like every other Playwright spec it is guarded by
+  `E2E_STACK=1` and CI neither sets it nor brings up the stack/stub, so it runs **on demand locally**;
+  wiring the full E2E stack (+ this stub) into `ci.yml` is a separate infrastructure slice. The scope
+  arm therefore remains *gated* in CI by dense **unit** tests (`test_scope.py`, `test_classifier.py`),
+  **integration** tests against real Postgres (`test_integration.py` — gate → approve → run → audit,
+  chain-intact), and **RTL DOM** tests (`ApprovalCard.test.tsx`, `ApprovalQueue.test.tsx`).
 
 ## Acceptance criteria
 
@@ -555,3 +555,6 @@ boundary), so the reviewer (or a focused self-review at finish-slice) should con
 - 2026-06-05T23:04:49Z — 384a83b Slice 16: Two-tier autonomy + approval flow (#45)
 - 2026-06-05T23:04:56Z — 384a83b Slice 16: Two-tier autonomy + approval flow (#45)
 - 2026-06-05T23:27:31Z — 485d0dc test(slice-17): ApprovalQueue renders out-of-scope request (task 9)
+- 2026-06-05T23:40:43Z — 1cebb97 fix(slice-17): address code-review findings
+- 2026-06-05T23:42:43Z — 1cebb97 fix(slice-17): address code-review findings
+- 2026-06-05T23:45:10Z — 1cebb97 fix(slice-17): address code-review findings
