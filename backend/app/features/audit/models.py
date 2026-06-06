@@ -58,6 +58,12 @@ AUDIT_ACTIONS: tuple[str, ...] = (
     "approval_auto_granted",
     "autonomy_granted",
     "autonomy_revoked",
+    # Slice 19 — findings model + lifecycle (§9.1/§9.2/§14).
+    "finding_created",
+    "finding_updated",
+    "finding_verification_changed",
+    "finding_remediation_changed",
+    "finding_deleted",
 )
 
 # 64 hex zeros — the genesis ``prev_hash`` and the empty-chain head pointer.

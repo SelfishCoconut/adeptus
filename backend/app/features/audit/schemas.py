@@ -42,6 +42,12 @@ class AuditAction(StrEnum):
     APPROVAL_AUTO_GRANTED = "approval_auto_granted"
     AUTONOMY_GRANTED = "autonomy_granted"
     AUTONOMY_REVOKED = "autonomy_revoked"
+    # Slice 19 — findings model + lifecycle: one action per finding mutation (§9.1/§9.2/§14).
+    FINDING_CREATED = "finding_created"
+    FINDING_UPDATED = "finding_updated"
+    FINDING_VERIFICATION_CHANGED = "finding_verification_changed"
+    FINDING_REMEDIATION_CHANGED = "finding_remediation_changed"
+    FINDING_DELETED = "finding_deleted"
 
 
 class AuditEntryRead(BaseModel):
