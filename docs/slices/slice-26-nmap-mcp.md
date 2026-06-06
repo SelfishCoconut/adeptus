@@ -2,7 +2,7 @@
 
 **Branch**: `slice-26-nmap-mcp`
 **GitHub Issue**: #49
-**Status**: in-progress
+**Status**: done
 **Risky**: yes (MCP execution + approval classification)
 
 ---
