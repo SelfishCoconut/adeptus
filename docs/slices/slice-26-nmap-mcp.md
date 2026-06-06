@@ -189,7 +189,9 @@ switching to a strict **flag allowlist** (`_validate_flags`) that rejects bare p
 and any non-allowlisted/abbreviated flag, plus a server-side `timeout_seconds` clamp.
 Verified: filesystem-write / NSE / egress-pivot / sandbox-bypass / positional-injection
 all refused before exec; `weight=heavy` + `run_nmap` in `AGGRESSIVE_SCAN_TOOLS` gate;
-binary resolved by absolute path.
+binary resolved by absolute path. Re-review verdict: **APPROVED**. Two non-blocking Low
+items (full-port `-p -` and high `--min/max-rate` = scan *intensity*, not isolation)
+deferred to the heavy-tool per-host lock layer — accepted, legitimate scan functionality.
 
 ## Progress
 
