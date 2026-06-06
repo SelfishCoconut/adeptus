@@ -25,12 +25,15 @@ if _SERVER_DIR not in sys.path:
 from server import (  # noqa: E402
     _HOLD_SECONDS_MAX,
     _HOLD_SECONDS_MIN,
+    DEFAULT_HTTPX_BIN,
+    HTTPX_BIN_ENV,
     JSONRPC_INVALID_REQUEST,
     JSONRPC_PARSE_ERROR,
     MAX_OUTPUT_BYTES,
     TRUNCATION_SENTINEL,
     _cap_buffer,
     _handle_request,
+    _resolve_httpx_binary,
     _run_httpx,
     _run_httpx_heavy,
     main,
@@ -104,6 +107,56 @@ class TestCapBuffer:
         assert capped
         assert result.endswith(TRUNCATION_SENTINEL)
         assert result.startswith("x" * MAX_OUTPUT_BYTES)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_httpx_binary — must never let the venv Python-httpx stub win
+# ---------------------------------------------------------------------------
+
+
+class TestResolveHttpxBinary:
+    """The resolver exists to stop a bare ``httpx`` on PATH resolving to the
+    venv's Python-``httpx`` console-script stub (an HTTP client) instead of the
+    ProjectDiscovery recon binary. In the container the Dockerfile install path
+    always exists, so PATH is never consulted.
+    """
+
+    def test_env_override_wins(self) -> None:
+        with patch.dict(os.environ, {HTTPX_BIN_ENV: "/opt/httpx"}):
+            assert _resolve_httpx_binary() == "/opt/httpx"
+
+    def test_default_install_path_used_when_present(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("server.os.path.exists", return_value=True),
+        ):
+            assert _resolve_httpx_binary() == DEFAULT_HTTPX_BIN
+        # Regression guard: the resolved binary is always an absolute path,
+        # never the bare "httpx" that the venv stub would shadow.
+        assert DEFAULT_HTTPX_BIN.startswith("/")
+
+    def test_empty_env_override_ignored(self) -> None:
+        with (
+            patch.dict(os.environ, {HTTPX_BIN_ENV: ""}),
+            patch("server.os.path.exists", return_value=True),
+        ):
+            assert _resolve_httpx_binary() == DEFAULT_HTTPX_BIN
+
+    def test_falls_back_to_which_when_default_missing(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("server.os.path.exists", return_value=False),
+            patch("server.shutil.which", return_value="/home/dev/go/bin/httpx"),
+        ):
+            assert _resolve_httpx_binary() == "/home/dev/go/bin/httpx"
+
+    def test_falls_back_to_default_when_nothing_found(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("server.os.path.exists", return_value=False),
+            patch("server.shutil.which", return_value=None),
+        ):
+            assert _resolve_httpx_binary() == DEFAULT_HTTPX_BIN
 
 
 # ---------------------------------------------------------------------------
@@ -241,10 +294,13 @@ class TestRunHttpx:
         mock_exec.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_argv_built_correctly_flags_before_target(self) -> None:
-        """Verify argv = ['httpx', *flags, target] with create_subprocess_exec."""
+    async def test_argv_built_correctly_flags_then_u_target(self) -> None:
+        """Verify argv = [<resolved binary>, *flags, '-u', target] with stdin from DEVNULL."""
         mock_proc = _make_mock_process(returncode=0)
-        with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        with (
+            patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("server._resolve_httpx_binary", return_value="/usr/local/bin/httpx"),
+        ):
             mock_exec.return_value = mock_proc
             await _run_httpx(
                 {"target": "http://localhost:3000", "flags": ["-sc", "-title"]},
@@ -252,27 +308,38 @@ class TestRunHttpx:
                 req_id=5,
             )
 
-        # Must use create_subprocess_exec (not shell), with argv unpacked as positional args.
+        # Must use create_subprocess_exec (not shell), with the resolved absolute
+        # binary path as argv[0] (never a bare "httpx" — see _resolve_httpx_binary)
+        # and the target passed via ``-u`` (a positional target is ignored by
+        # ProjectDiscovery httpx). stdin is DEVNULL so the child never blocks on
+        # the MCP server's JSON-RPC stdin.
         mock_exec.assert_called_once_with(
-            "httpx",
+            "/usr/local/bin/httpx",
             "-sc",
             "-title",
+            "-u",
             "http://localhost:3000",
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
 
     @pytest.mark.asyncio
-    async def test_no_flags_argv_is_httpx_plus_target(self) -> None:
+    async def test_no_flags_argv_is_binary_u_target(self) -> None:
         mock_proc = _make_mock_process(returncode=0)
-        with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        with (
+            patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("server._resolve_httpx_binary", return_value="/usr/local/bin/httpx"),
+        ):
             mock_exec.return_value = mock_proc
             await _run_httpx({"target": "http://localhost"}, _noop_write, req_id=6)
 
         mock_exec.assert_called_once_with(
-            "httpx",
+            "/usr/local/bin/httpx",
+            "-u",
             "http://localhost",
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
