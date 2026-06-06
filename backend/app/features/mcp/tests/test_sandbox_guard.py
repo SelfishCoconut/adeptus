@@ -95,6 +95,26 @@ def test_dev_bare_localhost_with_port_allowed(monkeypatch: pytest.MonkeyPatch) -
     _enforce_sandbox_guard({"target": "localhost:3000"})  # must not raise
 
 
+# -- nmap coverage (Slice 26): the generic guard covers nmap's bare-host target ----
+
+
+def test_dev_nmap_bare_sandbox_host_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADEPTUS_ENV=dev: nmap against the bare ``juice-shop`` sandbox host is allowed."""
+    _with_adeptus_env(monkeypatch, "dev")
+    _enforce_sandbox_guard({"target": "juice-shop"})  # must not raise
+
+
+def test_dev_nmap_external_host_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADEPTUS_ENV=dev: nmap against an external host (e.g. scanme.nmap.org) is refused.
+
+    nmap takes a bare host as its target, so the generic, tool-agnostic guard
+    (keyed on ``args['target']``) covers run_nmap with no nmap-specific code.
+    """
+    _with_adeptus_env(monkeypatch, "dev")
+    with pytest.raises(SandboxGuardViolation, match="scanme.nmap.org"):
+        _enforce_sandbox_guard({"target": "scanme.nmap.org"})
+
+
 # -- userinfo smuggling must not bypass the guard -----------------------------
 
 
