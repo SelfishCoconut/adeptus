@@ -30,14 +30,16 @@ from app.features.findings import models as findings_models  # noqa: F401 — re
 from app.features.graph import models as graph_models  # noqa: F401 — registers graph_nodes (FK)
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def mock_audit_record() -> Iterator[AsyncMock]:
     """Stub the audit emission for findings service tests.
 
     Service tests drive the mutators with a *mocked* db session, so the real
-    ``audit_service.record`` (which runs SQL) cannot execute. Replace it with an
-    AsyncMock; the finding-audit tests request this fixture to assert ``record``
-    was called with the right action/target.
+    ``audit_service.record`` (which runs SQL) cannot execute. They request this
+    fixture explicitly to replace ``record`` with an AsyncMock and assert it was
+    called with the right action/target. NOT autouse: repository and schema tests
+    do not touch the service module, and router tests exercise the *real* audit
+    path against the SQLite test DB (mirroring the graph router tests).
     """
     with patch(
         "app.features.findings.service.audit_service.record", new_callable=AsyncMock
