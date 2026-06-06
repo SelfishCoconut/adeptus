@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import type { ApprovalReason, ApprovalRequest } from '@/shared/api'
+import type { ApprovalReason, ApprovalRequest, DelegableReason } from '@/shared/api'
+import { useGrantAutonomy } from '@/features/autonomy/api'
 import {
   ApprovalConflictError,
   useApproveRequest,
@@ -15,6 +17,26 @@ const REASON_LABELS: Record<ApprovalReason, string> = {
   credential_attack: 'credential attack',
   unclassified_manifest: 'tool not classified in its manifest',
   out_of_scope: 'target is outside the declared scope',
+}
+
+/** Category labels for the "Always allow <category>" grant action (plural phrasing). */
+const GRANT_LABELS: Record<DelegableReason, string> = {
+  target_write: 'target writes',
+  aggressive_scan: 'aggressive scans',
+  credential_attack: 'credential attacks',
+  out_of_scope: 'out-of-scope commands',
+}
+
+/** The four delegable §5.2 categories — `unclassified_manifest` is never delegable. */
+const DELEGABLE_REASONS: DelegableReason[] = [
+  'target_write',
+  'aggressive_scan',
+  'credential_attack',
+  'out_of_scope',
+]
+
+function isDelegable(reason: ApprovalReason): reason is DelegableReason {
+  return (DELEGABLE_REASONS as string[]).includes(reason)
 }
 
 function CommandSummary({
@@ -63,7 +85,9 @@ export function ApprovalCard({ engagementId, request, autonomous }: ApprovalCard
         className="rounded-lg border border-border bg-muted/40 p-3"
       >
         <div className="mb-1.5 flex items-center gap-2">
-          <Badge variant="secondary">running automatically</Badge>
+          <Badge variant="secondary" data-testid="autonomous-badge">
+            {autonomous.auto_approved ? 'auto-approved · standing autonomy' : 'running automatically'}
+          </Badge>
           {autonomous.rationale ? (
             <span className="text-xs text-muted-foreground">{autonomous.rationale}</span>
           ) : null}
@@ -84,12 +108,27 @@ export function ApprovalCard({ engagementId, request, autonomous }: ApprovalCard
 function GatedCard({ engagementId, request }: { engagementId: string; request: ApprovalRequest }) {
   const approve = useApproveRequest(engagementId)
   const reject = useRejectRequest(engagementId)
+  const grant = useGrantAutonomy(engagementId)
 
   // The latest decision wins: a successful mutation here, else another member's decision that
   // arrived on a refetch of the `request` prop.
   const decided = approve.data ?? reject.data ?? request
   const isPending = decided.status === 'pending'
-  const inFlight = approve.isPending || reject.isPending
+  const inFlight = approve.isPending || reject.isPending || grant.isPending
+
+  // "Always allow" is offered per delegable category, but ONLY when the command's reasons are
+  // ALL delegable: a card carrying `unclassified_manifest` can never be made to auto-run
+  // (that fail-safe always gates, §5.2), so advertising delegation there would be dishonest.
+  const delegableReasons = decided.reasons.every(isDelegable) ? decided.reasons.filter(isDelegable) : []
+
+  // Grant standing autonomy for the category, then approve the current (already-pending)
+  // request — a grant only auto-approves FUTURE turns, so this command still needs the click.
+  function alwaysAllow(reason: DelegableReason) {
+    grant.mutate(
+      { reason },
+      { onSuccess: () => approve.mutate({ requestId: request.id }) },
+    )
+  }
   const conflict =
     approve.error instanceof ApprovalConflictError
       ? approve.error
@@ -124,30 +163,49 @@ function GatedCard({ engagementId, request }: { engagementId: string; request: A
       ) : null}
 
       {isPending ? (
-        <div className="mt-2 flex items-center gap-2">
-          <Button
-            size="sm"
-            onClick={() => approve.mutate({ requestId: request.id })}
-            disabled={inFlight}
-          >
-            Approve
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => reject.mutate({ requestId: request.id })}
-            disabled={inFlight}
-          >
-            Reject
-          </Button>
-          {conflict ? (
-            <span className="text-xs text-muted-foreground" data-testid="approval-conflict">
-              {conflict.reason === 'engagement_archived'
-                ? 'Engagement is archived'
-                : `Already ${conflict.status ?? 'decided'} by another member`}
-            </span>
+        <>
+          <div className="mt-2 flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => approve.mutate({ requestId: request.id })}
+              disabled={inFlight}
+            >
+              Approve
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => reject.mutate({ requestId: request.id })}
+              disabled={inFlight}
+            >
+              Reject
+            </Button>
+            {conflict ? (
+              <span className="text-xs text-muted-foreground" data-testid="approval-conflict">
+                {conflict.reason === 'engagement_archived'
+                  ? 'Engagement is archived'
+                  : `Already ${conflict.status ?? 'decided'} by another member`}
+              </span>
+            ) : null}
+          </div>
+          {delegableReasons.length > 0 ? (
+            <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="always-allow-row">
+              {delegableReasons.map((reason) => (
+                <AlwaysAllowButton
+                  key={reason}
+                  reason={reason}
+                  disabled={inFlight}
+                  onConfirm={alwaysAllow}
+                />
+              ))}
+            </div>
           ) : null}
-        </div>
+          {grant.isError ? (
+            <p className="mt-1 text-xs text-destructive" data-testid="grant-error">
+              Couldn&apos;t grant standing autonomy
+            </p>
+          ) : null}
+        </>
       ) : (
         <p className="mt-2 text-xs font-medium text-foreground" data-testid="approval-decision">
           {decided.status === 'approved' ? 'Approved' : 'Rejected'} by @
@@ -155,5 +213,61 @@ function GatedCard({ engagementId, request }: { engagementId: string; request: A
         </p>
       )}
     </div>
+  )
+}
+
+/**
+ * The "Always allow <category> for this engagement" grant action (§5.2 delegation). For
+ * `out_of_scope` it gates behind a louder explicit confirm (Risk 2) — granting it lets the
+ * AI act outside the declared scope without asking. `onConfirm` grants then approves.
+ */
+function AlwaysAllowButton({
+  reason,
+  disabled,
+  onConfirm,
+}: {
+  reason: DelegableReason
+  disabled: boolean
+  onConfirm: (reason: DelegableReason) => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  const louder = reason === 'out_of_scope'
+
+  if (louder && confirming) {
+    return (
+      <div
+        data-testid="out-of-scope-confirm"
+        className="flex flex-wrap items-center gap-2 rounded border border-destructive/50 bg-destructive/5 px-2 py-1"
+      >
+        <span className="text-xs text-destructive">
+          You are granting <strong>out-of-scope</strong> autonomy — the AI may act outside the
+          declared scope without asking.
+        </span>
+        <Button
+          size="sm"
+          variant="destructive"
+          data-testid="out-of-scope-confirm-grant"
+          onClick={() => onConfirm(reason)}
+          disabled={disabled}
+        >
+          Grant anyway
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} disabled={disabled}>
+          Cancel
+        </Button>
+      </div>
+    )
+  }
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      data-testid={`always-allow-${reason}`}
+      onClick={() => (louder ? setConfirming(true) : onConfirm(reason))}
+      disabled={disabled}
+    >
+      Always allow {GRANT_LABELS[reason]} for this engagement
+    </Button>
   )
 }

@@ -172,18 +172,78 @@ describe('ApprovalCard — gated', () => {
   })
 })
 
+describe('ApprovalCard — always allow (standing autonomy)', () => {
+  it('offers "Always allow" for a delegable category while pending', () => {
+    renderCard(<ApprovalCard engagementId={ENG} request={request({ reasons: ['credential_attack'] })} />)
+    expect(screen.getByTestId('always-allow-credential_attack')).toBeInTheDocument()
+  })
+
+  it('does not offer "Always allow" for an unclassified_manifest card', () => {
+    renderCard(
+      <ApprovalCard engagementId={ENG} request={request({ reasons: ['unclassified_manifest'] })} />,
+    )
+    expect(screen.queryByTestId('always-allow-row')).not.toBeInTheDocument()
+  })
+
+  it('does not offer "Always allow" when any reason is non-delegable', () => {
+    renderCard(
+      <ApprovalCard
+        engagementId={ENG}
+        request={request({ reasons: ['aggressive_scan', 'unclassified_manifest'] })}
+      />,
+    )
+    expect(screen.queryByTestId('always-allow-row')).not.toBeInTheDocument()
+  })
+
+  it('grants standing autonomy then approves the current request', async () => {
+    mockPost
+      .mockResolvedValueOnce({ data: { id: 'g1', reason: 'credential_attack' } } as never)
+      .mockResolvedValueOnce({
+        data: request({ status: 'approved', acted_by_username: 'me', self_approved: true }),
+      } as never)
+    renderCard(<ApprovalCard engagementId={ENG} request={request({ reasons: ['credential_attack'] })} />)
+    await userEvent.click(screen.getByTestId('always-allow-credential_attack'))
+    await waitFor(() =>
+      expect(screen.getByTestId('approval-decision')).toHaveTextContent('Approved by @me'),
+    )
+    expect(mockPost.mock.calls[0][0]).toContain('/autonomy-grants')
+    expect(mockPost.mock.calls[1][0]).toContain('/approve')
+  })
+
+  it('out_of_scope requires an explicit louder confirm before granting', async () => {
+    mockPost
+      .mockResolvedValueOnce({ data: { id: 'g1', reason: 'out_of_scope' } } as never)
+      .mockResolvedValueOnce({ data: request({ status: 'approved', acted_by_username: 'me' }) } as never)
+    renderCard(<ApprovalCard engagementId={ENG} request={request({ reasons: ['out_of_scope'] })} />)
+    await userEvent.click(screen.getByTestId('always-allow-out_of_scope'))
+    // No grant fired yet — the louder confirm gates it (Risk 2).
+    expect(mockPost).not.toHaveBeenCalled()
+    expect(screen.getByTestId('out-of-scope-confirm')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('out-of-scope-confirm-grant'))
+    await waitFor(() => expect(mockPost.mock.calls[0][0]).toContain('/autonomy-grants'))
+  })
+})
+
 describe('ApprovalCard — autonomous', () => {
+  const autonomousAction = (overrides: Partial<AutonomousAction> = {}): AutonomousAction => ({
+    server_name: 'httpx-server',
+    tool_name: 'httpx',
+    args: { target: '10.0.0.5' },
+    preset_name: null,
+    rationale: 'passive recon',
+    tool_run_id: 'run-1',
+    ...overrides,
+  })
+
   it('shows the "running automatically" variant with no buttons', () => {
-    const autonomous: AutonomousAction = {
-      server_name: 'httpx-server',
-      tool_name: 'httpx',
-      args: { target: '10.0.0.5' },
-      preset_name: null,
-      rationale: 'passive recon',
-      tool_run_id: 'run-1',
-    }
-    renderCard(<ApprovalCard engagementId={ENG} autonomous={autonomous} />)
+    renderCard(<ApprovalCard engagementId={ENG} autonomous={autonomousAction()} />)
     expect(screen.getByText('running automatically')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('shows the standing-autonomy indicator for an auto-approved command', () => {
+    renderCard(<ApprovalCard engagementId={ENG} autonomous={autonomousAction({ auto_approved: true })} />)
+    expect(screen.getByText('auto-approved · standing autonomy')).toBeInTheDocument()
+    expect(screen.queryByText('running automatically')).not.toBeInTheDocument()
   })
 })

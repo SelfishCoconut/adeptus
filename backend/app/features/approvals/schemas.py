@@ -171,3 +171,7 @@ class AutonomousAction(BaseModel):
     preset_name: str | None = None
     rationale: str | None = None
     tool_run_id: UUID
+    # Slice 18: True when this command ran auto-approved under a standing-autonomy grant
+    # (an approval_auto_granted audit entry exists), False for an ungated autonomous command.
+    # Drives the frontend "auto-approved · standing autonomy" indicator vs "running automatically".
+    auto_approved: bool = False

@@ -1988,6 +1988,8 @@ async def test_autonomous_action_runs_immediately_and_emits_frame(
     assert len(auto_frames) == 1
     card = auto_frames[0].autonomous_action
     assert card is not None and card.tool_run_id == run_id
+    # An ungated autonomous command is NOT a standing-autonomy run.
+    assert card.auto_approved is False
 
 
 @pytest.mark.asyncio
@@ -2029,6 +2031,8 @@ async def test_auto_approved_action_runs_like_autonomous(
     assert len(auto_frames) == 1
     card = auto_frames[0].autonomous_action
     assert card is not None and card.tool_run_id == run_id
+    # Marked as standing-autonomy so the frontend shows the distinct indicator (§5.2).
+    assert card.auto_approved is True
 
 
 @pytest.mark.asyncio
