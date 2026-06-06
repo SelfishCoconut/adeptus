@@ -105,11 +105,15 @@ Numbered continuously across the slice. Every commit subject cites `(task N)`.
    `_resolve_nmap_binary()` (`$ADEPTUS_NMAP_BIN` → `/usr/bin/nmap` → `shutil.which`),
    and pass `stdin=DEVNULL`. nmap takes its target as a **positional** arg (unlike
    httpx's `-u`), so `argv = [bin, *flags, target]` is correct here.
-2. **[M]** Flag denylist in the nmap server — reject caller-supplied flags that breach
-   the `network`-only capability or change the risk class: file-output (`-oN`, `-oX`,
-   `-oG`, `-oA`, `-oS`), `--script` overrides beyond presets (block raw `--script=` /
-   `--script-args` from callers; presets set scripts), `--datadir`, `--resume`. Compared
-   case-insensitively on the bare flag name (httpx pattern). Tests for each.
+2. **[M]** Flag **allowlist** in the nmap server (security review changed this from a
+   denylist — see Risk 2). nmap accepts unambiguous long-option abbreviations and treats
+   any bare token as an extra target, so a denylist is bypassable. `_validate_flags`
+   permits only an exact set of bare flags (`-Pn -n -sT -sV -F -6 --open --reason -T0..5
+   -v -vv -d`) and value flags with validated values (`-p`, `--top-ports`,
+   `--version-intensity`, `--max-retries`, `--min/max-rate`, `--host-timeout`). Everything
+   else — unknown/abbreviated flags, NSE (`-sC`/`--script*`), aggregate `-A`, privileged
+   scans (`-sS`/`-sU`/`-O`), file output (`-oN`…), egress/pivot (`--proxies`/`-b`), and
+   **bare positional targets** — is rejected before exec. Case-sensitive. Tests for each.
 3. **[S]** Add `mcp-servers/nmap/manifest.yaml` (per sketch) and register the server in
    `mcp-servers/config/mcp.yaml`.
 4. **[S]** Install nmap in `backend/Dockerfile` (`apt-get install -y --no-install-recommends nmap`),
@@ -156,12 +160,14 @@ Numbered continuously across the slice. Every commit subject cites `(task N)`.
 - **Risk 1 — privileges.** SYN scan (`-sS`) and OS detection (`-O`) need raw sockets
   (`CAP_NET_RAW`), which the backend container may lack. *Mitigation:* every preset uses
   unprivileged `-sT` connect scan and omits `-O`; no capability change to the container.
-- **Risk 2 — NSE script danger.** `--script` can pull in `exploit`/`brute`/`dos`
-  categories that change the risk class beyond "aggressive scan". *Mitigation (refined
-  during impl):* the presets use **no** NSE at all (aggressive = `-sV` version detection
-  only), and the server **denylists all `--script*`** from callers. A curated
-  safe-category NSE allowlist can be added in a later slice. This keeps the denylist a
-  clean all-or-nothing boundary (no per-value allowlist to get wrong).
+- **Risk 2 — flag containment (denylist → allowlist).** Security review showed a denylist
+  is unsafe for nmap: it accepts unambiguous long-option **abbreviations** (`--proxi` ≡
+  `--proxies`) and treats any bare token as an **extra target** (smuggling a host past the
+  single-`target` guard). *Mitigation:* the server uses a strict **allowlist**
+  (`_validate_flags`) — only known bare/value flags pass; NSE (`-sC`/`--script*`),
+  aggregate `-A`, privileged scans, file output, egress/pivot, and bare positionals are
+  all rejected before exec. Presets use no NSE (aggressive = `-sV` only). A curated
+  safe-category NSE allowlist can be added later.
 - **Risk 3 — output volume / runtime.** Full scans are slow and verbose. *Mitigation:*
   `--top-ports` bounds the scan; 1 MB output cap; `timeout_seconds` (default 120, max 600)
   kills the process group; heavy-tool admission (Slice 05) serializes per host.
@@ -170,20 +176,23 @@ Numbered continuously across the slice. Every commit subject cites `(task N)`.
 
 ## Open questions for the human
 
-- Aggressive preset uses `--script=default` (safe, on-by-default NSE). OK to keep it
-  unprivileged (no `-O` OS detection), or do you want a privileged variant later that
-  requires granting the container `CAP_NET_RAW`?
+- Aggressive preset is unprivileged (`-sT -sV`, no NSE, no `-O`). Want a privileged
+  variant later (OS detection / SYN) that requires granting the container `CAP_NET_RAW`?
 - Default timeout 120 s / max 600 s acceptable for sandbox scans?
 
 ## Security review required?
 
-**Yes.** Touches MCP subprocess execution and the approval classification (adds a heavy,
-target-affecting tool). security-reviewer must check: the flag denylist actually prevents
-filesystem-write / arbitrary-NSE / egress-pivot capability escape (`-oN…`, `--script*`,
-`--proxies`, `-b`) and sandbox bypass (`-iL`/`-iR`/`--excludefile`), the sandbox guard
-covers nmap, and the binary resolver can't be PATH-shadowed.
+**Yes — completed.** security-reviewer (2026-06-06) found two Criticals on the original
+denylist design: positional-target injection bypassing the sandbox guard, and long-option
+abbreviation bypassing the denylist (plus `-sC`/`-A` NSE gaps). All remediated by
+switching to a strict **flag allowlist** (`_validate_flags`) that rejects bare positionals
+and any non-allowlisted/abbreviated flag, plus a server-side `timeout_seconds` clamp.
+Verified: filesystem-write / NSE / egress-pivot / sandbox-bypass / positional-injection
+all refused before exec; `weight=heavy` + `run_nmap` in `AGGRESSIVE_SCAN_TOOLS` gate;
+binary resolved by absolute path.
 
 ## Progress
 
 (Leave empty at planning time.)
 - 2026-06-06T10:16:59Z — 1c37d96 docs(slice-26): nmap slice spec + plan re-scope to nmap only
+- 2026-06-06T10:35:34Z — 5c98647 docs(slice-26): mark slice done in plan + spec

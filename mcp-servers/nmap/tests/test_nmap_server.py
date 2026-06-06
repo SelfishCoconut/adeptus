@@ -232,63 +232,126 @@ class TestRunNmap:
     @pytest.mark.parametrize(
         "bad_flag",
         [
-            "-oN",  # filesystem write
+            # filesystem output / read
+            "-oN",
             "-oX",
             "-oA",
             "--datadir",
-            "-iL",  # alternate target source (sandbox bypass)
-            "-iR",  # random internet targets (sandbox bypass)
+            "--resume",
+            "--stylesheet",
+            # alternate target sources (sandbox bypass)
+            "-iL",
+            "-iR",
             "--excludefile",
-            "--proxies",  # egress/SSRF redirection
-            "-b",  # FTP-bounce scan (pivot through a relay host)
-            "--script",  # NSE risk-class escalation
+            # egress / pivot
+            "--proxies",
+            "-b",
+            # NSE risk-class escalation (incl. the -sC alias for --script=default)
+            "--script",
             "--script-args",
+            "-sC",
+            # aggregate / privileged scans (re-enable NSE, OS detect, raw sockets)
+            "-A",
+            "-O",
+            "-sS",
+            "-sU",
+            # GNU getopt long-option ABBREVIATIONS that a denylist would miss
+            "--proxi",
+            "--datadi",
+            "--resum",
+            "--scrip",
         ],
     )
-    async def test_denylisted_flag_rejected_without_exec(self, bad_flag: str) -> None:
+    async def test_disallowed_flag_rejected_without_exec(self, bad_flag: str) -> None:
         with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             result = await _run_nmap(
-                {"target": "juice-shop", "flags": [bad_flag, "value"]}, _noop_write, req_id=11
+                {"target": "juice-shop", "flags": [bad_flag]}, _noop_write, req_id=11
             )
         assert result["exit_code"] == 1
-        assert bad_flag.split("=", 1)[0] in result["stderr"]
+        assert "rejected" in result["stderr"]
         mock_exec.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_denylisted_flag_with_equals_value_rejected(self) -> None:
-        """``--script=exploit`` (single-token form) is rejected on the bare name."""
+    async def test_bare_positional_target_injection_rejected(self) -> None:
+        """CRITICAL: a bare host in flags would smuggle a 2nd target past the guard."""
         with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             result = await _run_nmap(
-                {"target": "juice-shop", "flags": ["--script=exploit"]}, _noop_write, req_id=12
+                {"target": "juice-shop", "flags": ["-Pn", "-sT", "scanme.example.test"]},
+                _noop_write,
+                req_id=12,
+            )
+        assert result["exit_code"] == 1
+        assert "scanme.example.test" in result["stderr"]
+        mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_value_flag_with_non_value_rejected(self) -> None:
+        """A hostname passed where -p expects a port spec is rejected (no injection)."""
+        with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            result = await _run_nmap(
+                {"target": "juice-shop", "flags": ["-p", "scanme.example.test"]},
+                _noop_write,
+                req_id=13,
             )
         assert result["exit_code"] == 1
         mock_exec.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_denylist_is_case_insensitive(self) -> None:
+    async def test_value_flag_missing_value_rejected(self) -> None:
         with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             result = await _run_nmap(
-                {"target": "juice-shop", "flags": ["-On", "out.txt"]}, _noop_write, req_id=13
+                {"target": "juice-shop", "flags": ["--top-ports"]}, _noop_write, req_id=14
+            )
+        assert result["exit_code"] == 1
+        assert "missing" in result["stderr"]
+        mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wrong_case_scan_flag_rejected(self) -> None:
+        """Matching is case-sensitive: -ST is not the allowed -sT."""
+        with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            result = await _run_nmap(
+                {"target": "juice-shop", "flags": ["-ST"]}, _noop_write, req_id=15
             )
         assert result["exit_code"] == 1
         mock_exec.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_preset_flags_pass(self) -> None:
-        """The aggressive preset's flags are not on the denylist."""
+    async def test_preset_and_value_flags_pass(self) -> None:
+        """Allowed bare + value flags (presets, -p, --top-ports=N) pass the allowlist."""
         mock_proc = _make_mock_process(returncode=0)
         with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = mock_proc
             result = await _run_nmap(
                 {
                     "target": "juice-shop",
-                    "flags": ["-Pn", "-sT", "-sV", "-T4", "--top-ports", "1000"],
+                    # space-form value flag, bare flags, =-form value flag
+                    "flags": ["-Pn", "-sT", "-sV", "-T4", "-p", "1-1000", "--top-ports=100"],
                 },
                 _noop_write,
-                req_id=14,
+                req_id=16,
             )
         assert result["exit_code"] == 0
         mock_exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_timeout_seconds_clamped_to_max(self) -> None:
+        """An over-large timeout is clamped to the 600s ceiling before use."""
+        mock_proc = _make_mock_process(returncode=0)
+        captured: dict[str, float] = {}
+        original_wait_for = asyncio.wait_for
+
+        async def _capture_wait_for(coro: Any, timeout: float) -> Any:  # noqa: ASYNC109
+            captured["timeout"] = timeout
+            return await original_wait_for(coro, timeout)
+
+        with patch("server.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_proc
+            with patch("server.asyncio.wait_for", side_effect=_capture_wait_for):
+                await _run_nmap(
+                    {"target": "juice-shop", "timeout_seconds": 999999}, _noop_write, req_id=17
+                )
+        assert captured["timeout"] == 600.0
 
     @pytest.mark.asyncio
     async def test_binary_missing_returns_error(self) -> None:

@@ -120,8 +120,8 @@ async def test_nmap_scans_sandbox_and_returns_open_port(nmap_manager: None) -> N
 
 
 @pytest.mark.asyncio
-async def test_nmap_denylisted_flag_rejected(nmap_manager: None) -> None:
-    """A denylisted flag (-iR, random internet targets) is refused by the server."""
+async def test_nmap_disallowed_flag_rejected(nmap_manager: None) -> None:
+    """A disallowed flag (-iR, random internet targets) is refused before exec."""
     _check_nmap_binary()
 
     result = await subprocess_manager.send_tool_call(
@@ -132,4 +132,24 @@ async def test_nmap_denylisted_flag_rejected(nmap_manager: None) -> None:
     )
 
     assert result.exit_code == 1
-    assert "disallowed flag" in result.stderr
+    assert "rejected" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_nmap_positional_target_injection_rejected(nmap_manager: None) -> None:
+    """A bare host smuggled in flags (2nd target past the guard) is refused before exec.
+
+    Uses a bogus name so nothing is scanned even if the guard were bypassed; the point
+    is that the allowlist rejects it before any nmap process starts.
+    """
+    _check_nmap_binary()
+
+    result = await subprocess_manager.send_tool_call(
+        "nmap",
+        "run_nmap",
+        {"target": "localhost", "flags": ["-Pn", "-sT", "injected-extra-host.invalid"]},
+        timeout_seconds=30,
+    )
+
+    assert result.exit_code == 1
+    assert "injected-extra-host.invalid" in result.stderr

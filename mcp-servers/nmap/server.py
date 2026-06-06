@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -75,52 +76,102 @@ def _resolve_nmap_binary() -> str:
     return shutil.which("nmap") or DEFAULT_NMAP_BIN
 
 
-# Flags a caller may NOT supply. Two reasons, both load-bearing:
+# Flag handling is an ALLOWLIST, not a denylist. A denylist is unsafe for nmap for
+# two reasons proven in security review:
 #
-# 1. Capability containment (manifest declares network only): any flag that reads
-#    or writes the filesystem (-oN/-oX/-oG/-oA/-oS, --append-output, --stylesheet,
-#    --datadir, --resume) is rejected before exec.
-# 2. Sandbox containment: the single ``target`` arg is guarded by the backend's
-#    sandbox guard. Flags that introduce OTHER targets out of band — ``-iL``
-#    (target list file), ``--excludefile``, or ``-iR`` (scan RANDOM internet
-#    hosts!) — would bypass that guard, so they are forbidden.
-# 3. NSE control: ``--script*`` is forbidden so a caller cannot pull in
-#    exploit/brute/dos categories that change the risk class beyond "scan". The
-#    presets deliberately do NOT use NSE; a curated allowlist can come later.
+#   1. nmap (GNU getopt) accepts any UNAMBIGUOUS ABBREVIATION of a long option, so a
+#      denylist of full names (``--proxies``) is trivially bypassed (``--proxi``).
+#   2. nmap treats ANY bare positional token as an additional scan target. Since the
+#      backend sandbox guard only inspects ``args["target"]``, a bare host smuggled in
+#      ``flags`` (``flags=["scanme.example"]``) would be scanned without ever being
+#      guarded — a full sandbox-guard bypass.
 #
-# Compared case-insensitively on the bare flag name (the part before any "=").
-DENYLISTED_FLAGS: frozenset[str] = frozenset(
+# So: every token in ``flags`` must be either an exact allowed bare flag, or an allowed
+# value-flag followed by a value matching its validator. Anything else — unknown/
+# abbreviated flags, NSE (``-sC``/``--script*``), aggregate ``-A``, privileged scans
+# (``-sS``/``-sU``/``-O``), file output (``-oN``…), egress/pivot (``--proxies``/``-b``),
+# and **bare positional targets** — is rejected before exec. Matching is case-sensitive
+# (nmap flags are: ``-sT`` connect ≠ ``-sS`` SYN), which is the safe direction.
+
+# Allowed flags that take NO value.
+_ALLOWED_BARE_FLAGS: frozenset[str] = frozenset(
     {
-        # filesystem output
-        "-on",
-        "-ox",
-        "-og",
-        "-oa",
-        "-os",
-        "--append-output",
-        "--stylesheet",
-        "--webxml",
-        # arbitrary data / state files
-        "--datadir",
-        "--resume",
-        # out-of-band / alternate targets (would bypass the sandbox guard)
-        "-il",
-        "-ir",
-        "--excludefile",
-        # egress / pivot redirection (route the scan through a third host):
-        # --proxies is an exfil/SSRF vector (cf. httpx -proxy); -b is an FTP-bounce
-        # scan that originates from and connects to an arbitrary relay host.
-        "--proxies",
-        "-b",
-        # NSE scripting (risk-class escalation)
-        "--script",
-        "--script-args",
-        "--script-args-file",
-        "--script-help",
-        "--script-updatedb",
-        "--script-trace",
+        "-Pn",  # skip host discovery
+        "-n",  # no DNS resolution
+        "-6",  # IPv6
+        "-sT",  # TCP connect scan (unprivileged) — the ONLY allowed scan type
+        "-sV",  # service/version detection
+        "-F",  # fast (fewer ports)
+        "--open",  # only show open ports
+        "--reason",  # show reason for state
+        "-T0",
+        "-T1",
+        "-T2",
+        "-T3",
+        "-T4",
+        "-T5",  # timing templates
+        "-v",
+        "-vv",
+        "-d",  # verbosity / debug
     }
 )
+
+# Allowed flags that consume the NEXT token (or an ``=value``) as a value; the value
+# must match the validator so a hostname can never be smuggled in as a "value".
+_ALLOWED_VALUE_FLAGS: dict[str, re.Pattern[str]] = {
+    "-p": re.compile(r"\A[0-9,\-]+\Z"),  # port spec: digits, commas, dashes
+    "--top-ports": re.compile(r"\A[0-9]+\Z"),
+    "--version-intensity": re.compile(r"\A[0-9]\Z"),
+    "--max-retries": re.compile(r"\A[0-9]+\Z"),
+    "--min-rate": re.compile(r"\A[0-9]+\Z"),
+    "--max-rate": re.compile(r"\A[0-9]+\Z"),
+    "--host-timeout": re.compile(r"\A[0-9]+(ms|s|m|h)?\Z"),
+}
+
+_MAX_TIMEOUT_SECONDS: float = 600.0
+_MIN_TIMEOUT_SECONDS: float = 1.0
+
+
+def _validate_flags(flags: list[str]) -> tuple[list[str], str | None]:
+    """Validate caller flags against the allowlist.
+
+    Returns ``(validated_flags, None)`` on success or ``([], error_message)`` on the
+    first offending token. Because every token must be a known flag or a validated
+    value, no bare positional can pass — so a caller cannot smuggle a second nmap
+    target past the single-``target`` sandbox guard.
+    """
+    validated: list[str] = []
+    i = 0
+    n = len(flags)
+    while i < n:
+        tok = flags[i]
+        if tok in _ALLOWED_BARE_FLAGS:
+            validated.append(tok)
+            i += 1
+            continue
+        # Long-option "--flag=value" form.
+        if tok.startswith("--") and "=" in tok:
+            name, _, val = tok.partition("=")
+            pattern = _ALLOWED_VALUE_FLAGS.get(name)
+            if pattern is not None and pattern.match(val):
+                validated.append(tok)
+                i += 1
+                continue
+            return [], f"disallowed or malformed flag: {tok!r}"
+        # Two-token "--flag value" / "-p value" form.
+        if tok in _ALLOWED_VALUE_FLAGS:
+            if i + 1 >= n:
+                return [], f"flag {tok!r} is missing its value"
+            val = flags[i + 1]
+            if not _ALLOWED_VALUE_FLAGS[tok].match(val):
+                return [], f"flag {tok!r} has a disallowed value: {val!r}"
+            validated.extend([tok, val])
+            i += 2
+            continue
+        # Unknown flag, abbreviation, or a bare positional target.
+        return [], f"disallowed flag or argument: {tok!r}"
+    return validated, None
+
 
 JSONRPC_METHOD_NOT_FOUND: int = -32601
 JSONRPC_PARSE_ERROR: int = -32700
@@ -182,21 +233,27 @@ async def _run_nmap(
     # Ensure every flag is a string; silently drop non-strings.
     flags: list[str] = [f for f in flags_raw if isinstance(f, str)]
 
-    # Reject capability-breaching / sandbox-bypassing / NSE flags (see DENYLISTED_FLAGS).
-    # Compared case-insensitively on the bare flag name (before any "=").
-    denied = [f for f in flags if f.split("=", 1)[0].lower() in DENYLISTED_FLAGS]
-    if denied:
+    # Allowlist-validate every flag (see _validate_flags). This both blocks
+    # capability/egress/NSE escape and prevents a bare positional from smuggling a
+    # second nmap target past the single-``target`` sandbox guard.
+    validated_flags, flag_error = _validate_flags(flags)
+    if flag_error is not None:
         return {
             "exit_code": 1,
             "stdout": "",
-            "stderr": f"run_nmap rejected disallowed flag(s): {' '.join(denied)}",
+            "stderr": f"run_nmap rejected {flag_error}",
         }
 
-    timeout_seconds: float = float(arguments.get("timeout_seconds", 120))
+    # Clamp the timeout (defense in depth — the manifest schema caps it, but a direct
+    # JSON-RPC caller could pass any value).
+    raw_timeout = float(arguments.get("timeout_seconds", 120))
+    timeout_seconds: float = max(_MIN_TIMEOUT_SECONDS, min(_MAX_TIMEOUT_SECONDS, raw_timeout))
 
-    # nmap takes its target(s) as positional args. stdin is routed from /dev/null
-    # so the child can never block on (or read) the MCP server's JSON-RPC stdin.
-    argv: list[str] = [_resolve_nmap_binary(), *flags, target]
+    # nmap takes its single target as the trailing positional arg; all flags are
+    # allowlist-validated above, so no extra target can be present. stdin is routed
+    # from /dev/null so the child can never block on (or read) the MCP server's stdin.
+    nmap_bin = _resolve_nmap_binary()
+    argv: list[str] = [nmap_bin, *validated_flags, target]
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -211,8 +268,7 @@ async def _run_nmap(
             "exit_code": 1,
             "stdout": "",
             "stderr": (
-                f"nmap binary not found at {_resolve_nmap_binary()!r}; install nmap "
-                f"or set ${NMAP_BIN_ENV}"
+                f"nmap binary not found at {nmap_bin!r}; install nmap or set ${NMAP_BIN_ENV}"
             ),
         }
     except OSError as exc:
