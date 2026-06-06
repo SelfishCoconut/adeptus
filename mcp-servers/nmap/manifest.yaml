@@ -1,0 +1,23 @@
+name: nmap
+tools:
+  - name: run_nmap
+    weight: heavy
+    capability_flags:
+      - network
+    presets:
+      - name: stealth
+        description: Slow top-100 TCP connect scan, no host discovery
+        args: {flags: ["-Pn", "-sT", "-T2", "--top-ports", "100"]}
+      - name: normal
+        description: Top-1000 TCP connect scan
+        args: {flags: ["-Pn", "-sT", "-T3", "--top-ports", "1000"]}
+      - name: aggressive
+        description: Top-1000 TCP connect scan with service/version detection
+        args: {flags: ["-Pn", "-sT", "-sV", "-T4", "--top-ports", "1000"]}
+    arg_schema:
+      type: object
+      required: [target]
+      properties:
+        target: {type: string, title: Target host or URL}
+        flags: {type: array, items: {type: string}, title: Extra flags}
+        timeout_seconds: {type: integer, minimum: 1, maximum: 600, default: 120, title: Timeout (s)}

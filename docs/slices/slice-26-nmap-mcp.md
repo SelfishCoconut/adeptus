@@ -77,8 +77,8 @@ tools:
         description: Top-1000 TCP connect scan
         args: {flags: ["-Pn", "-sT", "-T3", "--top-ports", "1000"]}
       - name: aggressive
-        description: Top-1000 connect scan with service/version + default NSE scripts
-        args: {flags: ["-Pn", "-sT", "-sV", "-T4", "--top-ports", "1000", "--script=default"]}
+        description: Top-1000 connect scan with service/version detection
+        args: {flags: ["-Pn", "-sT", "-sV", "-T4", "--top-ports", "1000"]}
     arg_schema:
       type: object
       required: [target]
@@ -157,8 +157,11 @@ Numbered continuously across the slice. Every commit subject cites `(task N)`.
   (`CAP_NET_RAW`), which the backend container may lack. *Mitigation:* every preset uses
   unprivileged `-sT` connect scan and omits `-O`; no capability change to the container.
 - **Risk 2 — NSE script danger.** `--script` can pull in `exploit`/`brute`/`dos`
-  categories that change the risk class beyond "aggressive scan". *Mitigation:* presets
-  pin `--script=default` only; task 2 denylists caller-supplied `--script`/`--script-args`.
+  categories that change the risk class beyond "aggressive scan". *Mitigation (refined
+  during impl):* the presets use **no** NSE at all (aggressive = `-sV` version detection
+  only), and the server **denylists all `--script*`** from callers. A curated
+  safe-category NSE allowlist can be added in a later slice. This keeps the denylist a
+  clean all-or-nothing boundary (no per-value allowlist to get wrong).
 - **Risk 3 — output volume / runtime.** Full scans are slow and verbose. *Mitigation:*
   `--top-ports` bounds the scan; 1 MB output cap; `timeout_seconds` (default 120, max 600)
   kills the process group; heavy-tool admission (Slice 05) serializes per host.
@@ -182,3 +185,4 @@ the binary resolver can't be PATH-shadowed.
 ## Progress
 
 (Leave empty at planning time.)
+- 2026-06-06T10:16:59Z — 1c37d96 docs(slice-26): nmap slice spec + plan re-scope to nmap only
