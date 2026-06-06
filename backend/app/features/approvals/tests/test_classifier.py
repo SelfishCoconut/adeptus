@@ -110,6 +110,27 @@ def test_aggressive_scan_tool_list_is_aggressive_scan() -> None:
     assert result.reasons == [ApprovalReason.AGGRESSIVE_SCAN]
 
 
+def test_run_nmap_heavy_is_aggressive_scan() -> None:
+    # Slice 26: nmap is weight=heavy, so every run gates as an aggressive scan.
+    result = classify(
+        _action(server="nmap", tool="run_nmap"),
+        tool_config=ToolConfig(weight="heavy", capability_flags=("network",)),
+    )
+    assert result.tier is ApprovalTier.REQUIRES_APPROVAL
+    assert result.reasons == [ApprovalReason.AGGRESSIVE_SCAN]
+
+
+def test_run_nmap_gates_via_tool_list_even_if_weight_relaxed() -> None:
+    # Belt-and-suspenders: "run_nmap" is in AGGRESSIVE_SCAN_TOOLS, so even a
+    # (mis)configured light-weight nmap still gates — proving the list entry matches
+    # the real tool name, not the bare category.
+    result = classify(
+        _action(server="nmap", tool="run_nmap"),
+        tool_config=ToolConfig(weight="light", capability_flags=("network",)),
+    )
+    assert result.reasons == [ApprovalReason.AGGRESSIVE_SCAN]
+
+
 # --- credential_attack ----------------------------------------------------------------
 
 
