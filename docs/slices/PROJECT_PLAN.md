@@ -214,7 +214,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §9.1 (Simple), §9.2
 - **Depends on**: 07
 - **Risky**: no
-- **Status**: todo
+- **Status**: done
 
 ### Slice 20: Findings advanced classifications
 - **Goal**: CVSS v3.1/v4 + OWASP Risk on advanced panel; MITRE ATT&CK tagging

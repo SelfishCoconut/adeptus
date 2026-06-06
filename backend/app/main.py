@@ -17,6 +17,7 @@ from app.features.autonomy.router import router as autonomy_router
 from app.features.chat.router import router as chat_router
 from app.features.engagements import events as engagement_events
 from app.features.engagements.router import router as engagements_router
+from app.features.findings.router import router as findings_router
 from app.features.graph import writer as graph_writer
 from app.features.graph.router import router as graph_router
 from app.features.health.router import router as health_router
@@ -139,6 +140,7 @@ def create_app() -> FastAPI:
     app.include_router(engagements_router)
     app.include_router(mcp_router)
     app.include_router(graph_router)
+    app.include_router(findings_router)
     app.include_router(audit_router)
     app.include_router(chat_router)
     app.include_router(personas_router)

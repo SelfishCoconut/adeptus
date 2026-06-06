@@ -18,6 +18,22 @@ def test_reserved_actions_present() -> None:
         assert reserved in {a.value for a in AuditAction}
 
 
+def test_finding_actions_in_enum_and_db_vocabulary() -> None:
+    # Slice 19: the five finding_* actions must be present in BOTH the StrEnum and the
+    # DB CHECK-constraint tuple (the constraint is widened by the slice migration).
+    finding_actions = (
+        "finding_created",
+        "finding_updated",
+        "finding_verification_changed",
+        "finding_remediation_changed",
+        "finding_deleted",
+    )
+    enum_values = {a.value for a in AuditAction}
+    for action in finding_actions:
+        assert action in enum_values
+        assert action in AUDIT_ACTIONS
+
+
 class _Row:
     """Stand-in for an ORM AuditEntry (exercises from_attributes)."""
 

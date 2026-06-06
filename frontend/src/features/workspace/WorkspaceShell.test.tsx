@@ -29,6 +29,12 @@ vi.mock('@/features/graph/components', () => ({
   ),
 }))
 
+vi.mock('@/features/findings/components', () => ({
+  FindingsPane: ({ engagementId }: { engagementId: string }) => (
+    <div data-testid="findings-pane" data-engagement-id={engagementId} />
+  ),
+}))
+
 vi.mock('@/features/audit/components/AuditPanel', () => ({
   AuditPanel: ({ engagementId }: { engagementId: string }) => (
     <div data-testid="audit-panel" data-engagement-id={engagementId} />
@@ -194,6 +200,30 @@ describe('WorkspaceShell', () => {
       expect(
         screen.getByText(/select an engagement to view the graph/i),
       ).toBeInTheDocument()
+    })
+
+    it('switches the right pane to FindingsPane when the Findings tab is clicked', async () => {
+      const user = userEvent.setup()
+      render(
+        <WorkspaceShell
+          username="alice"
+          role="admin"
+          onLogout={vi.fn()}
+          privacyMode="local_only"
+          engagementId={ENGAGEMENT_ID}
+        />,
+      )
+
+      // Graph is the default tab.
+      expect(screen.getByTestId('graph-pane')).toBeInTheDocument()
+      expect(screen.queryByTestId('findings-pane')).not.toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: 'Findings' }))
+
+      const pane = screen.getByTestId('findings-pane')
+      expect(pane).toBeInTheDocument()
+      expect(pane).toHaveAttribute('data-engagement-id', ENGAGEMENT_ID)
+      expect(screen.queryByTestId('graph-pane')).not.toBeInTheDocument()
     })
   })
 
