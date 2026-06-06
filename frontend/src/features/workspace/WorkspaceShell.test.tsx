@@ -41,6 +41,12 @@ vi.mock('@/features/approvals/components/ApprovalQueue', () => ({
   ),
 }))
 
+vi.mock('@/features/autonomy/components/AutonomyPanel', () => ({
+  AutonomyPanel: ({ engagementId }: { engagementId: string }) => (
+    <div data-testid="autonomy-panel" data-engagement-id={engagementId} />
+  ),
+}))
+
 vi.mock('@/features/chat/components/ChatPanel', () => ({
   ChatPanel: ({ engagementId }: { engagementId: string }) => (
     <div data-testid="chat-panel" data-engagement-id={engagementId} />
