@@ -15,6 +15,7 @@ from enum import StrEnum
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
 
 # Max description length (characters) — matches the contract's ``maxLength: 65536``.
 _DESCRIPTION_MAX_LEN = 64 * 1024  # 64 KB
@@ -94,8 +95,10 @@ class FindingUpdate(BaseModel):
     def at_least_one_field(self) -> "FindingUpdate":
         # model_fields_set captures the fields the client explicitly sent, so an
         # explicit ``node_id: null`` counts as "present" while an omitted field does not.
+        # PydanticCustomError (not a bare ValueError) keeps the error's ctx free of a
+        # raw exception object, so the core 422 handler can JSON-serialize exc.errors().
         if not self.model_fields_set:
-            raise ValueError("At least one field must be provided.")
+            raise PydanticCustomError("at_least_one_field", "At least one field must be provided.")
         return self
 
 
