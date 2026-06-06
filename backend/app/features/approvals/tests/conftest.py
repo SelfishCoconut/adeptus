@@ -38,6 +38,7 @@ from app.features.audit import models as audit_models
 from app.features.audit.hashing import GENESIS_HASH
 from app.features.auth import models as auth_models
 from app.features.auth.router import router as auth_router
+from app.features.autonomy import models as autonomy_models
 from app.features.chat import models as chat_models
 from app.features.engagements import models as eng_models
 from app.features.mcp import models as mcp_models
@@ -48,8 +49,15 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """Async SQLite in-memory session for approvals feature unit tests."""
     id_col: Column = approvals_models.ApprovalRequest.__table__.c.id  # type: ignore[assignment]
     id_col.default = ColumnDefault(uuid4)
+    # Slice 18: create_requests_for_turn reads autonomy_grants (get_active_reasons) to
+    # decide auto-approval, so the table must exist (empty ⇒ Slice 16/17 behaviour).
+    grant_id_col: Column = autonomy_models.AutonomyGrant.__table__.c.id  # type: ignore[assignment]
+    grant_id_col.default = ColumnDefault(uuid4)
 
-    tables = [approvals_models.ApprovalRequest.__table__]
+    tables = [
+        approvals_models.ApprovalRequest.__table__,
+        autonomy_models.AutonomyGrant.__table__,
+    ]
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(
@@ -77,6 +85,8 @@ def _patch_sqlite_columns() -> None:
         mcp_models.ToolRun,
         audit_models.AuditEntry,
         approvals_models.ApprovalRequest,
+        # Slice 18: the integration tests grant/revoke standing autonomy through the service.
+        autonomy_models.AutonomyGrant,
     ):
         id_col: Column = model.__table__.c.id  # type: ignore[assignment]
         id_col.default = ColumnDefault(uuid4)
@@ -96,6 +106,7 @@ _ROUTER_TABLES: list[Table] = [
         audit_models.AuditEntry,
         audit_models.AuditChainHead,
         approvals_models.ApprovalRequest,
+        autonomy_models.AutonomyGrant,
     )
 ]
 

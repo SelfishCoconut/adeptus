@@ -13,6 +13,7 @@ from app.features.approvals.router import router as approvals_router
 from app.features.audit.router import router as audit_router
 from app.features.auth import service as auth_service
 from app.features.auth.router import router as auth_router
+from app.features.autonomy.router import router as autonomy_router
 from app.features.chat.router import router as chat_router
 from app.features.engagements import events as engagement_events
 from app.features.engagements.router import router as engagements_router
@@ -142,6 +143,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(personas_router)
     app.include_router(approvals_router)
+    app.include_router(autonomy_router)
     return app
 
 

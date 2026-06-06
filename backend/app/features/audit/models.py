@@ -54,6 +54,10 @@ AUDIT_ACTIONS: tuple[str, ...] = (
     "approval_granted",
     "approval_rejected",
     "ai_call",
+    # Slice 18 — standing autonomy (delegation pattern, §5.2).
+    "approval_auto_granted",
+    "autonomy_granted",
+    "autonomy_revoked",
 )
 
 # 64 hex zeros — the genesis ``prev_hash`` and the empty-chain head pointer.

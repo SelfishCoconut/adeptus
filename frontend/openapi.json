@@ -2178,6 +2178,153 @@
           }
         }
       }
+    },
+    "/api/v1/engagements/{engagement_id}/autonomy-grants": {
+      "get": {
+        "tags": [
+          "autonomy"
+        ],
+        "summary": "List Autonomy Grants",
+        "description": "List the engagement's active standing-autonomy grants. Membership required (404).",
+        "operationId": "list_autonomy_grants",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AutonomyGrantRead"
+                  },
+                  "title": "Response List Autonomy Grants"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "autonomy"
+        ],
+        "summary": "Grant Autonomy",
+        "description": "Grant standing autonomy for one reason category (any member, \u00a75.2).",
+        "operationId": "grant_autonomy",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutonomyGrantCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutonomyGrantRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/autonomy-grants/{grant_id}": {
+      "delete": {
+        "tags": [
+          "autonomy"
+        ],
+        "summary": "Revoke Autonomy",
+        "description": "Revoke a standing-autonomy grant (any member). 404 if missing/already revoked.",
+        "operationId": "revoke_autonomy",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Grant Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2458,7 +2605,10 @@
           "graph_edge_deleted",
           "approval_granted",
           "approval_rejected",
-          "ai_call"
+          "ai_call",
+          "approval_auto_granted",
+          "autonomy_granted",
+          "autonomy_revoked"
         ],
         "title": "AuditAction",
         "description": "The audit action vocabulary (\u00a714). Mirrors ``models.AUDIT_ACTIONS`` exactly \u2014\nguarded by ``test_schemas.test_action_enum_matches_db_vocabulary``.\n\n``APPROVAL_GRANTED`` / ``APPROVAL_REJECTED`` (Slice 16, carry ``self_approved``) and\n``AI_CALL`` (Slice 11+) are reserved here with no caller in this slice."
@@ -2599,6 +2749,85 @@
         ],
         "title": "AuditPage",
         "description": "A page of audit entries with an opaque cursor for the next (older) page."
+      },
+      "AutonomyGrantCreate": {
+        "properties": {
+          "reason": {
+            "$ref": "#/components/schemas/DelegableReason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "AutonomyGrantCreate",
+        "description": "Request body to grant standing autonomy for one reason category.\n\n``reason`` is a :class:`DelegableReason`, so ``unclassified_manifest`` and unknown\nvalues are rejected by enum validation (422) at the contract boundary."
+      },
+      "AutonomyGrantRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "engagement_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Engagement Id"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/DelegableReason"
+          },
+          "granted_by_user_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Granted By User Id"
+          },
+          "granted_by_username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Granted By Username"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "engagement_id",
+          "reason",
+          "created_at"
+        ],
+        "title": "AutonomyGrantRead",
+        "description": "One standing-autonomy grant as exposed by the read/grant API.\n\n``granted_by_username`` is resolved at read time (not a DB column) and set as a\ntransient attribute by the service before ``model_validate``; it defaults to ``None``\nso a grant whose grantor was deleted (FK SET NULL) still validates."
       },
       "ChatMessageCreate": {
         "properties": {
@@ -2949,6 +3178,17 @@
         ],
         "title": "Claim",
         "description": "One AI claim flagged with a stated certainty percentage (\u00a75.3 uncertainty signaling).\n\n``certainty`` is bounded 0\u2013100 (the parser clamps out-of-range values before this model\nis constructed). ``node_id`` is the graph node the claim is about, if any \u2014 validated at\nfinalize against the engagement's live graph (foreign/unknown ids dropped, \u00a717.1) so the\nGraph-pane certainty badge never points at a foreign/hallucinated node. ``text`` is\nrendered verbatim (no redaction, \u00a75.5)."
+      },
+      "DelegableReason": {
+        "type": "string",
+        "enum": [
+          "target_write",
+          "aggressive_scan",
+          "credential_attack",
+          "out_of_scope"
+        ],
+        "title": "DelegableReason",
+        "description": "The reason categories a user may delegate standing autonomy for (\u00a75.2).\n\nExactly ``ApprovalReason`` minus ``unclassified_manifest`` (the un-manifested-tool\nfail-safe, which must always gate). Used as the request-body type so a non-delegable or\nunknown value fails standard enum validation (422) \u2014 cleanly, without a raising\nvalidator. Guarded against drift by ``test_schemas``."
       },
       "Edge": {
         "properties": {

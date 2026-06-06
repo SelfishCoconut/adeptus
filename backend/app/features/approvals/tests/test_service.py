@@ -23,6 +23,7 @@ from app.features.approvals.classifier import ToolConfig
 from app.features.approvals.schemas import ApprovalReason, ApprovalStatus, ProposedAction
 from app.features.audit.schemas import AuditAction
 from app.features.auth.models import User
+from app.features.autonomy import repository as autonomy_repo
 
 
 def _user(username: str = "alice", user_id: UUID | None = None) -> User:
@@ -521,3 +522,122 @@ async def test_decide_lost_race_raises_already_decided(
             )
     exec_run.assert_not_awaited()
     audit_record.assert_not_awaited()
+
+
+# --- create_requests_for_turn: standing autonomy (Slice 18) ---------------------------
+
+
+async def _grant(db: AsyncSession, *, engagement_id: UUID, reason: str) -> None:
+    """Insert an active standing-autonomy grant for the engagement."""
+    await autonomy_repo.create_grant(
+        db, engagement_id=engagement_id, reason=reason, granted_by_user_id=uuid4()
+    )
+    await db.commit()
+
+
+async def test_fully_covered_gated_command_auto_approves(
+    db_session: AsyncSession, eng_with_scope: AsyncMock, audit_record: AsyncMock
+) -> None:
+    eng = uuid4()
+    await _grant(db_session, engagement_id=eng, reason="aggressive_scan")
+    with _patch_tool_config(ToolConfig(weight="heavy")):  # heavy → aggressive_scan
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=eng,
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_action(tool="nmap")],
+        )
+    # Auto-approved: runs (returned for the chat pipeline), no pending card.
+    assert len(result.auto_approved) == 1
+    assert result.gated == []
+    assert result.autonomous == []
+    # Emitted an approval_auto_granted audit entry — NOT silently autonomous.
+    audit_record.assert_awaited_once()
+    assert _await_kwargs(audit_record)["action"] is AuditAction.APPROVAL_AUTO_GRANTED
+    # No pending approval_requests row was created.
+    rows, _ = await repo.list_for_engagement(db_session, engagement_id=eng)
+    assert rows == []
+
+
+async def test_partial_cover_still_gates(
+    db_session: AsyncSession, eng_with_scope: AsyncMock, audit_record: AsyncMock
+) -> None:
+    eng = uuid4()
+    await _grant(db_session, engagement_id=eng, reason="aggressive_scan")
+    # heavy (aggressive_scan) + target-write flag → TWO reasons; only one is granted.
+    with _patch_tool_config(ToolConfig(weight="heavy", capability_flags=("target-write",))):
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=eng,
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_action(tool="nmap")],
+        )
+    assert result.auto_approved == []
+    assert len(result.gated) == 1
+    audit_record.assert_not_awaited()  # no auto-grant audit for a gated command
+
+
+async def test_unclassified_manifest_never_auto_approves(
+    db_session: AsyncSession,
+    eng_with_scope: AsyncMock,
+    audit_record: AsyncMock,
+    resolve_username: AsyncMock,
+) -> None:
+    eng = uuid4()
+    # Even with an unrelated active grant, a weightless tool (unclassified_manifest) gates.
+    await _grant(db_session, engagement_id=eng, reason="aggressive_scan")
+    with _patch_tool_config(ToolConfig(weight=None)):
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=eng,
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_action(tool="weird")],
+        )
+    assert result.auto_approved == []
+    assert len(result.gated) == 1
+    assert ApprovalReason.UNCLASSIFIED_MANIFEST in result.gated[0].reasons
+
+
+async def test_revoked_grant_gates_again(
+    db_session: AsyncSession, eng_with_scope: AsyncMock, resolve_username: AsyncMock
+) -> None:
+    eng = uuid4()
+    grant = await autonomy_repo.create_grant(
+        db_session, engagement_id=eng, reason="aggressive_scan", granted_by_user_id=uuid4()
+    )
+    await db_session.commit()
+    await autonomy_repo.revoke(
+        db_session, engagement_id=eng, grant_id=cast(UUID, grant.id), revoked_by_user_id=uuid4()
+    )
+    await db_session.commit()
+    with _patch_tool_config(ToolConfig(weight="heavy")):
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=eng,
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_action(tool="nmap")],
+        )
+    assert result.auto_approved == []
+    assert len(result.gated) == 1
+
+
+async def test_out_of_scope_grant_auto_approves(
+    db_session: AsyncSession, eng_with_scope: AsyncMock, audit_record: AsyncMock
+) -> None:
+    eng = uuid4()
+    eng_with_scope.return_value = _eng("juice-shop")  # example.com is out of scope
+    await _grant(db_session, engagement_id=eng, reason="out_of_scope")
+    with _patch_tool_config(ToolConfig(weight="light", capability_flags=("network",))):
+        result = await service.create_requests_for_turn(
+            db_session,
+            engagement_id=eng,
+            chat_message_id=uuid4(),
+            initiator_user_id=uuid4(),
+            actions=[_target_action("http://example.com")],
+        )
+    assert len(result.auto_approved) == 1
+    assert result.gated == []

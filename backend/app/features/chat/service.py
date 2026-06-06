@@ -760,11 +760,23 @@ async def _finalize_complete_turn(
             proposed_actions=len(actions),
             gated_actions=len(gated_cards),
         )
+        # Autonomous commands AND Slice-18 auto-approved commands (standing autonomy)
+        # both run immediately via the same pipeline; the auto-approved ones already
+        # emitted an approval_auto_granted audit entry in create_requests_for_turn. They
+        # run in two batches so each card carries the right marker (ungated vs standing
+        # autonomy) for the chat indicator.
         autonomous_cards = await _run_autonomous_actions(
             session,
             engagement_id=engagement_id,
             initiator_user_id=actor_user_id,
             actions=classified.autonomous,
+        )
+        autonomous_cards += await _run_autonomous_actions(
+            session,
+            engagement_id=engagement_id,
+            initiator_user_id=actor_user_id,
+            actions=classified.auto_approved,
+            auto_approved=True,
         )
     await session.commit()
     return plan, claims, autonomous_cards, gated_cards
@@ -776,12 +788,14 @@ async def _run_autonomous_actions(
     engagement_id: UUID,
     initiator_user_id: UUID,
     actions: list[ProposedAction],
+    auto_approved: bool = False,
 ) -> list[AutonomousAction]:
     """Execute each autonomous (non-gated) command via the existing tool-run pipeline.
 
     Attributed to the INITIATOR (Resolved decision 3) — the AI runs the command on the
     turn owner's behalf. Returns the "running automatically" cards (each carrying the run
-    id already handed to the pipeline) for the ``proposed_action`` WS frames.
+    id already handed to the pipeline) for the ``proposed_action`` WS frames. ``auto_approved``
+    marks Slice-18 standing-autonomy runs so the frontend can distinguish them (§5.2).
     """
     cards: list[AutonomousAction] = []
     for action in actions:
@@ -804,6 +818,7 @@ async def _run_autonomous_actions(
                 preset_name=action.preset_name,
                 rationale=action.rationale,
                 tool_run_id=run.tool_run_id,
+                auto_approved=auto_approved,
             )
         )
     return cards

@@ -14,6 +14,7 @@ from app.core.db import Base
 from app.features.approvals import models as _approvals_models  # noqa: F401
 from app.features.audit import models as _audit_models  # noqa: F401
 from app.features.auth import models as _auth_models  # noqa: F401
+from app.features.autonomy import models as _autonomy_models  # noqa: F401
 from app.features.chat import models as _chat_models  # noqa: F401
 from app.features.engagements import models as _engagements_models  # noqa: F401
 from app.features.graph import models as _graph_models  # noqa: F401

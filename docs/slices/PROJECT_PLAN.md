@@ -199,11 +199,11 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Status**: done
 
 ### Slice 18: Delegation pattern (standing autonomy)
-- **Goal**: "Always approve dedup" or "always approve light recon" toggles for the engagement
+- **Goal**: Per-engagement standing-autonomy grants for a gate-reason category; covered commands auto-approve (audited, revocable)
 - **Requirements**: §5.2 (delegation), §17.3
 - **Depends on**: 16
-- **Risky**: no
-- **Status**: todo
+- **Risky**: yes (weakens the approval gate — step-gated + security review)
+- **Status**: done
 
 ---
 

@@ -1844,11 +1844,14 @@ def _mock_classify(
     *,
     autonomous: list[ProposedAction] | None = None,
     gated: list[ApprovalRequestRead] | None = None,
+    auto_approved: list[ProposedAction] | None = None,
 ) -> AsyncMock:
     from app.features.approvals.service import ClassifiedTurnResult
 
     mock = AsyncMock(
-        return_value=ClassifiedTurnResult(autonomous=autonomous or [], gated=gated or [])
+        return_value=ClassifiedTurnResult(
+            autonomous=autonomous or [], gated=gated or [], auto_approved=auto_approved or []
+        )
     )
     monkeypatch.setattr(service.approvals_service, "create_requests_for_turn", mock)
     return mock
@@ -1985,6 +1988,51 @@ async def test_autonomous_action_runs_immediately_and_emits_frame(
     assert len(auto_frames) == 1
     card = auto_frames[0].autonomous_action
     assert card is not None and card.tool_run_id == run_id
+    # An ungated autonomous command is NOT a standing-autonomy run.
+    assert card.auto_approved is False
+
+
+@pytest.mark.asyncio
+async def test_auto_approved_action_runs_like_autonomous(
+    db_factory: async_sessionmaker[AsyncSession],
+    mock_audit_record: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slice 18: a standing-autonomy auto-approved action executes via the run pipeline
+    (attributed to the initiator) and emits a running card — same path as autonomous."""
+    from types import SimpleNamespace
+
+    from app.features.approvals.schemas import ProposedAction
+
+    monkeypatch.setattr(
+        service.ollama_client,
+        "stream_chat",
+        _fake_stream_with_tool_call(["x"], server="nmap", tool="run_nmap"),
+    )
+    auto_approved = [
+        ProposedAction(
+            server_name="nmap",
+            tool_name="run_nmap",
+            args={"target": "juice-shop"},
+            rationale="scan",
+        )
+    ]
+    _mock_classify(service, monkeypatch, auto_approved=auto_approved)
+    run_id = uuid4()
+    exec_mock = AsyncMock(return_value=SimpleNamespace(tool_run_id=run_id))
+    monkeypatch.setattr(service.mcp_service, "execute_tool_run", exec_mock)
+    message = await _seed_pending(db_factory)
+
+    chunks = [c async for c in service.stream_assistant_reply(message=message)]
+
+    exec_mock.assert_awaited_once()
+    assert _akw(exec_mock)["user_id"] == cast(UUID, message.user_id)
+    auto_frames = [c for c in chunks if c.type == "proposed_action" and c.autonomous_action]
+    assert len(auto_frames) == 1
+    card = auto_frames[0].autonomous_action
+    assert card is not None and card.tool_run_id == run_id
+    # Marked as standing-autonomy so the frontend shows the distinct indicator (§5.2).
+    assert card.auto_approved is True
 
 
 @pytest.mark.asyncio

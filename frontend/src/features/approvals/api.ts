@@ -16,6 +16,12 @@ export interface AutonomousAction {
   preset_name: string | null
   rationale: string | null
   tool_run_id: string
+  /**
+   * Slice 18 (§5.2): true when this command ran auto-approved under a standing-autonomy
+   * grant (an `approval_auto_granted` audit entry exists), false for an ungated autonomous
+   * command. Drives the "auto-approved · standing autonomy" indicator vs "running automatically".
+   */
+  auto_approved?: boolean
 }
 
 // --- Query keys ---
