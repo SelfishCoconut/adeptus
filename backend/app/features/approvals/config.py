@@ -57,7 +57,10 @@ TARGET_WRITE_TOOLS: frozenset[str] = _env_set(
 
 AGGRESSIVE_SCAN_TOOLS: frozenset[str] = _env_set(
     "ADEPTUS_AGGRESSIVE_SCAN_TOOLS",
-    frozenset({"masscan"}),
+    # Matched against ``action.tool_name`` (and ``server/tool``), so the entry is the
+    # manifest tool name ``run_nmap``, not the category. nmap's ``weight=heavy`` already
+    # gates it; this is belt-and-suspenders if the weight is ever relaxed.
+    frozenset({"masscan", "run_nmap", "nmap/run_nmap"}),
 )
 
 CREDENTIAL_ATTACK_TOOLS: frozenset[str] = _env_set(

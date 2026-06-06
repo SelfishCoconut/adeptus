@@ -116,11 +116,19 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Risky**: yes (audit log integrity)
 - **Status**: done
 
-### Slice 26: Heavy tools — nmap + gobuster MCPs
-- **Goal**: Run nmap against sandbox with stealth/normal/aggressive presets; gobuster wired in
-- **Requirements**: §6.4 (nmap, gobuster), §6.2 (presets)
+### Slice 26: Heavy tool — nmap MCP
+- **Goal**: Run nmap against sandbox with stealth/normal/aggressive presets, gated via the approval pipeline
+- **Requirements**: §6.4 (nmap), §6.2 (presets)
 - **Depends on**: 06
-- **Risky**: no
+- **Risky**: yes (MCP exec + approval classification)
+- **Status**: done
+- **Note**: Re-scoped 2026-06-06 from "nmap + gobuster" to nmap only; gobuster split to Slice 26b.
+
+### Slice 26b: gobuster MCP
+- **Goal**: Wrap gobuster (dir/dns modes) as an in-tree MCP server with presets
+- **Requirements**: §6.4 (gobuster), §6.2 (presets)
+- **Depends on**: 26
+- **Risky**: yes (MCP exec)
 - **Status**: todo
 
 ### Slice 27: Background tasks + completion notifications
