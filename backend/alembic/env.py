@@ -17,6 +17,7 @@ from app.features.auth import models as _auth_models  # noqa: F401
 from app.features.autonomy import models as _autonomy_models  # noqa: F401
 from app.features.chat import models as _chat_models  # noqa: F401
 from app.features.engagements import models as _engagements_models  # noqa: F401
+from app.features.findings import models as _findings_models  # noqa: F401
 from app.features.graph import models as _graph_models  # noqa: F401
 from app.features.mcp import models as _mcp_models  # noqa: F401
 from app.features.personas import models as _personas_models  # noqa: F401
