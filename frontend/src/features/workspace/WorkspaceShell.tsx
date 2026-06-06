@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ModeToggle } from '@/components/theme/ModeToggle'
 import type { PrivacyMode } from '@/shared/api'
@@ -5,6 +6,7 @@ import { PrivacyModeBanner } from './components/PrivacyModeBanner'
 import { HealthIndicator } from './HealthIndicator'
 import { ToolRunnerPanel } from '@/features/mcp/components/ToolRunnerPanel'
 import { GraphPane } from '@/features/graph/components'
+import { FindingsPane } from '@/features/findings/components'
 import { ApprovalQueue } from '@/features/approvals/components/ApprovalQueue'
 import { AutonomyPanel } from '@/features/autonomy/components/AutonomyPanel'
 import { AuditPanel } from '@/features/audit/components/AuditPanel'
@@ -36,6 +38,9 @@ export function WorkspaceShell({
   // onto the graph pane without either feature depending on the other (ADR-0001 / §8.2).
   const certaintyByNode = useCertaintyByNode(engagementId)
   const threshold = useLowConfidenceThreshold(engagementId)
+
+  // Right-pane tab: the live graph (default) or the engagement's findings (Slice 19).
+  const [rightTab, setRightTab] = useState<'graph' | 'findings'>('graph')
 
   return (
     <div className="flex h-svh flex-col bg-background text-foreground">
@@ -71,21 +76,51 @@ export function WorkspaceShell({
             </div>
           )}
         </section>
-        {/* Right pane: the live force-directed graph (§11.2). GraphPane renders
-            the interactive Cytoscape canvas (slice 08), with a List/Graph toggle. */}
+        {/* Right pane: the live force-directed graph (§11.2) and the engagement's
+            findings (§9, Slice 19), switched by a tab toggle. GraphPane renders the
+            interactive Cytoscape canvas (slice 08); FindingsPane the findings table. */}
         <section aria-label="Graph" className="overflow-y-auto bg-background p-4">
-          <h2 className="mb-3 text-sm font-medium text-muted-foreground">Graph</h2>
           {engagementId ? (
-            <GraphPane
-              engagementId={engagementId}
-              nodeAccessory={(nodeId) => (
-                <NodeCertaintyBadge certainty={certaintyByNode.get(nodeId)} threshold={threshold} />
+            <div className="flex flex-col gap-3">
+              <div role="group" aria-label="Workspace right pane" className="flex items-center gap-1">
+                <Button
+                  variant={rightTab === 'graph' ? 'default' : 'outline'}
+                  size="sm"
+                  aria-pressed={rightTab === 'graph'}
+                  onClick={() => setRightTab('graph')}
+                >
+                  Graph
+                </Button>
+                <Button
+                  variant={rightTab === 'findings' ? 'default' : 'outline'}
+                  size="sm"
+                  aria-pressed={rightTab === 'findings'}
+                  onClick={() => setRightTab('findings')}
+                >
+                  Findings
+                </Button>
+              </div>
+              {rightTab === 'graph' ? (
+                <GraphPane
+                  engagementId={engagementId}
+                  nodeAccessory={(nodeId) => (
+                    <NodeCertaintyBadge
+                      certainty={certaintyByNode.get(nodeId)}
+                      threshold={threshold}
+                    />
+                  )}
+                />
+              ) : (
+                <FindingsPane engagementId={engagementId} />
               )}
-            />
+            </div>
           ) : (
-            <p className="text-sm text-muted-foreground">
-              Select an engagement to view the graph.
-            </p>
+            <>
+              <h2 className="mb-3 text-sm font-medium text-muted-foreground">Graph</h2>
+              <p className="text-sm text-muted-foreground">
+                Select an engagement to view the graph.
+              </p>
+            </>
           )}
         </section>
         <section aria-label="Console" className="col-span-2 overflow-y-auto bg-background p-4">
