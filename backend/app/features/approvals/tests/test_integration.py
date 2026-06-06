@@ -30,6 +30,7 @@ from app.features.audit import verify as audit_verify
 from app.features.audit.models import AuditEntry
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
+from app.features.autonomy import service as autonomy_service
 from app.features.engagements import repository as eng_repo
 
 pytestmark = pytest.mark.integration
@@ -487,3 +488,129 @@ async def test_audit_chain_intact_after_out_of_scope_decisions(
         ok, verified, broke = await audit_verify.verify(s)
     assert ok is True and broke is None
     assert verified >= 2
+
+
+# --- Slice 18: standing autonomy — grant → auto-approve → revoke → gate -----------------
+
+
+async def _propose_aggressive(
+    factory: async_sessionmaker[AsyncSession], *, eng_id: UUID, initiator_id: UUID
+) -> service.ClassifiedTurnResult:
+    """Drive the real classify→gate path for an aggressive_scan (heavy) command."""
+    async with factory() as s:
+        with patch.object(service, "_resolve_tool_config", return_value=ToolConfig(weight="heavy")):
+            result = await service.create_requests_for_turn(
+                s,
+                engagement_id=eng_id,
+                chat_message_id=uuid4(),
+                initiator_user_id=initiator_id,
+                actions=[
+                    ProposedAction(
+                        server_name="nmap", tool_name="run_nmap", args={"target": "juice-shop"}
+                    )
+                ],
+            )
+        await s.commit()
+        return result
+
+
+async def test_standing_autonomy_auto_approves_then_revoke_regates(
+    app_and_factory: AppFactory,
+) -> None:
+    """The headline Slice-18 cross-feature property: a grant makes a fully-covered gated
+    command auto-approve (audited, no human row) on the next turn, and a revoke restores the
+    human gate on the turn after. The auto-approved command's *execution* is the chat
+    service's job (proven in chat's unit tests); here we prove the approvals short-circuit,
+    the audit trail, and that revoke is effective immediately — all on one intact chain (§14).
+    """
+    _app, factory, _exec = app_and_factory
+    initiator = await _user(factory, "owner")
+    # Scope matches the proposed target so aggressive_scan is the command's SOLE reason
+    # (an out-of-scope target would add OUT_OF_SCOPE and AND-coverage would keep it gated).
+    eng_id = await _seed_engagement_with_scope(factory, initiator, "juice-shop")
+    requester = cast(User, SimpleNamespace(id=initiator, username="owner"))
+
+    # Baseline — no grant: an aggressive_scan gates (a human card, no auto-approve).
+    baseline = await _propose_aggressive(factory, eng_id=eng_id, initiator_id=initiator)
+    assert len(baseline.gated) == 1
+    assert baseline.auto_approved == []
+
+    # Grant standing autonomy for aggressive_scan via the real service (emits autonomy_granted).
+    async with factory() as s:
+        g = await autonomy_service.grant(
+            s, engagement_id=eng_id, requester=requester, reason=ApprovalReason.AGGRESSIVE_SCAN
+        )
+    assert await _count_audit(factory, "autonomy_granted") == 1
+
+    # Next aggressive_scan auto-approves: NO new gated row, the action is returned to run, and
+    # exactly one approval_auto_granted audit entry is woven in.
+    covered = await _propose_aggressive(factory, eng_id=eng_id, initiator_id=initiator)
+    assert covered.gated == []
+    assert len(covered.auto_approved) == 1
+    assert await _count_audit(factory, "approval_auto_granted") == 1
+    # Only the baseline pending row exists — the auto-approved command created none.
+    async with factory() as s:
+        rows, _ = await repo.list_for_engagement(s, engagement_id=eng_id)
+    assert len(rows) == 1
+
+    # Revoke (emits autonomy_revoked) → the very next aggressive_scan gates again.
+    async with factory() as s:
+        await autonomy_service.revoke(
+            s, engagement_id=eng_id, grant_id=cast(UUID, g.id), requester=requester
+        )
+    assert await _count_audit(factory, "autonomy_revoked") == 1
+
+    after = await _propose_aggressive(factory, eng_id=eng_id, initiator_id=initiator)
+    assert len(after.gated) == 1
+    assert after.auto_approved == []
+    # approval_auto_granted did NOT fire a second time (the revoke re-gated the command).
+    assert await _count_audit(factory, "approval_auto_granted") == 1
+
+    # The whole grant→auto→revoke→gate flow leaves the hash chain intact (§14).
+    async with factory() as s:
+        ok, _verified, broke = await audit_verify.verify(s)
+    assert ok is True and broke is None
+
+
+async def test_partial_cover_still_gates_under_grant(app_and_factory: AppFactory) -> None:
+    """AND-coverage (Risk 1): a command carrying a second, un-granted reason still gates even
+    though one of its reasons is delegated — a delegated category can't smuggle another."""
+    _app, factory, _exec = app_and_factory
+    initiator = await _user(factory, "owner")
+    # Scope set so an out-of-scope target adds the OUT_OF_SCOPE reason on top of aggressive_scan.
+    async with factory() as s:
+        eng = await eng_repo.create_engagement(
+            s, name="Eng", scope="juice-shop", client_info=None, owner_id=initiator
+        )
+        await s.commit()
+        await s.refresh(eng)
+        eng_id = cast(UUID, eng.id)
+    requester = cast(User, SimpleNamespace(id=initiator, username="owner"))
+
+    async with factory() as s:
+        await autonomy_service.grant(
+            s, engagement_id=eng_id, requester=requester, reason=ApprovalReason.AGGRESSIVE_SCAN
+        )
+
+    async with factory() as s:
+        with patch.object(service, "_resolve_tool_config", return_value=ToolConfig(weight="heavy")):
+            result = await service.create_requests_for_turn(
+                s,
+                engagement_id=eng_id,
+                chat_message_id=uuid4(),
+                initiator_user_id=initiator,
+                actions=[
+                    ProposedAction(
+                        server_name="nmap",
+                        tool_name="run_nmap",
+                        args={"target": "http://evil.example"},
+                    )
+                ],
+            )
+        await s.commit()
+    # aggressive_scan is granted but out_of_scope is not → the command still gates.
+    assert result.auto_approved == []
+    assert len(result.gated) == 1
+    reasons = set(result.gated[0].reasons)
+    assert ApprovalReason.AGGRESSIVE_SCAN in reasons
+    assert ApprovalReason.OUT_OF_SCOPE in reasons

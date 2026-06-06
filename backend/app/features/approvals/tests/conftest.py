@@ -85,6 +85,8 @@ def _patch_sqlite_columns() -> None:
         mcp_models.ToolRun,
         audit_models.AuditEntry,
         approvals_models.ApprovalRequest,
+        # Slice 18: the integration tests grant/revoke standing autonomy through the service.
+        autonomy_models.AutonomyGrant,
     ):
         id_col: Column = model.__table__.c.id  # type: ignore[assignment]
         id_col.default = ColumnDefault(uuid4)
@@ -104,6 +106,7 @@ _ROUTER_TABLES: list[Table] = [
         audit_models.AuditEntry,
         audit_models.AuditChainHead,
         approvals_models.ApprovalRequest,
+        autonomy_models.AutonomyGrant,
     )
 ]
 
