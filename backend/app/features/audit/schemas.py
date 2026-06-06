@@ -37,6 +37,11 @@ class AuditAction(StrEnum):
     APPROVAL_GRANTED = "approval_granted"
     APPROVAL_REJECTED = "approval_rejected"
     AI_CALL = "ai_call"
+    # Slice 18 — standing autonomy: a command auto-approved by an active grant, plus the
+    # grant/revoke lifecycle events. ``approval_auto_granted`` carries ``self_approved``.
+    APPROVAL_AUTO_GRANTED = "approval_auto_granted"
+    AUTONOMY_GRANTED = "autonomy_granted"
+    AUTONOMY_REVOKED = "autonomy_revoked"
 
 
 class AuditEntryRead(BaseModel):
