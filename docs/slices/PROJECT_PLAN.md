@@ -203,7 +203,7 @@ Source of truth for vertical slice ordering. Mirrored to GitHub Issues at finish
 - **Requirements**: §5.2 (delegation), §17.3
 - **Depends on**: 16
 - **Risky**: yes (weakens the approval gate — step-gated + security review)
-- **Status**: in-progress
+- **Status**: done
 
 ---
 

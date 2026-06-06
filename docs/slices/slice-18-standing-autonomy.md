@@ -2,7 +2,7 @@
 
 **Branch**: `slice-18-standing-autonomy`
 **GitHub Issue**: #51
-**Status**: in-progress
+**Status**: done
 **Risky**: yes (approval flow / human-in-the-loop weakening — step-gated + security review)
 
 ---
