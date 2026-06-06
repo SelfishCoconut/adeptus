@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
 import sys
 from collections.abc import Callable
@@ -45,6 +46,38 @@ from typing import Any
 
 MAX_OUTPUT_BYTES: int = 1_048_576  # 1 MB
 TRUNCATION_SENTINEL: str = "\n[output truncated at 1 MB]"
+
+# Binary resolution -----------------------------------------------------------
+# We invoke the ProjectDiscovery httpx CLI (the recon tool), installed at the
+# absolute path below by the backend Dockerfile. We must NOT resolve a bare
+# "httpx" via PATH: the backend depends on the Python `httpx` *library*, whose
+# console-script stub at ``<venv>/bin/httpx`` shadows the real binary under
+# ``uv run`` (the venv is first on PATH). That stub is an HTTP client, not the
+# recon tool, so a bare "httpx" runs the wrong program and every tool call
+# fails. Resolve by absolute path, overridable via $ADEPTUS_HTTPX_BIN.
+HTTPX_BIN_ENV: str = "ADEPTUS_HTTPX_BIN"
+DEFAULT_HTTPX_BIN: str = "/usr/local/bin/httpx"
+
+
+def _resolve_httpx_binary() -> str:
+    """Return the path to the ProjectDiscovery httpx binary.
+
+    Resolution order (chosen so the venv's Python-httpx CLI stub can never be
+    picked up in the container, where ``DEFAULT_HTTPX_BIN`` always exists):
+
+    1. ``$ADEPTUS_HTTPX_BIN`` if set non-empty — explicit operator override.
+    2. ``DEFAULT_HTTPX_BIN`` if it exists on disk — the Dockerfile install path.
+    3. ``shutil.which("httpx")`` — last resort for bare dev boxes that put the
+       real binary elsewhere on PATH; falls back to ``DEFAULT_HTTPX_BIN`` (and a
+       clear FileNotFoundError downstream) when nothing is found.
+    """
+    override = os.environ.get(HTTPX_BIN_ENV)
+    if override:
+        return override
+    if os.path.exists(DEFAULT_HTTPX_BIN):
+        return DEFAULT_HTTPX_BIN
+    return shutil.which("httpx") or DEFAULT_HTTPX_BIN
+
 
 # Flags that would let a caller exceed the server's declared capabilities
 # (capability_flags: [network]) or open an exfiltration path. The manifest
@@ -147,11 +180,17 @@ async def _run_httpx(
 
     timeout_seconds: float = float(arguments.get("timeout_seconds", 30))
 
-    argv: list[str] = ["httpx", *flags, target]
+    # ProjectDiscovery httpx takes its target via ``-u`` (or a ``-l`` list, or
+    # stdin) — a bare positional target is IGNORED and httpx then blocks reading
+    # targets from stdin. Pass the single target with ``-u`` and route the child's
+    # stdin from /dev/null so it can never hang on (or read) the MCP server's own
+    # JSON-RPC stdin stream.
+    argv: list[str] = [_resolve_httpx_binary(), *flags, "-u", target]
 
     try:
         process = await asyncio.create_subprocess_exec(
             *argv,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -160,7 +199,10 @@ async def _run_httpx(
         return {
             "exit_code": 1,
             "stdout": "",
-            "stderr": "httpx binary not found; ensure httpx is installed and on PATH",
+            "stderr": (
+                f"httpx binary not found at {_resolve_httpx_binary()!r}; install the "
+                f"ProjectDiscovery httpx CLI or set ${HTTPX_BIN_ENV}"
+            ),
         }
     except OSError as exc:
         return {
