@@ -1412,6 +1412,401 @@
         }
       }
     },
+    "/api/v1/engagements/{engagement_id}/findings": {
+      "get": {
+        "tags": [
+          "findings"
+        ],
+        "summary": "List Findings",
+        "description": "List the engagement's findings (newest-first).\n\nMembership-gated (\u00a717.1 \u2014 non-member returns 404). Read-only path: archived\nengagements are accessible. ``include_deleted`` surfaces soft-deleted findings.",
+        "operationId": "list_findings",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "include_deleted",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Deleted"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindingList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "findings"
+        ],
+        "summary": "Create Finding",
+        "description": "Create a finding with a Simple severity (defaults unverified/open).\n\nMembership-gated. Returns 409 for archived engagements; 404 when a given\nnode_id is not a live node in this engagement; 422 for invalid body.",
+        "operationId": "create_finding",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FindingCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/findings/{finding_id}": {
+      "get": {
+        "tags": [
+          "findings"
+        ],
+        "summary": "Get Finding",
+        "description": "Get a single finding's detail.\n\nMembership-gated. Read-only path: archived engagements are accessible.\nReturns 404 when the finding is not found or in another engagement.",
+        "operationId": "get_finding",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "finding_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Finding Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "findings"
+        ],
+        "summary": "Update Finding",
+        "description": "Update a finding's title, description, severity, and/or node link.\n\nMembership-gated. Returns 409 for archived engagements; 404 when the finding\nor a given node_id is not found; 422 for an empty/invalid body.",
+        "operationId": "update_finding",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "finding_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Finding Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FindingUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "findings"
+        ],
+        "summary": "Delete Finding",
+        "description": "Soft-delete a finding (recoverable via history).\n\nReturns 204 on success. Membership-gated. Returns 409 for archived\nengagements; 404 when the finding is not found.",
+        "operationId": "delete_finding",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "finding_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Finding Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/findings/{finding_id}/verification": {
+      "patch": {
+        "tags": [
+          "findings"
+        ],
+        "summary": "Set Finding Verification",
+        "description": "Set verification status (unverified | verified | false_positive).\n\nMembership-gated. Returns 409 for archived engagements; 404 when not found;\n422 for an invalid status value.",
+        "operationId": "set_finding_verification",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "finding_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Finding Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerificationUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engagements/{engagement_id}/findings/{finding_id}/remediation": {
+      "patch": {
+        "tags": [
+          "findings"
+        ],
+        "summary": "Set Finding Remediation",
+        "description": "Set remediation status (open | fixed | risk_accepted).\n\nMembership-gated. Returns 409 for archived engagements; 404 when not found;\n422 for an invalid status value.",
+        "operationId": "set_finding_remediation",
+        "parameters": [
+          {
+            "name": "engagement_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Engagement Id"
+            }
+          },
+          {
+            "name": "finding_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Finding Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemediationUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "tags": [
@@ -2608,7 +3003,12 @@
           "ai_call",
           "approval_auto_granted",
           "autonomy_granted",
-          "autonomy_revoked"
+          "autonomy_revoked",
+          "finding_created",
+          "finding_updated",
+          "finding_verification_changed",
+          "finding_remediation_changed",
+          "finding_deleted"
         ],
         "title": "AuditAction",
         "description": "The audit action vocabulary (\u00a714). Mirrors ``models.AUDIT_ACTIONS`` exactly \u2014\nguarded by ``test_schemas.test_action_enum_matches_db_vocabulary``.\n\n``APPROVAL_GRANTED`` / ``APPROVAL_REJECTED`` (Slice 16, carry ``self_approved``) and\n``AI_CALL`` (Slice 11+) are reserved here with no caller in this slice."
@@ -3586,6 +3986,188 @@
         "title": "EntityKind",
         "description": "Whether an undo-stack entry targets a node or an edge."
       },
+      "Finding": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "engagement_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Engagement Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity"
+          },
+          "verification_status": {
+            "$ref": "#/components/schemas/VerificationStatus"
+          },
+          "remediation_status": {
+            "$ref": "#/components/schemas/RemediationStatus"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "engagement_id",
+          "title",
+          "description",
+          "severity",
+          "verification_status",
+          "remediation_status",
+          "node_id",
+          "deleted",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "Finding",
+        "description": "Response model for a finding (maps from the ORM row, ``from_attributes``)."
+      },
+      "FindingCreate": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Description",
+            "default": ""
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "title",
+          "severity"
+        ],
+        "title": "FindingCreate",
+        "description": "Request body for POST .../findings.\n\n``severity`` is required (no default) so the generated client never forces it\nawkwardly. ``description`` defaults to \"\" and ``node_id`` is optional \u2014 a\nfinding can exist before its graph node is mapped (\u00a78.1)."
+      },
+      "FindingList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "FindingList",
+        "description": "A list of findings (newest-first)."
+      },
+      "FindingUpdate": {
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 65536
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "severity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Severity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          }
+        },
+        "type": "object",
+        "title": "FindingUpdate",
+        "description": "Request body for PATCH .../findings/{finding_id}.\n\nAt least one field must be present. ``node_id`` distinguishes three cases via\n``model_fields_set`` (Risk 4):\n\n  * omitted          \u2192 leave the link unchanged\n  * ``\"node_id\": null``  \u2192 unlink (set the FK to NULL)\n  * ``\"node_id\": <uuid>``\u2192 relink (validated against the engagement's nodes)\n\nThe service inspects ``model_fields_set`` to apply only the fields the caller\nactually sent, so a ``null`` node_id is never confused with an omitted one."
+      },
       "GraphHistory": {
         "properties": {
           "deleted_nodes": {
@@ -4222,6 +4804,29 @@
         "title": "QueuedRun",
         "description": "A single run waiting for admission in the FIFO queue.\n\nReturned as part of ``ToolQueueSnapshot``; the ``position`` field is\n1-based (1 = next to admit).  ``target_host`` is ``None`` for tools that\ntake no ``target`` arg (they acquire only a slot, no host lock).\n``enqueued_at`` is the wall-clock time the ticket was created \u2014 it lives\nin the in-process queue only and is NOT persisted to the DB."
       },
+      "RemediationStatus": {
+        "type": "string",
+        "enum": [
+          "open",
+          "fixed",
+          "risk_accepted"
+        ],
+        "title": "RemediationStatus",
+        "description": "Remediation lifecycle (\u00a79.2). Defaults to ``open`` on create. Stays mutable\nfor the retest workflow (Slice 25); free transitions (Decision 3)."
+      },
+      "RemediationUpdate": {
+        "properties": {
+          "remediation_status": {
+            "$ref": "#/components/schemas/RemediationStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "remediation_status"
+        ],
+        "title": "RemediationUpdate",
+        "description": "Request body for PATCH .../findings/{finding_id}/remediation."
+      },
       "SendChatMessageResult": {
         "properties": {
           "user_message": {
@@ -4238,6 +4843,18 @@
         ],
         "title": "SendChatMessageResult",
         "description": "Result of POST .../chat/messages: the persisted user message plus a ``pending``\nassistant placeholder. Stream the assistant reply via WS using its id."
+      },
+      "Severity": {
+        "type": "string",
+        "enum": [
+          "critical",
+          "high",
+          "medium",
+          "low",
+          "info"
+        ],
+        "title": "Severity",
+        "description": "Simple primary classification (\u00a79.1). The single required classification;\nadvanced classifications (CVSS/OWASP/ATT&CK) are deferred to Slice 20."
       },
       "TimeoutDecision": {
         "properties": {
@@ -4775,6 +5392,29 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "VerificationStatus": {
+        "type": "string",
+        "enum": [
+          "unverified",
+          "verified",
+          "false_positive"
+        ],
+        "title": "VerificationStatus",
+        "description": "Verification lifecycle (\u00a79.2). Defaults to ``unverified`` on create.\nFree transitions \u2014 no enforced state machine (Decision 3)."
+      },
+      "VerificationUpdate": {
+        "properties": {
+          "verification_status": {
+            "$ref": "#/components/schemas/VerificationStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "verification_status"
+        ],
+        "title": "VerificationUpdate",
+        "description": "Request body for PATCH .../findings/{finding_id}/verification."
       }
     }
   }

@@ -674,6 +674,119 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/engagements/{engagement_id}/findings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Findings
+         * @description List the engagement's findings (newest-first).
+         *
+         *     Membership-gated (§17.1 — non-member returns 404). Read-only path: archived
+         *     engagements are accessible. ``include_deleted`` surfaces soft-deleted findings.
+         */
+        get: operations["list_findings"];
+        put?: never;
+        /**
+         * Create Finding
+         * @description Create a finding with a Simple severity (defaults unverified/open).
+         *
+         *     Membership-gated. Returns 409 for archived engagements; 404 when a given
+         *     node_id is not a live node in this engagement; 422 for invalid body.
+         */
+        post: operations["create_finding"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/findings/{finding_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Finding
+         * @description Get a single finding's detail.
+         *
+         *     Membership-gated. Read-only path: archived engagements are accessible.
+         *     Returns 404 when the finding is not found or in another engagement.
+         */
+        get: operations["get_finding"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Finding
+         * @description Soft-delete a finding (recoverable via history).
+         *
+         *     Returns 204 on success. Membership-gated. Returns 409 for archived
+         *     engagements; 404 when the finding is not found.
+         */
+        delete: operations["delete_finding"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Finding
+         * @description Update a finding's title, description, severity, and/or node link.
+         *
+         *     Membership-gated. Returns 409 for archived engagements; 404 when the finding
+         *     or a given node_id is not found; 422 for an empty/invalid body.
+         */
+        patch: operations["update_finding"];
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/findings/{finding_id}/verification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Set Finding Verification
+         * @description Set verification status (unverified | verified | false_positive).
+         *
+         *     Membership-gated. Returns 409 for archived engagements; 404 when not found;
+         *     422 for an invalid status value.
+         */
+        patch: operations["set_finding_verification"];
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/findings/{finding_id}/remediation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Set Finding Remediation
+         * @description Set remediation status (open | fixed | risk_accepted).
+         *
+         *     Membership-gated. Returns 409 for archived engagements; 404 when not found;
+         *     422 for an invalid status value.
+         */
+        patch: operations["set_finding_remediation"];
+        trace?: never;
+    };
     "/api/v1/audit": {
         parameters: {
             query?: never;
@@ -1054,7 +1167,7 @@ export interface components {
          *     ``AI_CALL`` (Slice 11+) are reserved here with no caller in this slice.
          * @enum {string}
          */
-        AuditAction: "login" | "logout" | "login_failed" | "tool_run" | "tool_run_completed" | "graph_node_created" | "graph_node_updated" | "graph_node_deleted" | "graph_edge_created" | "graph_edge_deleted" | "approval_granted" | "approval_rejected" | "ai_call" | "approval_auto_granted" | "autonomy_granted" | "autonomy_revoked";
+        AuditAction: "login" | "logout" | "login_failed" | "tool_run" | "tool_run_completed" | "graph_node_created" | "graph_node_updated" | "graph_node_deleted" | "graph_edge_created" | "graph_edge_deleted" | "approval_granted" | "approval_rejected" | "ai_call" | "approval_auto_granted" | "autonomy_granted" | "autonomy_revoked" | "finding_created" | "finding_updated" | "finding_verification_changed" | "finding_remediation_changed" | "finding_deleted";
         /**
          * AuditEntryRead
          * @description One audit entry as exposed by the read API (newest-first listings).
@@ -1603,6 +1716,94 @@ export interface components {
          */
         EntityKind: "node" | "edge";
         /**
+         * Finding
+         * @description Response model for a finding (maps from the ORM row, ``from_attributes``).
+         */
+        Finding: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Engagement Id
+             * Format: uuid
+             */
+            engagement_id: string;
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            severity: components["schemas"]["Severity"];
+            verification_status: components["schemas"]["VerificationStatus"];
+            remediation_status: components["schemas"]["RemediationStatus"];
+            /** Node Id */
+            node_id: string | null;
+            /** Deleted */
+            deleted: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * FindingCreate
+         * @description Request body for POST .../findings.
+         *
+         *     ``severity`` is required (no default) so the generated client never forces it
+         *     awkwardly. ``description`` defaults to "" and ``node_id`` is optional — a
+         *     finding can exist before its graph node is mapped (§8.1).
+         */
+        FindingCreate: {
+            /** Title */
+            title: string;
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            severity: components["schemas"]["Severity"];
+            /** Node Id */
+            node_id?: string | null;
+        };
+        /**
+         * FindingList
+         * @description A list of findings (newest-first).
+         */
+        FindingList: {
+            /** Items */
+            items: components["schemas"]["Finding"][];
+        };
+        /**
+         * FindingUpdate
+         * @description Request body for PATCH .../findings/{finding_id}.
+         *
+         *     At least one field must be present. ``node_id`` distinguishes three cases via
+         *     ``model_fields_set`` (Risk 4):
+         *
+         *       * omitted          → leave the link unchanged
+         *       * ``"node_id": null``  → unlink (set the FK to NULL)
+         *       * ``"node_id": <uuid>``→ relink (validated against the engagement's nodes)
+         *
+         *     The service inspects ``model_fields_set`` to apply only the fields the caller
+         *     actually sent, so a ``null`` node_id is never confused with an omitted one.
+         */
+        FindingUpdate: {
+            /** Title */
+            title?: string | null;
+            /** Description */
+            description?: string | null;
+            severity?: components["schemas"]["Severity"] | null;
+            /** Node Id */
+            node_id?: string | null;
+        };
+        /**
          * GraphHistory
          * @description History view: soft-deleted nodes and the per-entity edit history.
          */
@@ -1975,6 +2176,20 @@ export interface components {
             enqueued_at: string;
         };
         /**
+         * RemediationStatus
+         * @description Remediation lifecycle (§9.2). Defaults to ``open`` on create. Stays mutable
+         *     for the retest workflow (Slice 25); free transitions (Decision 3).
+         * @enum {string}
+         */
+        RemediationStatus: "open" | "fixed" | "risk_accepted";
+        /**
+         * RemediationUpdate
+         * @description Request body for PATCH .../findings/{finding_id}/remediation.
+         */
+        RemediationUpdate: {
+            remediation_status: components["schemas"]["RemediationStatus"];
+        };
+        /**
          * SendChatMessageResult
          * @description Result of POST .../chat/messages: the persisted user message plus a ``pending``
          *     assistant placeholder. Stream the assistant reply via WS using its id.
@@ -1983,6 +2198,13 @@ export interface components {
             user_message: components["schemas"]["ChatMessageRead"];
             assistant_message: components["schemas"]["ChatMessageRead"];
         };
+        /**
+         * Severity
+         * @description Simple primary classification (§9.1). The single required classification;
+         *     advanced classifications (CVSS/OWASP/ATT&CK) are deferred to Slice 20.
+         * @enum {string}
+         */
+        Severity: "critical" | "high" | "medium" | "low" | "info";
         /**
          * TimeoutDecision
          * @description Request body for POST /api/v1/tool-runs/{id}/timeout-decision.
@@ -2251,6 +2473,20 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * VerificationStatus
+         * @description Verification lifecycle (§9.2). Defaults to ``unverified`` on create.
+         *     Free transitions — no enforced state machine (Decision 3).
+         * @enum {string}
+         */
+        VerificationStatus: "unverified" | "verified" | "false_positive";
+        /**
+         * VerificationUpdate
+         * @description Request body for PATCH .../findings/{finding_id}/verification.
+         */
+        VerificationUpdate: {
+            verification_status: components["schemas"]["VerificationStatus"];
         };
     };
     responses: never;
@@ -3222,6 +3458,244 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UndoResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_findings: {
+        parameters: {
+            query?: {
+                include_deleted?: boolean;
+            };
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FindingList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_finding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FindingCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Finding"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_finding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                finding_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Finding"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_finding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                finding_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_finding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                finding_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FindingUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Finding"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_finding_verification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                finding_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VerificationUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Finding"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_finding_remediation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                finding_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemediationUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Finding"];
                 };
             };
             /** @description Validation Error */
