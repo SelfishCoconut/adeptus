@@ -196,3 +196,5 @@ still apply to the executed run).
 
 ## Progress
 (Leave empty at planning time.)
+- 2026-06-06T12:27:29Z — 169fa76 feat(slice-18): autonomy data layer — model, schemas, repository (task 1, task 2, task 3)
+- 2026-06-06T13:50:36Z — 5440eab feat(slice-18): alembic migration — autonomy_grants + audit actions (task 8)

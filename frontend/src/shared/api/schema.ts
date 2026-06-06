@@ -881,6 +881,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/engagements/{engagement_id}/autonomy-grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Autonomy Grants
+         * @description List the engagement's active standing-autonomy grants. Membership required (404).
+         */
+        get: operations["list_autonomy_grants"];
+        put?: never;
+        /**
+         * Grant Autonomy
+         * @description Grant standing autonomy for one reason category (any member, §5.2).
+         */
+        post: operations["grant_autonomy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engagements/{engagement_id}/autonomy-grants/{grant_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke Autonomy
+         * @description Revoke a standing-autonomy grant (any member). 404 if missing/already revoked.
+         */
+        delete: operations["revoke_autonomy"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1010,7 +1054,7 @@ export interface components {
          *     ``AI_CALL`` (Slice 11+) are reserved here with no caller in this slice.
          * @enum {string}
          */
-        AuditAction: "login" | "logout" | "login_failed" | "tool_run" | "tool_run_completed" | "graph_node_created" | "graph_node_updated" | "graph_node_deleted" | "graph_edge_created" | "graph_edge_deleted" | "approval_granted" | "approval_rejected" | "ai_call";
+        AuditAction: "login" | "logout" | "login_failed" | "tool_run" | "tool_run_completed" | "graph_node_created" | "graph_node_updated" | "graph_node_deleted" | "graph_edge_created" | "graph_edge_deleted" | "approval_granted" | "approval_rejected" | "ai_call" | "approval_auto_granted" | "autonomy_granted" | "autonomy_revoked";
         /**
          * AuditEntryRead
          * @description One audit entry as exposed by the read API (newest-first listings).
@@ -1057,6 +1101,48 @@ export interface components {
             items: components["schemas"]["AuditEntryRead"][];
             /** Next Cursor */
             next_cursor: string | null;
+        };
+        /**
+         * AutonomyGrantCreate
+         * @description Request body to grant standing autonomy for one reason category.
+         *
+         *     ``reason`` is a :class:`DelegableReason`, so ``unclassified_manifest`` and unknown
+         *     values are rejected by enum validation (422) at the contract boundary.
+         */
+        AutonomyGrantCreate: {
+            reason: components["schemas"]["DelegableReason"];
+        };
+        /**
+         * AutonomyGrantRead
+         * @description One standing-autonomy grant as exposed by the read/grant API.
+         *
+         *     ``granted_by_username`` is resolved at read time (not a DB column) and set as a
+         *     transient attribute by the service before ``model_validate``; it defaults to ``None``
+         *     so a grant whose grantor was deleted (FK SET NULL) still validates.
+         */
+        AutonomyGrantRead: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Engagement Id
+             * Format: uuid
+             */
+            engagement_id: string;
+            reason: components["schemas"]["ApprovalReason"];
+            /** Granted By User Id */
+            granted_by_user_id?: string | null;
+            /** Granted By Username */
+            granted_by_username?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Revoked At */
+            revoked_at?: string | null;
         };
         /**
          * ChatMessageCreate
@@ -1272,6 +1358,17 @@ export interface components {
              */
             node_id?: string | null;
         };
+        /**
+         * DelegableReason
+         * @description The reason categories a user may delegate standing autonomy for (§5.2).
+         *
+         *     Exactly ``ApprovalReason`` minus ``unclassified_manifest`` (the un-manifested-tool
+         *     fail-safe, which must always gate). Used as the request-body type so a non-delegable or
+         *     unknown value fails standard enum validation (422) — cleanly, without a raising
+         *     validator. Guarded against drift by ``test_schemas``.
+         * @enum {string}
+         */
+        DelegableReason: "target_write" | "aggressive_scan" | "credential_attack" | "out_of_scope";
         /**
          * Edge
          * @description Response model for a graph edge.
@@ -3608,6 +3705,102 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ApprovalConflict"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_autonomy_grants: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutonomyGrantRead"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    grant_autonomy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutonomyGrantCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutonomyGrantRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_autonomy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engagement_id: string;
+                grant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
