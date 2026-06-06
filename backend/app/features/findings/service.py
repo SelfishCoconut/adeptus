@@ -133,6 +133,32 @@ def _to_schema(row: FindingRow) -> Finding:
     return Finding.model_validate(row)
 
 
+async def _resolve_update_fields(
+    db: AsyncSession,
+    engagement_id: UUID,
+    payload: FindingUpdate,
+) -> dict[str, object]:
+    """Build the resolved column→value set for a finding update.
+
+    Only the fields the caller explicitly sent are included. title/description/
+    severity are applied when present (the schema already rejects an explicit null
+    for these — see FindingUpdate.at_least_one_field). node_id is applied whenever
+    it is in ``model_fields_set`` so an explicit null unlinks while an omitted
+    node_id is left unchanged (Risk 4); a non-null node_id is validated first.
+    """
+    fields: dict[str, object] = {}
+    if payload.title is not None:
+        fields["title"] = payload.title
+    if payload.description is not None:
+        fields["description"] = payload.description
+    if payload.severity is not None:
+        fields["severity"] = payload.severity.value
+    if "node_id" in payload.model_fields_set:
+        await _validate_node_link(db, engagement_id, payload.node_id)
+        fields["node_id"] = payload.node_id
+    return fields
+
+
 # ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
@@ -240,20 +266,7 @@ async def update_finding(
     _require_writable(engagement)
     finding = await _get_owned_finding(db, engagement_id, finding_id)
 
-    fields: dict[str, object] = {}
-    # Non-nullable columns: applied only when present AND non-null (the UI never
-    # sends an explicit null for these; the contract types them non-nullable).
-    if payload.title is not None:
-        fields["title"] = payload.title
-    if payload.description is not None:
-        fields["description"] = payload.description
-    if payload.severity is not None:
-        fields["severity"] = payload.severity.value
-    # node_id is nullable: presence in model_fields_set means apply (null = unlink).
-    if "node_id" in payload.model_fields_set:
-        await _validate_node_link(db, engagement_id, payload.node_id)
-        fields["node_id"] = payload.node_id
-
+    fields = await _resolve_update_fields(db, engagement_id, payload)
     await repo.record_finding_history(db, finding=finding)
     finding = await repo.update_finding_row(db, finding=finding, fields=fields)
     await audit_service.record(

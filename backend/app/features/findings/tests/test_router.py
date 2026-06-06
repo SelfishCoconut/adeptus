@@ -358,3 +358,13 @@ async def test_update_empty_body_422(
     created = await _create(client, eng)
     resp = await client.patch(f"{_base(eng)}/{created['id']}", json={})
     assert resp.status_code == 422, resp.text
+
+
+async def test_update_explicit_null_severity_422(
+    member: tuple[AsyncClient, UUID, async_sessionmaker[AsyncSession]],
+) -> None:
+    # An explicit null on a non-nullable field is rejected (no phantom no-op update).
+    client, eng, _ = member
+    created = await _create(client, eng)
+    resp = await client.patch(f"{_base(eng)}/{created['id']}", json={"severity": None})
+    assert resp.status_code == 422, resp.text

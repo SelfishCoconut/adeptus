@@ -99,6 +99,15 @@ class FindingUpdate(BaseModel):
         # raw exception object, so the core 422 handler can JSON-serialize exc.errors().
         if not self.model_fields_set:
             raise PydanticCustomError("at_least_one_field", "At least one field must be provided.")
+        # title/description/severity are non-nullable columns: reject an explicit null
+        # (only node_id may be set to null, to unlink). Without this a `{"severity": null}`
+        # would pass the check above, then the service would build an empty update and
+        # write a phantom history snapshot + audit entry for a no-op mutation.
+        for name in ("title", "description", "severity"):
+            if name in self.model_fields_set and getattr(self, name) is None:
+                raise PydanticCustomError(
+                    "null_not_allowed", "{field} may not be null.", {"field": name}
+                )
         return self
 
 

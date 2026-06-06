@@ -13,7 +13,7 @@ cookie is absent or invalid. 422 is produced automatically by Pydantic body
 validation. The router does NOT catch or translate any domain exception itself.
 """
 
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -59,7 +59,7 @@ async def list_findings(
     return await service.list_findings(
         db,
         engagement_id=engagement_id,
-        user_id=current_user.id,  # type: ignore[arg-type]
+        user_id=cast(UUID, current_user.id),
         include_deleted=include_deleted,
     )
 
@@ -89,7 +89,7 @@ async def create_finding(
     return await service.create_finding(
         db,
         engagement_id=engagement_id,
-        user_id=current_user.id,  # type: ignore[arg-type]
+        user_id=cast(UUID, current_user.id),
         payload=body,
     )
 
@@ -119,7 +119,7 @@ async def get_finding(
         db,
         engagement_id=engagement_id,
         finding_id=finding_id,
-        user_id=current_user.id,  # type: ignore[arg-type]
+        user_id=cast(UUID, current_user.id),
     )
 
 
@@ -149,7 +149,7 @@ async def update_finding(
         db,
         engagement_id=engagement_id,
         finding_id=finding_id,
-        user_id=current_user.id,  # type: ignore[arg-type]
+        user_id=cast(UUID, current_user.id),
         payload=body,
     )
 
@@ -179,7 +179,7 @@ async def delete_finding(
         db,
         engagement_id=engagement_id,
         finding_id=finding_id,
-        user_id=current_user.id,  # type: ignore[arg-type]
+        user_id=cast(UUID, current_user.id),
     )
 
 
@@ -209,7 +209,7 @@ async def set_finding_verification(
         db,
         engagement_id=engagement_id,
         finding_id=finding_id,
-        user_id=current_user.id,  # type: ignore[arg-type]
+        user_id=cast(UUID, current_user.id),
         payload=body,
     )
 
@@ -240,6 +240,6 @@ async def set_finding_remediation(
         db,
         engagement_id=engagement_id,
         finding_id=finding_id,
-        user_id=current_user.id,  # type: ignore[arg-type]
+        user_id=cast(UUID, current_user.id),
         payload=body,
     )

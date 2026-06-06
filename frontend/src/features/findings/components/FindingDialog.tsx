@@ -23,12 +23,7 @@ import { useGraph } from '@/features/graph/api'
 import { useCreateFinding, useUpdateFinding } from '../api'
 import type { Finding, Severity } from '../api'
 import { SEVERITY_LABELS, SEVERITY_ORDER } from '../findingsLabels'
-
-const SELECT_CLASS =
-  'h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs ' +
-  'outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] ' +
-  'focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed ' +
-  'disabled:opacity-50'
+import { SELECT_CLASS_FIELD } from '../selectClass'
 
 export interface FindingDialogProps {
   engagementId: string
@@ -115,7 +110,7 @@ function FindingForm({ engagementId, onOpenChange, finding }: FindingFormProps) 
           <Label htmlFor="finding-severity">Severity</Label>
           <select
             id="finding-severity"
-            className={SELECT_CLASS}
+            className={SELECT_CLASS_FIELD}
             value={severity}
             disabled={mutation.isPending}
             onChange={(e) => setSeverity(e.target.value as Severity)}
@@ -143,7 +138,7 @@ function FindingForm({ engagementId, onOpenChange, finding }: FindingFormProps) 
           <Label htmlFor="finding-node">Linked graph node (optional)</Label>
           <select
             id="finding-node"
-            className={SELECT_CLASS}
+            className={SELECT_CLASS_FIELD}
             value={nodeId}
             disabled={mutation.isPending}
             onChange={(e) => setNodeId(e.target.value)}

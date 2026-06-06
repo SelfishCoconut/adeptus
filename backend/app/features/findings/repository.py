@@ -17,7 +17,6 @@ later as an authorship-aware revert (Slice 09 pattern, feeding Slice 25 retest +
 Slice 33 replay). Persisting history now makes that cheap.
 """
 
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import desc, select
@@ -63,7 +62,7 @@ async def update_finding_row(
     db: AsyncSession,
     *,
     finding: Finding,
-    fields: dict[str, Any],
+    fields: dict[str, object],
 ) -> Finding:
     """Apply a resolved set of column→value updates to an existing Finding.
 

@@ -60,3 +60,17 @@ def test_update_explicit_node_id_relink() -> None:
     upd = FindingUpdate.model_validate({"node_id": str(nid)})
     assert "node_id" in upd.model_fields_set
     assert upd.node_id == nid
+
+
+def test_update_rejects_explicit_null_on_non_nullable_fields() -> None:
+    # title/description/severity are non-nullable columns: an explicit null is a 422,
+    # not a silent no-op (would otherwise write a phantom history snapshot + audit entry).
+    for field in ("title", "description", "severity"):
+        with pytest.raises(ValidationError):
+            FindingUpdate.model_validate({field: None})
+
+
+def test_update_null_node_id_still_allowed() -> None:
+    # node_id is the one nullable field — explicit null unlinks, must NOT be rejected.
+    upd = FindingUpdate.model_validate({"node_id": None})
+    assert upd.node_id is None

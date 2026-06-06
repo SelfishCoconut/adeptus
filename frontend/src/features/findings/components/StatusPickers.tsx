@@ -12,12 +12,7 @@ import {
   VERIFICATION_LABELS,
   VERIFICATION_ORDER,
 } from '../findingsLabels'
-
-const SELECT_CLASS =
-  'h-8 rounded-md border border-input bg-transparent px-2 py-1 text-xs shadow-xs outline-none ' +
-  'transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] ' +
-  'focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed ' +
-  'disabled:opacity-50'
+import { SELECT_CLASS_COMPACT } from '../selectClass'
 
 export interface StatusPickersProps {
   engagementId: string
@@ -44,7 +39,7 @@ export function StatusPickers({ engagementId, finding }: StatusPickersProps) {
       <div className="flex items-center gap-2">
         <select
           aria-label="Verification status"
-          className={SELECT_CLASS}
+          className={SELECT_CLASS_COMPACT}
           value={verificationValue}
           disabled={verification.isPending}
           onChange={(e) =>
@@ -62,7 +57,7 @@ export function StatusPickers({ engagementId, finding }: StatusPickersProps) {
         </select>
         <select
           aria-label="Remediation status"
-          className={SELECT_CLASS}
+          className={SELECT_CLASS_COMPACT}
           value={remediationValue}
           disabled={remediation.isPending}
           onChange={(e) =>

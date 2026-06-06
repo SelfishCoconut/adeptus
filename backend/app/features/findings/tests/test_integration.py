@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncGenerator
+from typing import cast
 
 import pytest
 import pytest_asyncio
@@ -126,10 +127,10 @@ async def member_and_engagement(
             name="Findings Integration Test",
             scope="10.0.0.0/24",
             client_info=None,
-            owner_id=member_id,  # type: ignore[arg-type]
+            owner_id=cast(uuid.UUID, member_id),
         )
         await session.commit()
-        return engagement.id, member_id  # type: ignore[return-value]
+        return cast(uuid.UUID, engagement.id), cast(uuid.UUID, member_id)
 
 
 @pytest.mark.asyncio

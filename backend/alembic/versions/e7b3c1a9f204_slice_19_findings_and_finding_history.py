@@ -165,11 +165,7 @@ def downgrade() -> None:
 
     op.drop_index("ix_finding_history_finding_id", table_name="finding_history")
     op.drop_table("finding_history")
-    op.drop_index(
-        "ix_findings_engagement_live",
-        table_name="findings",
-        postgresql_where=sa.text("deleted = false"),
-    )
+    op.drop_index("ix_findings_engagement_live", table_name="findings")
     op.drop_index("ix_findings_node_id", table_name="findings")
     op.drop_index("ix_findings_engagement_id", table_name="findings")
     op.drop_table("findings")
