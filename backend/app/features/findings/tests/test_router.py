@@ -180,8 +180,10 @@ async def test_list_findings_200(
     assert resp.status_code == 200, resp.text
     items = resp.json()["items"]
     assert len(items) == 2
-    # Newest-first.
-    assert items[0]["title"] == "two"
+    # Both findings are returned. (Deterministic newest-first ordering is verified
+    # in the repository test with explicit created_at — SQLite's second-resolution
+    # CURRENT_TIMESTAMP ties two same-second inserts, so ordering is not asserted here.)
+    assert {item["title"] for item in items} == {"one", "two"}
 
 
 async def test_get_finding_200(
