@@ -760,11 +760,14 @@ async def _finalize_complete_turn(
             proposed_actions=len(actions),
             gated_actions=len(gated_cards),
         )
+        # Autonomous commands AND Slice-18 auto-approved commands (standing autonomy)
+        # both run immediately via the same pipeline; the auto-approved ones already
+        # emitted an approval_auto_granted audit entry in create_requests_for_turn.
         autonomous_cards = await _run_autonomous_actions(
             session,
             engagement_id=engagement_id,
             initiator_user_id=actor_user_id,
-            actions=classified.autonomous,
+            actions=[*classified.autonomous, *classified.auto_approved],
         )
     await session.commit()
     return plan, claims, autonomous_cards, gated_cards

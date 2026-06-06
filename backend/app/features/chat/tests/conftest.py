@@ -36,6 +36,7 @@ from app.features.approvals import models as approvals_models
 from app.features.audit import models as audit_models
 from app.features.auth import models as auth_models
 from app.features.auth.router import router as auth_router
+from app.features.autonomy import models as autonomy_models
 from app.features.chat import models as chat_models
 from app.features.chat.router import router as chat_router
 from app.features.engagements import models as eng_models
@@ -70,6 +71,8 @@ def _patch_sqlite_columns() -> None:
         persona_models.Persona,
         # Slice 16: the read/replay paths query this turn's approval cards.
         approvals_models.ApprovalRequest,
+        # Slice 18: create_requests_for_turn reads active standing-autonomy grants.
+        autonomy_models.AutonomyGrant,
     ):
         id_col: Column = model.__table__.c.id  # type: ignore[assignment]
         id_col.default = ColumnDefault(uuid4)
@@ -92,6 +95,7 @@ _TABLES: list[Table] = [
         graph_models.GraphEdge,
         persona_models.Persona,
         approvals_models.ApprovalRequest,
+        autonomy_models.AutonomyGrant,
     )
 ]
 

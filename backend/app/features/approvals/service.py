@@ -51,6 +51,7 @@ from app.features.audit import service as audit_service
 from app.features.audit.schemas import AuditAction
 from app.features.auth import repository as auth_repo
 from app.features.auth.models import User
+from app.features.autonomy import repository as autonomy_repo
 from app.features.engagements import repository as eng_repo
 from app.features.mcp import concurrency as mcp_concurrency
 from app.features.mcp import service as mcp_service
@@ -99,11 +100,15 @@ class ClassifiedTurnResult(BaseModel):
 
     ``autonomous`` runs immediately (the chat service executes each via the tool-run
     pipeline — no DB row); ``gated`` are the persisted ``pending`` requests (rendered as
-    inline approval cards).
+    inline approval cards). ``auto_approved`` (Slice 18) are gated commands whose reasons
+    are **all** covered by an active standing-autonomy grant: they also run immediately
+    (the chat service runs them alongside ``autonomous``) but each has emitted an
+    ``approval_auto_granted`` audit entry — they are never silently autonomous.
     """
 
     autonomous: list[ProposedAction]
     gated: list[ApprovalRequestRead]
+    auto_approved: list[ProposedAction] = []
 
 
 # ---------------------------------------------------------------------------
@@ -221,8 +226,15 @@ async def create_requests_for_turn(
     scope_text = member[0].scope if member is not None else ""
     scope = parse_scope(scope_text)
 
+    # Slice 18 — load the engagement's active standing-autonomy grants ONCE per turn. A
+    # gated command whose reasons are ALL in this set auto-approves (a revoke between turns
+    # is honoured because this is re-read every turn). unclassified_manifest is never
+    # delegable, so it can never appear here — a command carrying it can never be covered.
+    active_grant_reasons = await autonomy_repo.get_active_reasons(db, engagement_id=engagement_id)
+
     autonomous: list[ProposedAction] = []
     gated: list[ApprovalRequestRead] = []
+    auto_approved: list[ProposedAction] = []
     for action in actions:
         tool_config = _resolve_tool_config(action.server_name, action.tool_name)
         if tool_config is None:
@@ -241,6 +253,29 @@ async def create_requests_for_turn(
         if result.tier is ApprovalTier.AUTONOMOUS:
             autonomous.append(action)
             continue
+        # Slice 18 — standing autonomy: if every reason is covered by an active grant, the
+        # command auto-approves (no human card). AND-coverage is the fail-safe: a single
+        # un-granted reason (or the never-delegable unclassified_manifest) keeps it gated.
+        reason_values = {r.value for r in result.reasons}
+        if reason_values and reason_values <= active_grant_reasons:
+            await audit_service.record(
+                db,
+                action=AuditAction.APPROVAL_AUTO_GRANTED,
+                actor_user_id=initiator_user_id,
+                engagement_id=engagement_id,
+                target_type="chat_message",
+                target_id=str(chat_message_id),
+                self_approved=False,
+                payload={
+                    "server_name": action.server_name,
+                    "tool_name": action.tool_name,
+                    "preset_name": action.preset_name,
+                    "reasons": sorted(reason_values),
+                    "covered_by_grants": sorted(reason_values),
+                },
+            )
+            auto_approved.append(action)
+            continue
         out_of_scope = ApprovalReason.OUT_OF_SCOPE in result.reasons
         row = await repo.create_request(
             db,
@@ -257,7 +292,7 @@ async def create_requests_for_turn(
             scope_checked_against=scope_text if out_of_scope else None,
         )
         gated.append(await _to_read(db, row))
-    return ClassifiedTurnResult(autonomous=autonomous, gated=gated)
+    return ClassifiedTurnResult(autonomous=autonomous, gated=gated, auto_approved=auto_approved)
 
 
 async def reads_for_messages(
