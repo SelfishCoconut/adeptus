@@ -107,6 +107,11 @@ DENYLISTED_FLAGS: frozenset[str] = frozenset(
         "-il",
         "-ir",
         "--excludefile",
+        # egress / pivot redirection (route the scan through a third host):
+        # --proxies is an exfil/SSRF vector (cf. httpx -proxy); -b is an FTP-bounce
+        # scan that originates from and connects to an arbitrary relay host.
+        "--proxies",
+        "-b",
         # NSE scripting (risk-class escalation)
         "--script",
         "--script-args",

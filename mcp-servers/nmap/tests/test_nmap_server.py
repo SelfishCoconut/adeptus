@@ -239,6 +239,8 @@ class TestRunNmap:
             "-iL",  # alternate target source (sandbox bypass)
             "-iR",  # random internet targets (sandbox bypass)
             "--excludefile",
+            "--proxies",  # egress/SSRF redirection
+            "-b",  # FTP-bounce scan (pivot through a relay host)
             "--script",  # NSE risk-class escalation
             "--script-args",
         ],

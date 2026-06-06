@@ -179,8 +179,9 @@ Numbered continuously across the slice. Every commit subject cites `(task N)`.
 
 **Yes.** Touches MCP subprocess execution and the approval classification (adds a heavy,
 target-affecting tool). security-reviewer must check: the flag denylist actually prevents
-filesystem-write / arbitrary-NSE capability escape, the sandbox guard covers nmap, and
-the binary resolver can't be PATH-shadowed.
+filesystem-write / arbitrary-NSE / egress-pivot capability escape (`-oN…`, `--script*`,
+`--proxies`, `-b`) and sandbox bypass (`-iL`/`-iR`/`--excludefile`), the sandbox guard
+covers nmap, and the binary resolver can't be PATH-shadowed.
 
 ## Progress
 
