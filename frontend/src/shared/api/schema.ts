@@ -1131,7 +1131,7 @@ export interface components {
              * Format: uuid
              */
             engagement_id: string;
-            reason: components["schemas"]["ApprovalReason"];
+            reason: components["schemas"]["DelegableReason"];
             /** Granted By User Id */
             granted_by_user_id?: string | null;
             /** Granted By Username */

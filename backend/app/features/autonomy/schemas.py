@@ -1,9 +1,10 @@
 """Pydantic v2 schemas for the autonomy feature (Slice 18).
 
 ``AutonomyGrantCreate`` (request) and ``AutonomyGrantRead`` (response) are the HTTP
-contract for standing-autonomy grants. The delegable ``reason`` reuses the approvals
-``ApprovalReason`` enum; the create schema rejects ``unclassified_manifest`` (never
-delegable — the un-manifested-tool fail-safe must always gate).
+contract for standing-autonomy grants. Both ``reason`` fields are :class:`DelegableReason`
+(``ApprovalReason`` minus ``unclassified_manifest``), so a non-delegable or unknown value
+is rejected by enum validation (422) and ``unclassified_manifest`` can never appear — the
+un-manifested-tool fail-safe must always gate.
 """
 
 from datetime import datetime
@@ -11,8 +12,6 @@ from enum import StrEnum
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
-
-from app.features.approvals.schemas import ApprovalReason
 
 __all__ = ["AutonomyGrantCreate", "AutonomyGrantRead", "DelegableReason"]
 
@@ -54,7 +53,9 @@ class AutonomyGrantRead(BaseModel):
 
     id: UUID
     engagement_id: UUID
-    reason: ApprovalReason
+    # Only delegable categories are ever stored (the DB CHECK + service guard), so the read
+    # type narrows to DelegableReason — never unclassified_manifest — for a precise contract.
+    reason: DelegableReason
     granted_by_user_id: UUID | None = None
     granted_by_username: str | None = None
     created_at: datetime

@@ -41,18 +41,33 @@ export function useAutonomyGrants(
 // --- Mutations ---
 
 /**
+ * Thrown when a grant returns 409: a grant for this category is already active (another
+ * member delegated it in the race window between the card rendering and the click). The
+ * category is already delegated, so callers can treat this as "already covered".
+ */
+export class AutonomyConflictError extends Error {
+  constructor() {
+    super('Standing autonomy is already active for this category')
+    this.name = 'AutonomyConflictError'
+  }
+}
+
+/**
  * Grant standing autonomy for one reason category (any member, §5.2). The server then
  * auto-approves future commands whose reasons are *all* covered. Invalidates the grants
  * list and the approval queue (a fresh grant can clear pending cards on the next turn).
+ * A 409 surfaces as {@link AutonomyConflictError} so callers can distinguish "already
+ * delegated" from a real failure.
  */
 export function useGrantAutonomy(engagementId: string) {
   const queryClient = useQueryClient()
   return useMutation<AutonomyGrant, Error, { reason: DelegableReason }>({
     mutationFn: async ({ reason }) => {
-      const { data, error } = await api.POST(
+      const { data, error, response } = await api.POST(
         '/api/v1/engagements/{engagement_id}/autonomy-grants',
         { params: { path: { engagement_id: engagementId } }, body: { reason } },
       )
+      if (response?.status === 409) throw new AutonomyConflictError()
       if (error || !data) throw new Error('Failed to grant autonomy')
       return data
     },
@@ -77,6 +92,9 @@ export function useRevokeAutonomy(engagementId: string) {
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: autonomyKeys.engagement(engagementId) })
+      // A revoke re-gates that category next turn, so refresh the approval queue too
+      // (symmetric with useGrantAutonomy).
+      void queryClient.invalidateQueries({ queryKey: approvalKeys.engagement(engagementId) })
     },
   })
 }

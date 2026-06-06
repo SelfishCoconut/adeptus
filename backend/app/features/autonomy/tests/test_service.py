@@ -48,7 +48,7 @@ async def test_grant_persists_and_audits(db_session: AsyncSession) -> None:
         read = await service.grant(
             db_session, engagement_id=eng, requester=_user(), reason=ApprovalReason.AGGRESSIVE_SCAN
         )
-    assert read.reason is ApprovalReason.AGGRESSIVE_SCAN
+    assert read.reason == "aggressive_scan"  # narrowed to DelegableReason on the read schema
     assert read.revoked_at is None
     assert read.granted_by_username == "alice"
     audit.assert_awaited_once()
@@ -92,7 +92,7 @@ async def test_grant_out_of_scope_is_delegable(db_session: AsyncSession) -> None
         read = await service.grant(
             db_session, engagement_id=eng, requester=_user(), reason=ApprovalReason.OUT_OF_SCOPE
         )
-    assert read.reason is ApprovalReason.OUT_OF_SCOPE
+    assert read.reason == "out_of_scope"
 
 
 async def test_list_returns_active_grants(db_session: AsyncSession) -> None:

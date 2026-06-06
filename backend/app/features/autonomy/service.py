@@ -5,7 +5,7 @@ engagement membership (§17.1 chokepoint: non-members get 404, not 403). Grant a
 emit their audit action (``autonomy_granted`` / ``autonomy_revoked``) atomically with the
 write. ``unclassified_manifest`` is never delegable (defense-in-depth beyond the schema
 validator). The per-turn auto-approve decision itself lives in the approvals service
-(it reads :func:`repository.get_active_reasons`); this module owns the grant lifecycle.
+(it reads :func:`repository.get_active_grant_map`); this module owns the grant lifecycle.
 """
 
 from collections.abc import Sequence

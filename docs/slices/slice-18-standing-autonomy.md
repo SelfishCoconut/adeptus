@@ -91,18 +91,25 @@ No change to `approval_requests` or `tool_runs`.
 
 In `approvals/service.py::create_requests_for_turn` (the function the Slice-16 classifier
 docstring named as Slice-18's short-circuit point):
-1. Load the engagement's **active** grants once per turn (`autonomy.repository`).
+1. Load the engagement's **active** grants once per turn as a `{reason: grant_id}` map
+   (`autonomy.repository.get_active_grant_map`).
 2. For each action the classifier returns as `REQUIRES_APPROVAL`: if **every** reason is in
-   the active-grant set (and none is `unclassified_manifest`) → **auto-approve**: take the
-   same path as a human approve (`_execute_approved_run`) but attributed as an auto-grant,
-   emitting a new `approval_auto_granted` audit action that records the command, the
-   reasons, and the covering grant id(s). `self_approved` is `false`; a new
-   `auto_approved` marker is `true`.
+   the active-grant set (and none is `unclassified_manifest`) → **auto-approve**, emitting a
+   new `approval_auto_granted` audit action that records the command, the reasons, and the
+   **covering grant id(s)** (`covered_by_grants`, the actual grant UUIDs, so an auditor can
+   trace the action back to the specific grant — §14). `self_approved` is `false`; the
+   action is appended to the turn's `auto_approved` list.
 3. Otherwise create the pending human row exactly as today.
 
-Auto-approved actions are returned to the chat service to run (like the autonomous list)
-but **with an approval/audit record** — they are *not* silently autonomous. Grant create
-and revoke each emit `autonomy_granted` / `autonomy_revoked` audit actions.
+**Decision (no `approval_requests` row for an auto-approved action).** An auto-approved
+command does **not** create an `approval_requests` row — consistent with this slice's Data
+Model ("No change to `approval_requests`"). The `approval_auto_granted` audit entry (which
+rides the hash chain) **is** the record, so the action is *not* silently autonomous even
+though no DB row exists. Auto-approved actions are returned to the chat service and run via
+the same path as the autonomous list (`_run_autonomous_actions` → the tool-run pipeline,
+so the sandbox guard and egress friction still apply), each card carrying the
+`auto_approved=true` marker so the UI shows "auto-approved · standing autonomy". Grant
+create and revoke each emit `autonomy_granted` / `autonomy_revoked` audit actions.
 
 ## Tasks
 

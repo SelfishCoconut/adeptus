@@ -548,6 +548,13 @@ async def test_standing_autonomy_auto_approves_then_revoke_regates(
     assert covered.gated == []
     assert len(covered.auto_approved) == 1
     assert await _count_audit(factory, "approval_auto_granted") == 1
+    # §14: the audit entry is traceable to the COMMAND (reasons) and to the GRANT (its id).
+    async with factory() as s:
+        entry = (
+            await s.execute(select(AuditEntry).where(AuditEntry.action == "approval_auto_granted"))
+        ).scalar_one()
+    assert entry.payload["reasons"] == ["aggressive_scan"]
+    assert entry.payload["covered_by_grants"] == [str(g.id)]
     # Only the baseline pending row exists — the auto-approved command created none.
     async with factory() as s:
         rows, _ = await repo.list_for_engagement(s, engagement_id=eng_id)

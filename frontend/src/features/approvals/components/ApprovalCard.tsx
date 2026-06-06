@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import type { ApprovalReason, ApprovalRequest, DelegableReason } from '@/shared/api'
-import { useGrantAutonomy } from '@/features/autonomy/api'
+import { AutonomyConflictError, useGrantAutonomy } from '@/features/autonomy/api'
 import {
   ApprovalConflictError,
   useApproveRequest,
@@ -28,15 +28,23 @@ const GRANT_LABELS: Record<DelegableReason, string> = {
 }
 
 /** The four delegable §5.2 categories — `unclassified_manifest` is never delegable. */
-const DELEGABLE_REASONS: DelegableReason[] = [
+const DELEGABLE_REASONS = [
   'target_write',
   'aggressive_scan',
   'credential_attack',
   'out_of_scope',
-]
+] as const satisfies readonly DelegableReason[]
+
+// Compile-time exhaustiveness guard (the frontend mirror of the backend's test_schemas drift
+// check): if a new DelegableReason enters the generated contract but is missed above, the
+// Exclude stops being `never` and this assignment fails to typecheck.
+type _DelegableExhaustive =
+  Exclude<DelegableReason, (typeof DELEGABLE_REASONS)[number]> extends never ? true : never
+const _delegableReasonsExhaustive: _DelegableExhaustive = true
+void _delegableReasonsExhaustive
 
 function isDelegable(reason: ApprovalReason): reason is DelegableReason {
-  return (DELEGABLE_REASONS as string[]).includes(reason)
+  return (DELEGABLE_REASONS as readonly string[]).includes(reason)
 }
 
 function CommandSummary({
@@ -123,10 +131,17 @@ function GatedCard({ engagementId, request }: { engagementId: string; request: A
 
   // Grant standing autonomy for the category, then approve the current (already-pending)
   // request — a grant only auto-approves FUTURE turns, so this command still needs the click.
+  // A 409 (already delegated by another member) is not a failure: the category is covered, so
+  // we still approve the current request.
   function alwaysAllow(reason: DelegableReason) {
     grant.mutate(
       { reason },
-      { onSuccess: () => approve.mutate({ requestId: request.id }) },
+      {
+        onSuccess: () => approve.mutate({ requestId: request.id }),
+        onError: (err) => {
+          if (err instanceof AutonomyConflictError) approve.mutate({ requestId: request.id })
+        },
+      },
     )
   }
   const conflict =
@@ -200,7 +215,7 @@ function GatedCard({ engagementId, request }: { engagementId: string; request: A
               ))}
             </div>
           ) : null}
-          {grant.isError ? (
+          {grant.isError && !(grant.error instanceof AutonomyConflictError) ? (
             <p className="mt-1 text-xs text-destructive" data-testid="grant-error">
               Couldn&apos;t grant standing autonomy
             </p>

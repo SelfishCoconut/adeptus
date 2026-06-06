@@ -226,11 +226,13 @@ async def create_requests_for_turn(
     scope_text = member[0].scope if member is not None else ""
     scope = parse_scope(scope_text)
 
-    # Slice 18 — load the engagement's active standing-autonomy grants ONCE per turn. A
-    # gated command whose reasons are ALL in this set auto-approves (a revoke between turns
-    # is honoured because this is re-read every turn). unclassified_manifest is never
-    # delegable, so it can never appear here — a command carrying it can never be covered.
-    active_grant_reasons = await autonomy_repo.get_active_reasons(db, engagement_id=engagement_id)
+    # Slice 18 — load the engagement's active standing-autonomy grants ONCE per turn, as a
+    # {reason: grant_id} map. A gated command whose reasons are ALL keys here auto-approves
+    # (a revoke between turns is honoured because this is re-read every turn);
+    # unclassified_manifest is never delegable, so it can never appear here. The grant ids
+    # are recorded in the auto-approve audit so the action is traceable to the grant (§14).
+    active_grants = await autonomy_repo.get_active_grant_map(db, engagement_id=engagement_id)
+    active_grant_reasons = set(active_grants)
 
     autonomous: list[ProposedAction] = []
     gated: list[ApprovalRequestRead] = []
@@ -258,6 +260,7 @@ async def create_requests_for_turn(
         # un-granted reason (or the never-delegable unclassified_manifest) keeps it gated.
         reason_values = {r.value for r in result.reasons}
         if reason_values and reason_values <= active_grant_reasons:
+            covered_by_grants = sorted(str(active_grants[r]) for r in reason_values)
             await audit_service.record(
                 db,
                 action=AuditAction.APPROVAL_AUTO_GRANTED,
@@ -271,7 +274,9 @@ async def create_requests_for_turn(
                     "tool_name": action.tool_name,
                     "preset_name": action.preset_name,
                     "reasons": sorted(reason_values),
-                    "covered_by_grants": sorted(reason_values),
+                    # The UUIDs of the specific grants that authorised this auto-approval, so
+                    # an auditor can trace it back to the grant (not just the category) — §14.
+                    "covered_by_grants": covered_by_grants,
                 },
             )
             auto_approved.append(action)

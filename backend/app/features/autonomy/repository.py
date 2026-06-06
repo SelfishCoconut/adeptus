@@ -9,6 +9,7 @@ effect on the very next turn and a double-revoke is a clean no-op.
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
 from sqlalchemy import desc, select, update
@@ -54,18 +55,29 @@ async def list_active(db: AsyncSession, *, engagement_id: UUID) -> Sequence[Auto
     return list(result.scalars().all())
 
 
-async def get_active_reasons(db: AsyncSession, *, engagement_id: UUID) -> set[str]:
-    """Return the set of reason categories with an active grant for the engagement.
+async def get_active_grant_map(db: AsyncSession, *, engagement_id: UUID) -> dict[str, UUID]:
+    """Return ``{reason: grant_id}`` for the engagement's active grants.
 
-    This is the per-turn lookup the approvals service uses for the auto-approve decision
-    (a gated command auto-approves iff *all* its reasons are in this set)."""
+    The per-turn lookup the approvals service uses for the auto-approve decision: a gated
+    command auto-approves iff *all* its reasons are keys here, and the matching grant ids are
+    recorded in the ``approval_auto_granted`` audit payload so an auditor can trace an
+    auto-approved action back to the specific grant that authorised it (§14). At most one
+    active grant per reason (the partial unique index), so the mapping is unambiguous."""
     result = await db.execute(
-        select(AutonomyGrant.reason).where(
+        select(AutonomyGrant.reason, AutonomyGrant.id).where(
             AutonomyGrant.engagement_id == engagement_id,
             AutonomyGrant.revoked_at.is_(None),
         )
     )
-    return set(result.scalars().all())
+    return {reason: cast(UUID, grant_id) for reason, grant_id in result.all()}
+
+
+async def get_active_reasons(db: AsyncSession, *, engagement_id: UUID) -> set[str]:
+    """Return the set of reason categories with an active grant for the engagement.
+
+    A thin convenience over :func:`get_active_grant_map` (used widely in tests as the
+    canonical "what is active" assertion)."""
+    return set(await get_active_grant_map(db, engagement_id=engagement_id))
 
 
 async def get_active_for_reason(

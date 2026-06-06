@@ -2776,7 +2776,7 @@
             "title": "Engagement Id"
           },
           "reason": {
-            "$ref": "#/components/schemas/ApprovalReason"
+            "$ref": "#/components/schemas/DelegableReason"
           },
           "granted_by_user_id": {
             "anyOf": [

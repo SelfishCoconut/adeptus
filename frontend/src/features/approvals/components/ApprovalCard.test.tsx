@@ -210,6 +210,22 @@ describe('ApprovalCard — always allow (standing autonomy)', () => {
     expect(mockPost.mock.calls[1][0]).toContain('/approve')
   })
 
+  it('approves the current request even when the grant 409s (already delegated)', async () => {
+    mockPost
+      .mockResolvedValueOnce({ error: { detail: 'already active' }, response: { status: 409 } } as never)
+      .mockResolvedValueOnce({
+        data: request({ status: 'approved', acted_by_username: 'me', self_approved: true }),
+      } as never)
+    renderCard(<ApprovalCard engagementId={ENG} request={request({ reasons: ['credential_attack'] })} />)
+    await userEvent.click(screen.getByTestId('always-allow-credential_attack'))
+    await waitFor(() =>
+      expect(screen.getByTestId('approval-decision')).toHaveTextContent('Approved by @me'),
+    )
+    // The conflict is not surfaced as a failure — the category is already covered.
+    expect(screen.queryByTestId('grant-error')).not.toBeInTheDocument()
+    expect(mockPost.mock.calls[1][0]).toContain('/approve')
+  })
+
   it('out_of_scope requires an explicit louder confirm before granting', async () => {
     mockPost
       .mockResolvedValueOnce({ data: { id: 'g1', reason: 'out_of_scope' } } as never)

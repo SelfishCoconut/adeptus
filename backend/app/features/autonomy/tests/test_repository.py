@@ -51,6 +51,25 @@ async def test_get_active_reasons_returns_only_active(db_session: AsyncSession) 
     assert await repo.get_active_reasons(db_session, engagement_id=eng) == {"aggressive_scan"}
 
 
+async def test_get_active_grant_map_maps_reason_to_grant_id(db_session: AsyncSession) -> None:
+    eng, user = uuid4(), uuid4()
+    g1 = await repo.create_grant(
+        db_session, engagement_id=eng, reason="aggressive_scan", granted_by_user_id=user
+    )
+    g2 = await repo.create_grant(
+        db_session, engagement_id=eng, reason="out_of_scope", granted_by_user_id=user
+    )
+    await db_session.commit()
+    grant_map = await repo.get_active_grant_map(db_session, engagement_id=eng)
+    assert grant_map == {"aggressive_scan": _uid(g1.id), "out_of_scope": _uid(g2.id)}
+    # A revoke drops the reason from the map (used per-turn to trace the covering grant).
+    await repo.revoke(db_session, engagement_id=eng, grant_id=_uid(g2.id), revoked_by_user_id=user)
+    await db_session.commit()
+    assert await repo.get_active_grant_map(db_session, engagement_id=eng) == {
+        "aggressive_scan": _uid(g1.id)
+    }
+
+
 async def test_get_active_reasons_scoped_to_engagement(db_session: AsyncSession) -> None:
     eng_a, eng_b, user = uuid4(), uuid4(), uuid4()
     await repo.create_grant(
